@@ -15,7 +15,7 @@ main controller for multipath navigation (Left/Center/Right).
    - Stay on the current path when there is no disturbance from wind or waves.
    - If cross-track error (CTE) and directional drift persist, move to an adjacent path with the disturbance.
    - If pushed toward the outer wall on the left/right path, block path changes and strengthen recovery steering.
-   - Throttle: CTE and heading each map error->blend (max..cruise) linearly; use min(blend_cte, blend_hdg).
+   - Throttle: ESC max when |CTE| and |heading error| are both within thresholds; otherwise cruise.
    - After crossing the finish line at the final waypoint (#65), or entering its radius, stop in neutral and return to MANUAL.
 4. National Geographic Information Institute (NGII) RTK corrections (NTRIP):
    a built-in background client sends $GNGGA sentences and injects RTCM3 corrections.
@@ -89,11 +89,9 @@ NAV_PARAMS = {
     "min_heading_move_m": 0.25,       # Minimum movement to update GPS heading, filtering stationary noise (m)
     "sog_cog_blend_mps": 0.45,        # Minimum speed at which to trust $GNRMC course over ground (m/s)
 
-    # Adaptive throttle: linear blend from ESC max -> cruise, then take min(CTE, heading)
-    "full_throttle_cte_m": 0.05,         # |CTE| <= this (m) -> max throttle on CTE axis
-    "cruise_throttle_cte_m": 0.35,       # |CTE| >= this (m) -> cruise throttle on CTE axis
-    "full_throttle_heading_deg": 5.0,    # |heading err| <= this (deg) -> max throttle on heading axis
-    "cruise_throttle_heading_deg": 12.0  # |heading err| >= this (deg) -> cruise throttle on heading axis
+    # Adaptive throttle: both axes must be within threshold for ESC max (else cruise)
+    "full_throttle_cte_m": 0.30,         # |CTE| <= this (m) allows max throttle
+    "full_throttle_heading_deg": 11.0    # |heading err| <= this (deg) allows max throttle
 }
 
 DEFAULT_CALIBRATION_FILE = "calibration.json"
@@ -111,20 +109,6 @@ FIX_QUALITY_NAMES = {
     4: "RTK FIX (Precise)",
     5: "RTK FLOAT"
 }
-
-
-def throttle_blend_from_error(abs_error, full_err, cruise_err):
-    """
-    Map |error| to a throttle blend in [0, 1]:
-      <= full_err   -> 1.0 (ESC max)
-      >= cruise_err -> 0.0 (cruise)
-      otherwise     -> linear between max and cruise
-    """
-    if abs_error <= full_err:
-        return 1.0
-    if abs_error >= cruise_err:
-        return 0.0
-    return (cruise_err - abs_error) / (cruise_err - full_err)
 
 
 def wrap_180(angle_deg):
@@ -877,21 +861,12 @@ class MultipathNavigator:
         steer_norm = max(-1.0, min(1.0, self.prev_steer_norm + delta))
         self.prev_steer_norm = steer_norm
 
-        # Adaptive throttle: CTE blend and heading blend, then take the more conservative min.
-        blend_cte = throttle_blend_from_error(
-            abs(cte_right_m),
-            self.params["full_throttle_cte_m"],
-            self.params["cruise_throttle_cte_m"],
-        )
-        if heading_err is None:
-            blend_hdg = 0.0
-        else:
-            blend_hdg = throttle_blend_from_error(
-                abs(heading_err),
-                self.params["full_throttle_heading_deg"],
-                self.params["cruise_throttle_heading_deg"],
-            )
-        throttle_blend = min(blend_cte, blend_hdg)
+        # Full ESC only when both CTE and heading are within their thresholds.
+        throttle_blend = 1.0 if (
+            heading_err is not None
+            and abs(cte_right_m) <= self.params["full_throttle_cte_m"]
+            and abs(heading_err) <= self.params["full_throttle_heading_deg"]
+        ) else 0.0
 
         return {
             "finished": False,
@@ -1028,11 +1003,9 @@ def main():
     print("\n=====================================================================")
     print("  Haesucheon multipath autonomous navigation started (initial mode: MANUAL)")
     print(
-        f"  - AUTO throttle  : cruise {int(pwm_cfg['auto_throttle_ratio']*100)}% ({auto_cruise_us} us) .. "
-        f"full {pwm_cfg['esc_fwd_max_us']} us; "
-        f"CTE [{NAV_PARAMS['full_throttle_cte_m']:.2f},{NAV_PARAMS['cruise_throttle_cte_m']:.2f}]m, "
-        f"hdg [{NAV_PARAMS['full_throttle_heading_deg']:.0f},{NAV_PARAMS['cruise_throttle_heading_deg']:.0f}]deg; "
-        f"min(blend_cte, blend_hdg)"
+        f"  - AUTO throttle  : cruise {int(pwm_cfg['auto_throttle_ratio']*100)}% ({auto_cruise_us} us); "
+        f"full {pwm_cfg['esc_fwd_max_us']} us when |CTE|<={NAV_PARAMS['full_throttle_cte_m']:.2f}m "
+        f"and |hdg err|<={NAV_PARAMS['full_throttle_heading_deg']:.0f}deg"
     )
     print("  - MANUAL -> AUTO : Hold neutral throttle + right steering for 2.0 seconds (then transmitter steering is ignored)")
     print("  - AUTO -> MANUAL : Apply full reverse throttle to return to MANUAL immediately")
