@@ -214,27 +214,37 @@ def simulate_auto_once(args, model, env, cal, nav_cls, seed, log_path=None, init
     nav_info = None
     t = 0.0
     finished = False
+    finish_t = None          # When AUTO declared the course complete (motor to neutral, MANUAL)
+    line_t = None            # When the true boat crossed the finish line (race time), coasting included
+    c_pts = nav.enu_paths["center"]
+    fin_ux, fin_uy = c_pts[-1][0] - c_pts[-2][0], c_pts[-1][1] - c_pts[-2][1]
+    fin_norm = math.hypot(fin_ux, fin_uy)
+    fin_ux, fin_uy = fin_ux / fin_norm, fin_uy / fin_norm
     n_steps = int(args.max_time / DT)
     for _ in range(n_steps):
         # Controller sees the latest GPS fix (5 Hz), like the real main loop at 20 Hz.
         lat, lon = gps.latlon()
-        nav_info = nav.update(lat, lon, gps.heading_deg, now_mono=t)
-        if nav_info["finished"]:
+        if finish_t is None:
+            nav_info = nav.update(lat, lon, gps.heading_deg, now_mono=t)
+            if nav_info["finished"]:
+                finished, finish_t = True, t
+        if finished:
             servo_us, esc_us = pwm["servo_center_us"], pwm["esc_neutral_us"]
-            finished = True
         else:
             servo_us = mb.map_norm_to_pwm(nav_info["steer_norm"], pwm["servo_center_us"], pwm["servo_left_us"], pwm["servo_right_us"])
             blend = max(0.0, min(1.0, nav_info.get("throttle_blend", 0.0)))
             esc_us = int(round(cruise_us + blend * (pwm["esc_fwd_max_us"] - cruise_us)))
 
-        rows.append([f"{t:.3f}", "AUTO", nav_info["active_lane"], nav_info["wp_number"], 4,
-                     f"{lat:.8f}", f"{lon:.8f}", f"{nav_info['cte_right_m']:.3f}",
-                     f"{gps.heading_deg:.1f}" if gps.heading_deg is not None else "",
-                     f"{nav_info['target_bearing_deg']:.1f}", servo_us, esc_us,
-                     f"{state[0]:.3f}", f"{state[1]:.3f}", int(nav_info["shifted_to"] is not None),
-                     int(nav_info["boundary_guard"])])
-        if finished:
-            break
+        if finish_t is not None and t > finish_t:
+            if line_t is not None or t > finish_t + 15.0:
+                break
+        else:
+            rows.append([f"{t:.3f}", "AUTO", nav_info["active_lane"], nav_info["wp_number"], 4,
+                         f"{lat:.8f}", f"{lon:.8f}", f"{nav_info['cte_right_m']:.3f}",
+                         f"{gps.heading_deg:.1f}" if gps.heading_deg is not None else "",
+                         f"{nav_info['target_bearing_deg']:.1f}", servo_us, esc_us,
+                         f"{state[0]:.3f}", f"{state[1]:.3f}", int(nav_info["shifted_to"] is not None),
+                         int(nav_info["boundary_guard"])])
 
         # Actuator delay, plant step, gust disturbance.
         servo_hist.append(servo_us)
@@ -244,6 +254,8 @@ def simulate_auto_once(args, model, env, cal, nav_cls, seed, log_path=None, init
         gust += -gust / GUST_TAU_SEC * DT + gust_sigma * math.sqrt(2.0 * DT / GUST_TAU_SEC) * rng.standard_normal()
         state = (state[0], state[1], state[2] + gust * DT, state[3], state[4])
         t += DT
+        if line_t is None and (state[0] - c_pts[-1][0]) * fin_ux + (state[1] - c_pts[-1][1]) * fin_uy >= 0.0:
+            line_t = t
 
         vx = state[3] * math.sin(state[2]) + drift[0]
         vy = state[3] * math.cos(state[2]) + drift[1]
@@ -261,8 +273,9 @@ def simulate_auto_once(args, model, env, cal, nav_cls, seed, log_path=None, init
     arr = np.array([[float(r[12]), float(r[13]), float(r[7]), float(r[10])] for r in rows])
     lanes = [r[2] for r in rows]
     return {
-        "finished": finished,
-        "time_s": t,
+        "finished": finished and line_t is not None,
+        "time_s": line_t if line_t is not None else t,     # Finish-line crossing (race time)
+        "auto_end_s": finish_t,
         "true_xy": arr[:, :2],
         "cte": arr[:, 2],
         "servo": arr[:, 3],

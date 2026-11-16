@@ -106,6 +106,39 @@ class DopplerHeadingTest(unittest.TestCase):
         self.assertNotAlmostEqual(h, 243.0, places=1)
 
 
+class FinishLineTest(unittest.TestCase):
+    """AUTO must keep driving until the boat is finish_overrun_m past the line through waypoint #65."""
+
+    def point(self, nav, s_from_end):
+        import math
+        a, b = nav.enu_paths["center"][-2], nav.enu_paths["center"][-1]
+        ux, uy = b[0] - a[0], b[1] - a[1]
+        n = math.hypot(ux, uy)
+        x, y = b[0] + ux / n * s_from_end, b[1] + uy / n * s_from_end
+        lat = nav.ref_lat + math.degrees(y / mb.EARTH_RADIUS_M)
+        lon = nav.ref_lon + math.degrees(x / (mb.EARTH_RADIUS_M * math.cos(math.radians(nav.ref_lat))))
+        return lat, lon
+
+    def finished_at(self, s_from_end):
+        paths = {lane: mb.load_waypoints_csv(os.path.join(os.path.dirname(__file__), "..", p))
+                 for lane, p in mb.PATH_FILES.items()}
+        nav = mb.MultipathNavigator(paths, mb.NAV_PARAMS)
+        lat, lon = self.point(nav, -10.0)
+        nav.enter_auto_mode(lat, lon, now_mono=0.0)
+        info = None
+        for k, s in enumerate((-8.0, -6.0, -4.0, -2.0, s_from_end)):
+            lat, lon = self.point(nav, s)
+            info = nav.update(lat, lon, 240.6, now_mono=0.1 * (k + 1))
+        return info["finished"]
+
+    def test_does_not_stop_before_the_line(self):
+        self.assertFalse(self.finished_at(-1.5))     # The old 1.8 m radius stopped here
+        self.assertFalse(self.finished_at(0.5))
+
+    def test_stops_after_overrun(self):
+        self.assertTrue(self.finished_at(mb.NAV_PARAMS["finish_overrun_m"] + 0.2))
+
+
 class NtripStallWatchdogTest(unittest.TestCase):
     def test_reconnects_when_stream_stalls(self):
         srv = socket.socket()

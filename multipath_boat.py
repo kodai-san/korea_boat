@@ -97,7 +97,11 @@ NAV_PARAMS = {
     "lookahead_dist_m": 3.5,          # Default lookahead distance (m), about 2.5 times the 1.44 m waypoint spacing
     "boundary_lookahead_m": 2.4,      # Shorter recovery lookahead when pushed toward a wall on an outer path (m)
     "wp_reach_radius_m": 1.8,         # Waypoint arrival radius (m)
-    "finish_radius_m": 1.8,           # Arrival radius at the final waypoint (#65) (m)
+    # Finish: stop only after crossing the line through the final waypoint (#65), perpendicular to the path,
+    # by finish_overrun_m. The old 1.8 m arrival radius cut the motor 1.7 m early in the 2026-11-16 17:27 AUTO
+    # run; the boat coasted over the line ~2 s later than at full speed. Set finish_radius_m > 0 to restore it.
+    "finish_radius_m": 0.0,           # Arrival radius at the final waypoint (m); 0 = line crossing only
+    "finish_overrun_m": 1.0,          # Keep driving this far past the finish line before neutral (m)
 
     # Disturbance detection and path change thresholds (based on 1.50 m lane spacing)
     "shift_cte_m": 0.70,              # Detect a potential disturbance at 0.70 m or more to either side of the path
@@ -911,7 +915,7 @@ class MultipathNavigator:
         p_last = pts[-1]
 
         dist_to_last = math.hypot(boat_x - p_last[0], boat_y - p_last[1])
-        if dist_to_last <= self.params["finish_radius_m"]:
+        if self.params["finish_radius_m"] > 0 and dist_to_last <= self.params["finish_radius_m"]:
             return True
 
         # In the final 25% of the path, use a dot product to check whether the finish line was crossed.
@@ -924,7 +928,7 @@ class MultipathNavigator:
                 uy /= ulen
                 along_past_end = (boat_x - p_last[0]) * ux + (boat_y - p_last[1]) * uy
                 lateral_dist = abs((boat_x - p_last[0]) * uy - (boat_y - p_last[1]) * ux)
-                if along_past_end >= 0.0 and lateral_dist <= 10.0:
+                if along_past_end >= self.params.get("finish_overrun_m", 0.0) and lateral_dist <= 10.0:
                     return True
         return False
 
