@@ -1,0 +1,8 @@
+2026-11-16T06:39:46 UTC INFO [LOG] Started recording diagnostic events: logs/multipath_events_20261116_153946.log
+2026-11-16T06:39:51 UTC INFO [NTRIP] Connection attempt 1: rts2.ngii.go.kr:2101/VRS-RTCM32
+2026-11-16T06:39:51 UTC INFO [GPS STATE] fix_quality=0 (No Fix), valid=False, age=999.000s
+2026-11-16T06:39:51 UTC INFO [DIAGNOSTICS] mode=MANUAL, fix_quality=0, {'gps_valid': 0, 'gps_age_sec': 999.0, 'ntrip_connected': 0, 'ntrip_status': 'connecting', 'ntrip_connection_attempts': 1, 'ntrip_last_response': '', 'ntrip_last_error': '', 'rtcm_bytes_rx': 0, 'rtcm_rx_age_sec': '', 'ntrip_gga_sent': 0, 'rtcm_bytes_written': 0, 'rtcm_write_errors': 0, 'rtcm_last_write_error': ''}
+2026-11-16T06:39:59 UTC WARNING [NTRIP RECONNECT PENDING] timeout: timed out
+2026-11-16T06:40:01 UTC INFO [DIAGNOSTICS] mode=MANUAL, fix_quality=0, {'gps_valid': 0, 'gps_age_sec': 999.0, 'ntrip_connected': 0, 'ntrip_status': 'error', 'ntrip_connection_attempts': 1, 'ntrip_last_response': '', 'ntrip_last_error': 'timed out', 'rtcm_bytes_rx': 0, 'rtcm_rx_age_sec': '', 'ntrip_gga_sent': 0, 'rtcm_bytes_written': 0, 'rtcm_write_errors': 0, 'rtcm_last_write_error': ''}
+2026-11-16T06:40:02 UTC INFO [NTRIP STOP] {'connected': False, 'status': 'stopping', 'connection_attempts': 1, 'last_response': '', 'last_error': 'timed out', 'rtcm_bytes_rx': 0, 'rtcm_rx_age_sec': None, 'gga_sent': 0}
+2026-11-16T06:40:02 UTC INFO [SESSION END]
