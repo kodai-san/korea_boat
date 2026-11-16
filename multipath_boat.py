@@ -18,6 +18,8 @@ main controller for multipath navigation (Left/Center/Right).
    - After crossing the finish line at the final waypoint (#65), or entering its radius, stop in neutral and return to MANUAL.
 4. National Geographic Information Institute (NGII) RTK corrections (NTRIP):
    a built-in background client sends $GNGGA sentences and injects RTCM3 corrections.
+5. ArbaLabs Spresense USB output: a separate worker sends the latest GPS sample
+   every 5 seconds at 115200 8N1. See SPRESENSE_USB.md for device selection.
 
 [Session diagnostics]
 - logs/multipath_log_<session>.csv: telemetry plus GPS validity/age, NTRIP connection
@@ -45,6 +47,10 @@ import socket
 import sys
 import threading
 import time
+
+from spresense_stream import (
+    SpresenseGPSStreamer, reserved_spresense_ports, same_serial_port,
+)
 
 try:
     import serial
@@ -229,12 +235,18 @@ class PCA9685Driver:
             self.bus = None
 
 
-def detect_serial_ports(arduino_pref="auto", gps_pref="auto", force_manual=False):
+def detect_serial_ports(arduino_pref="auto", gps_pref="auto", force_manual=False,
+                        excluded_ports=()):
     """
     Match ports by manufacturer/VID (u-blox 0x1546 versus Arduino) first,
     even if a change in USB connection order swaps ttyACM0 and ttyACM1.
     """
+    def allowed(port):
+        return not any(same_serial_port(port, reserved) for reserved in excluded_ports)
+
     if force_manual:
+        if not allowed(arduino_pref) or not allowed(gps_pref):
+            raise ValueError("Spresense USB output must use a different port from Arduino and GPS")
         return arduino_pref, gps_pref
 
     ard_port = None
@@ -244,6 +256,8 @@ def detect_serial_ports(arduino_pref="auto", gps_pref="auto", force_manual=False
         ports = list(list_ports.comports())
         port_map = {}
         for p in ports:
+            if not allowed(p.device):
+                continue
             desc = f"{p.manufacturer or ''} {p.description or ''} {p.hwid or ''}".lower()
             is_ublox = (p.vid == 0x1546) or ("u-blox" in desc) or ("ublox" in desc)
             is_ard = (not is_ublox) and (
@@ -274,12 +288,12 @@ def detect_serial_ports(arduino_pref="auto", gps_pref="auto", force_manual=False
                     break
 
         # Fall back to the configured GPS port for boards not identified by VID.
-        if gps_port is None and gps_pref and gps_pref != "auto" and os.path.exists(gps_pref) and gps_pref != ard_port:
+        if gps_port is None and gps_pref and gps_pref != "auto" and allowed(gps_pref) and os.path.exists(gps_pref) and gps_pref != ard_port:
             gps_port = gps_pref
 
-    if ard_port is None and arduino_pref and arduino_pref != "auto" and os.path.exists(arduino_pref):
+    if ard_port is None and arduino_pref and arduino_pref != "auto" and allowed(arduino_pref) and os.path.exists(arduino_pref):
         ard_port = arduino_pref
-    if gps_port is None and gps_pref and gps_pref != "auto" and os.path.exists(gps_pref):
+    if gps_port is None and gps_pref and gps_pref != "auto" and allowed(gps_pref) and os.path.exists(gps_pref):
         gps_port = gps_pref
 
     return ard_port, gps_port
@@ -403,6 +417,9 @@ class ZEDF9PReceiver:
         self.diff_age_sec = None          # Age of the RTK/DGPS corrections in use (GGA field 13)
         self.gps_utc = ""                 # GPS UTC time of the latest GGA (hhmmss.ss)
         self.latest_gga_raw = None
+        # Export observations separately: navigation retains last known coordinates
+        # after a no-fix GGA, which must not be mixed into the new USB sample.
+        self.latest_gps_sample = None
         self.last_fix_time = 0.0
         self.rtcm_bytes_written = 0
         self.rtcm_write_errors = 0
@@ -485,6 +502,14 @@ class ZEDF9PReceiver:
                     diff_age = parse_float_or_none(fields[13]) if len(fields) > 13 else None
 
                     with self.state_lock:
+                        self.latest_gps_sample = {
+                            "timestamp": fields[1],  # Original GGA UTC time, never USB send time.
+                            "fix_quality": qual,
+                            "latitude": lat,
+                            "longitude": lon,
+                            "num_sats": sats,
+                            "hdop": hdop if fields[8] else None,
+                        }
                         self.fix_quality = qual
                         self.num_sats = sats
                         self.hdop = hdop
@@ -515,6 +540,11 @@ class ZEDF9PReceiver:
             self._anchor_lat = self.lat
             self._anchor_lon = self.lon
             self.heading_deg = None
+
+    def get_latest_gps_sample(self):
+        """Copy one complete GGA observation; callers do I/O after releasing the lock."""
+        with self.state_lock:
+            return dict(self.latest_gps_sample) if self.latest_gps_sample is not None else None
 
     def get_snapshot(self):
         with self.state_lock:
@@ -631,6 +661,7 @@ class NGII_NtripClient:
 
         while self.running:
             sock = None
+            phase = "tcp_connect"
             try:
                 with self.state_lock:
                     self.connection_attempts += 1
@@ -639,6 +670,10 @@ class NGII_NtripClient:
                     self.last_response = ""
                 log_event(f"[NTRIP] Connection attempt {attempt}: {host}:{port}/{mp}")
                 sock = socket.create_connection((host, port), timeout=8.0)
+                with self.state_lock:
+                    self.status = "sending_request"
+                log_event("[NTRIP] TCP connected; sending mountpoint request")
+                phase = "request_send"
                 req = (
                     f"GET /{mp} HTTP/1.0\r\n"
                     f"Host: {host}:{port}\r\n"
@@ -648,6 +683,9 @@ class NGII_NtripClient:
                     f"Connection: close\r\n\r\n"
                 )
                 sock.sendall(req.encode("ascii"))
+                phase = "response_wait"
+                with self.state_lock:
+                    self.status = "awaiting_response"
 
                 # Only save the response status line, never the authorization request.
                 first_line, accepted, pending_data = self._read_response(sock)
@@ -665,6 +703,7 @@ class NGII_NtripClient:
                     self.connected = True
                     self.status = "connected"
                     self.last_error = ""
+                phase = "correction_stream"
                 log_event(f"[NTRIP] Connected to NGII ({host}:{port}/{mp})! Response: {first_line}")
                 sock.settimeout(2.0)
                 last_gga_sent = 0.0
@@ -700,8 +739,8 @@ class NGII_NtripClient:
                 with self.state_lock:
                     self.connected = False
                     self.status = "error"
-                    self.last_error = str(exc)
-                log_event(f"[NTRIP RECONNECT PENDING] {type(exc).__name__}: {exc}", logging.WARNING)
+                    self.last_error = f"{phase}: {exc}"
+                log_event(f"[NTRIP RECONNECT PENDING] phase={phase}, {type(exc).__name__}: {exc}", logging.WARNING)
                 time.sleep(5.0)
             finally:
                 with self.state_lock:
@@ -1089,6 +1128,11 @@ def main(session_stamp=None):
     parser.add_argument("--config", default=DEFAULT_CALIBRATION_FILE, help="Path to calibration.json")
     parser.add_argument("--arduino-port", default=None, help="Manually override the Arduino port")
     parser.add_argument("--gps-port", default=None, help="Manually override the ZED-F9P GPS port")
+    parser.add_argument("--spresense-port", default=None,
+                        help="Spresense USB port (prefer /dev/serial/by-id/...); default: auto")
+    parser.add_argument("--spresense-serial-number", default=None,
+                        help="USB serial number identifying the Spresense, including generic CP210x bridges")
+    parser.add_argument("--no-spresense", action="store_true", help="Disable the ArbaLabs GPS USB stream")
     parser.add_argument("--throttle-ratio", type=float, default=None, help="Override the AUTO throttle ratio (e.g., 0.60, 0.70)")
     args = parser.parse_args()
 
@@ -1101,6 +1145,8 @@ def main(session_stamp=None):
     rc_cfg = cal["rc"]
     pwm_cfg = cal["pwm"]
     ms_cfg = cal["mode_switch"]
+    spresense_port = args.spresense_port or hw.get("spresense_port", "auto")
+    spresense_serial = args.spresense_serial_number or hw.get("spresense_serial_number")
 
     if args.throttle_ratio is not None:
         pwm_cfg["auto_throttle_ratio"] = max(0.20, min(1.00, args.throttle_ratio))
@@ -1134,11 +1180,34 @@ def main(session_stamp=None):
     ard_pref = args.arduino_port or hw.get("arduino_port", "auto")
     gps_pref = args.gps_port or hw.get("gps_port", "auto")
     force_manual = (args.arduino_port is not None) and (args.gps_port is not None)
-    ard_port, gps_port = detect_serial_ports(ard_pref, gps_pref, force_manual=force_manual)
+    reserved_ports = ()
+    if not args.no_spresense:
+        reserved_ports = reserved_spresense_ports(spresense_port, spresense_serial)
+        # Stock Spresense main boards may advertise only their generic CP210x
+        # bridge. Do not let the broad Arduino fallback claim these unidentified
+        # ports. A real CP210x-based RC board can be selected explicitly.
+        if list_ports is not None:
+            unidentified_bridges = tuple(
+                p.device for p in list_ports.comports()
+                if p.vid == 0x10C4
+                and not (args.arduino_port and same_serial_port(p.device, args.arduino_port))
+                and not (args.gps_port and same_serial_port(p.device, args.gps_port))
+            )
+            reserved_ports += unidentified_bridges
+    try:
+        for override in (args.arduino_port, args.gps_port):
+            if override and any(same_serial_port(override, port) for port in reserved_ports):
+                raise ValueError("Spresense USB output must use a different port from Arduino and GPS")
+        ard_port, gps_port = detect_serial_ports(
+            ard_pref, gps_pref, force_manual=force_manual, excluded_ports=reserved_ports)
+    except Exception:
+        pca.close()
+        raise
 
     if not ard_port:
         pca.close()
-        raise RuntimeError("Arduino serial port not found. Check the USB connection.")
+        raise RuntimeError("Arduino serial port not found. Check the USB connection; "
+                           "select a generic CP210x RC board with --arduino-port.")
     if not gps_port:
         pca.close()
         raise RuntimeError("ZED-F9P GPS serial port not found. Check the USB connection.")
@@ -1146,6 +1215,9 @@ def main(session_stamp=None):
     rc = ArduinoRCReader(ard_port, hw.get("arduino_baud", 115200))
     gps = ZEDF9PReceiver(gps_port, hw.get("gps_baud", 115200))
     ntrip = NGII_NtripClient(NTRIP_CONFIG, gps)
+    spresense = None if args.no_spresense else SpresenseGPSStreamer(
+        gps.get_latest_gps_sample, port=spresense_port, serial_number=spresense_serial,
+        excluded_ports=(ard_port, gps_port), logger=log_event)
     log_file, log_writer = open_telemetry_log(session_stamp)
 
     running = True
@@ -1156,10 +1228,6 @@ def main(session_stamp=None):
 
     signal.signal(signal.SIGINT, shutdown_handler)
     signal.signal(signal.SIGTERM, shutdown_handler)
-
-    rc.start()
-    gps.start()
-    ntrip.start()
 
     mode = "MANUAL"
     right_steer_hold_start = None
@@ -1209,6 +1277,11 @@ def main(session_stamp=None):
         return diagnostics
 
     try:
+        rc.start()
+        gps.start()
+        ntrip.start()
+        if spresense is not None:
+            spresense.start()
         while running:
             loop_t0 = time.monotonic()
 
@@ -1417,6 +1490,8 @@ def main(session_stamp=None):
             pca.close()
         except Exception:
             pass
+        if spresense is not None:
+            spresense.stop()
         ntrip.stop()
         gps.stop()
         rc.stop()
