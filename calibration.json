@@ -33,5 +33,12 @@
     "right_steer_ratio_threshold": 0.75,
     "right_steer_hold_sec": 2.0,
     "full_reverse_ratio_threshold": 0.75
+  },
+  "autonomous": {
+    "strategy": "adaptive_throttle",
+    "adaptive_throttle": {
+      "full_throttle_cte_m": 0.30,
+      "full_throttle_heading_deg": 11.0
+    }
   }
 }

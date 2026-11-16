@@ -21,6 +21,8 @@ import sys
 import threading
 import time
 
+from auto_strategies import default_autonomous_config
+
 try:
     import serial
     from serial.tools import list_ports
@@ -72,7 +74,8 @@ def default_calibration():
             "right_steer_ratio_threshold": 0.75,
             "right_steer_hold_sec": 2.0,
             "full_reverse_ratio_threshold": 0.75
-        }
+        },
+        "autonomous": default_autonomous_config()
     }
 
 
@@ -435,7 +438,7 @@ def calibrate_esc_wizard(pca, cfg):
     print("  set_neutral: save the current value as 'ESC neutral (stop)'")
     print("  set_fwd    : save the current value as 'manual full forward'")
     print("  set_rev    : save the current value as 'manual full reverse'")
-    print("  ratio      : change the automatic-mode throttle ratio (default 0.60 = 60%) and preview forward PWM")
+    print("  ratio      : change AUTO cruise throttle (default 0.60 = 60%); adaptive AUTO can still use full power")
     print("  q          : stop at neutral and exit to the menu\n")
 
     while True:
