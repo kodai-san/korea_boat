@@ -886,7 +886,9 @@ def open_telemetry_log():
         writer.writerow([
             "timestamp", "mode", "lane", "wp_no", "fix_quality",
             "latitude", "longitude", "cte_right_m", "boat_heading_deg",
-            "target_bearing_deg", "servo_us", "esc_us"
+            "target_bearing_deg", "servo_us", "esc_us",
+            "rc_ch1_us", "rc_ch2_us", "rc_steer_norm", "rc_throttle_norm",
+            "num_sats", "hdop"
         ])
         print(f"[LOG] Started recording telemetry: {filepath}")
         return f, writer
@@ -1175,7 +1177,13 @@ def main():
                         f"{gps_snap['heading_deg']:.1f}" if gps_snap["heading_deg"] is not None else "",
                         f"{nav_info['target_bearing_deg']:.1f}" if nav_info else "",
                         servo_us,
-                        esc_us
+                        esc_us,
+                        ch1_us,
+                        ch2_us,
+                        st_norm,
+                        th_norm,
+                        gps_snap["num_sats"],
+                        gps_snap["hdop"]
                     ])
                 except OSError:
                     log_writer = None
