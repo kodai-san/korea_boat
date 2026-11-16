@@ -111,7 +111,8 @@ GPS_NTRIP_FIELDS = (
     "gps_valid", "gps_age_sec", "ntrip_connected", "ntrip_status",
     "ntrip_connection_attempts", "ntrip_last_response", "ntrip_last_error",
     "rtcm_bytes_rx", "rtcm_rx_age_sec", "ntrip_gga_sent",
-    "rtcm_bytes_written", "rtcm_write_errors", "rtcm_last_write_error"
+    "rtcm_bytes_written", "rtcm_write_errors", "rtcm_last_write_error",
+    "gps_sog_mps", "gps_cog_deg", "gps_diff_age_sec", "gps_alt_m", "gps_utc"
 )
 
 
@@ -356,6 +357,13 @@ def parse_nmea_latlon(coord_str, hemi):
     return val
 
 
+def parse_float_or_none(text):
+    try:
+        return float(text) if text else None
+    except ValueError:
+        return None
+
+
 def verify_nmea_checksum(sentence):
     """Validate an NMEA 0183 checksum (*XX)."""
     if not sentence.startswith("$") or "*" not in sentence:
@@ -391,6 +399,9 @@ class ZEDF9PReceiver:
         self.hdop = 99.9
         self.sog_mps = 0.0
         self.cog_deg = None
+        self.alt_m = None
+        self.diff_age_sec = None          # Age of the RTK/DGPS corrections in use (GGA field 13)
+        self.gps_utc = ""                 # GPS UTC time of the latest GGA (hhmmss.ss)
         self.latest_gga_raw = None
         self.last_fix_time = 0.0
         self.rtcm_bytes_written = 0
@@ -469,11 +480,17 @@ class ZEDF9PReceiver:
                     hdop = float(fields[8]) if fields[8] else 99.9
                     lat = parse_nmea_latlon(fields[2], fields[3]) if qual > 0 else None
                     lon = parse_nmea_latlon(fields[4], fields[5]) if qual > 0 else None
+                    # Logging-only fields: never let a malformed value discard the position fix.
+                    alt = parse_float_or_none(fields[9])
+                    diff_age = parse_float_or_none(fields[13]) if len(fields) > 13 else None
 
                     with self.state_lock:
                         self.fix_quality = qual
                         self.num_sats = sats
                         self.hdop = hdop
+                        self.alt_m = alt
+                        self.diff_age_sec = diff_age
+                        self.gps_utc = fields[1]
                         if qual > 0 and lat is not None and lon is not None:
                             self.lat = lat
                             self.lon = lon
@@ -511,6 +528,10 @@ class ZEDF9PReceiver:
                 "num_sats": self.num_sats,
                 "hdop": self.hdop,
                 "sog_mps": self.sog_mps,
+                "cog_deg": self.cog_deg,
+                "alt_m": self.alt_m,
+                "diff_age_sec": self.diff_age_sec,
+                "gps_utc": self.gps_utc,
                 "heading_deg": self.heading_deg,
                 "gga_raw": self.latest_gga_raw,
                 "age_sec": age,
@@ -1029,7 +1050,13 @@ def gps_ntrip_diagnostics(gps_snap, ntrip_snap):
         "ntrip_gga_sent": ntrip_snap["gga_sent"],
         "rtcm_bytes_written": gps_snap["rtcm_bytes_written"],
         "rtcm_write_errors": gps_snap["rtcm_write_errors"],
-        "rtcm_last_write_error": gps_snap["last_rtcm_write_error"]
+        "rtcm_last_write_error": gps_snap["last_rtcm_write_error"],
+        # Receiver Doppler speed/course (RMC), correction age and height/UTC (GGA)
+        "gps_sog_mps": round(gps_snap["sog_mps"], 3),
+        "gps_cog_deg": round(gps_snap["cog_deg"], 2) if gps_snap["cog_deg"] is not None else "",
+        "gps_diff_age_sec": gps_snap["diff_age_sec"] if gps_snap["diff_age_sec"] is not None else "",
+        "gps_alt_m": gps_snap["alt_m"] if gps_snap["alt_m"] is not None else "",
+        "gps_utc": gps_snap["gps_utc"]
     }
 
 
