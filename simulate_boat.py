@@ -475,7 +475,8 @@ def main():
     p_auto.add_argument("--throttle-ratio", type=float, default=None)
     p_auto.add_argument("--runs", type=int, default=5)
     p_auto.add_argument("--seed", type=int, default=0)
-    p_auto.add_argument("--gust", type=float, default=6.0, help="Yaw gust std (deg/s); 6 matches the logged test error")
+    p_auto.add_argument("--gust", type=float, default=3.0,
+                        help="Yaw gust std (deg/s); 3 matched the real 17:27 AUTO run best, 6 is a pessimistic case")
     p_auto.add_argument("--gps-noise", type=float, default=0.02, help="GPS position noise std (m); ~0.02 RTK fix")
     p_auto.add_argument("--gps-bias-walk", type=float, default=0.0, help="GPS bias random walk (m/sqrt(s)), e.g. 0.05 for DGPS")
     p_auto.add_argument("--start-lane", default="center", choices=["left", "center", "right"])
@@ -493,7 +494,7 @@ def main():
     p_val.add_argument("--throttle-ratio", type=float, default=None)
     p_val.add_argument("--runs", type=int, default=10)
     p_val.add_argument("--seed", type=int, default=0)
-    p_val.add_argument("--gust", type=float, default=6.0)
+    p_val.add_argument("--gust", type=float, default=3.0)
     p_val.add_argument("--gps-noise", type=float, default=0.02)
     p_val.add_argument("--gps-bias-walk", type=float, default=0.0)
     add_strategy_args(p_val)
