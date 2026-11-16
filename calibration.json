@@ -1,0 +1,37 @@
+{
+  "hardware": {
+    "arduino_port": "/dev/ttyACM0",
+    "arduino_baud": 115200,
+    "gps_port": "auto",
+    "gps_baud": 115200,
+    "i2c_bus": 0,
+    "pca9685_addr": 64,
+    "pca9685_freq_hz": 50,
+    "servo_channel": 0,
+    "esc_channel": 1
+  },
+  "rc": {
+    "steer_neutral_us": 1495,
+    "steer_left_us": 1997,
+    "steer_right_us": 1001,
+    "steer_deadband_us": 30,
+    "throttle_neutral_us": 1514,
+    "throttle_fwd_us": 1907,
+    "throttle_rev_us": 1112,
+    "throttle_deadband_us": 35
+  },
+  "pwm": {
+    "servo_center_us": 1750,
+    "servo_left_us": 2150,
+    "servo_right_us": 1250,
+    "esc_neutral_us": 1800,
+    "esc_fwd_max_us": 1950,
+    "esc_rev_max_us": 1680,
+    "auto_throttle_ratio": 0.6
+  },
+  "mode_switch": {
+    "right_steer_ratio_threshold": 0.75,
+    "right_steer_hold_sec": 2.0,
+    "full_reverse_ratio_threshold": 0.75
+  }
+}
