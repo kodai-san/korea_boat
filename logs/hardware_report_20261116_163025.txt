@@ -1,0 +1,332 @@
+hardware_check.py - read-only diagnostic (no PCA9685 writes, no GPS configuration changes)
+Detected ports (same logic as multipath_boat.py): Arduino=/dev/ttyACM1 GPS=/dev/ttyACM0
+
+========================================================================
+1. SYSTEM
+========================================================================
+Date (system clock): 2026-11-16T16:29:16.837430
+Model: NVIDIA Jetson Nano Developer Kit
+L4T: # R32 (release), REVISION: 7.1, GCID: 29818004, BOARD: t210ref, EABI: aarch64, DATE: Sat Feb 19 17:05:08 UTC 2022
+Kernel: 4.9.253-tegra  Python: 3.6.9
+pyserial: 3.5  smbus2: ok
+User groups: rims adm tty dialout cdrom sudo audio dip video plugdev i2c lpadmin gdm lightdm sambashare weston-launch gpio
+NTP synchronized: unknown
+Uptime: 761.50 1224.68
+calibration.json ports: arduino=/dev/ttyACM0 gps=auto
+Serial ports:
+  {"device": "/dev/ttyACM1", "vid": "0x2341", "pid": "0x0043", "manufacturer": "Arduino (www.arduino.cc)", "product": null, "serial": "1453230353235121D040", "location": "1-2.4:1.0"}
+  {"device": "/dev/ttyACM0", "vid": "0x1546", "pid": "0x01A9", "manufacturer": "u-blox AG - www.u-blox.com", "product": "u-blox GNSS receiver", "serial": null, "location": "1-2.2:1.0"}
+  by-id: usb-Arduino__www.arduino.cc__0043_1453230353235121D040-if00 -> /dev/ttyACM1
+  by-id: usb-u-blox_AG_-_www.u-blox.com_u-blox_GNSS_receiver-if00 -> /dev/ttyACM0
+Power input (INA3221 monitor, if present):
+Temperatures (sealed hull):
+  AO-therm     32.0 C
+  CPU-therm    22.0 C
+  GPU-therm    22.0 C
+  PLL-therm    20.0 C
+  PMIC-Die     50.0 C
+  thermal-fan-est 22.5 C
+Kernel log: power/USB events (last 20 of 50):
+  [    3.856595] tegra_soctherm 700e2000.soctherm: soctherm: trip temperature -2147483647 forced to -127000
+  [    3.856609] tegra_soctherm 700e2000.soctherm: soctherm: trip temperature -2147483647 forced to -127000
+  [    4.135601] soctherm: OC ALARM 0x00000001
+  [    4.665445] cdc_acm 1-2.2:1.0: ttyACM0: USB ACM device
+  [    4.678337] cdc_acm 1-2.4:1.0: ttyACM1: USB ACM device
+  [    4.678928] usbcore: registered new interface driver cdc_acm
+  [    4.678932] cdc_acm: USB Abstract Control Model driver for USB modems and ISDN adapters
+  [    5.138917] soctherm: OC ALARM 0x00000001
+  [   32.754737] soctherm: OC ALARM 0x00000001
+  [   33.779193] soctherm: OC ALARM 0x00000001
+  [   35.096384] soctherm: OC ALARM 0x00000001
+  [  106.400167] usb 1-2.3: USB disconnect, device number 5
+  [  141.728158] usb 1-2.3: USB disconnect, device number 7
+  [  165.791913] usb 1-2.3: USB disconnect, device number 8
+  [  428.448135] usb 1-2.3: USB disconnect, device number 9
+  [  557.472135] usb 1-2.3: USB disconnect, device number 12
+  [  587.680191] usb 1-2.3: USB disconnect, device number 13
+  [  613.279903] usb 1-2.3: USB disconnect, device number 14
+  [  634.272154] usb 1-2.3: USB disconnect, device number 15
+  [  680.864133] usb 1-2.3: USB disconnect, device number 16
+Free disk space: 103.3 GB
+
+========================================================================
+2. GPS RECEIVER (/dev/ttyACM0 @ 115200 baud)
+========================================================================
+Listening passively for 6 s...
+NMEA sentences per second:
+  $GAGSV     4.1 /s
+  $GBGSV     2.3 /s
+  $GLGSV    19.9 /s
+  $GNGGA     5.0 /s
+  $GNGSA    24.9 /s
+  $GNRMC     5.0 /s
+  $GNTXT     1.0 /s
+  $GNVTG     5.0 /s
+  $GPGSV    24.9 /s
+Bad-checksum NMEA lines: 0
+Distinct GGA epochs: 30 -> fix rate ~5.0 Hz
+GGA fix quality counts: {'2': 30}
+Latitude minute decimals in GGA: [7] (7 = high-precision NMEA on)
+MON-VER: SW='EXT CORE 1.00 (9e1716)' HW='00190000'
+  ext: ROM BASE 0x118B2060
+  ext: FWVER=HPG 1.51
+  ext: PROTVER=27.50
+  ext: MOD=ZED-F9P
+  ext: GPS;GLO;GAL;BDS
+  ext: SBAS;QZSS
+>>> GPS MODULE: ZED-F9P (no IMU)
+Configuration (RAM layer, read with CFG-VALGET):
+  CFG-RATE-MEAS (ms between fixes)               = 200
+  CFG-RATE-NAV (fixes per solution)              = 1
+  CFG-NAVSPG-DYNMODEL                            = 5 (sea)
+  CFG-NMEA-HIGHPREC                              = 1
+  CFG-SFCORE-USE_SF (sensor fusion, F9R only)    = not supported (NAK)
+  CFG-USBOUTPROT-UBX                             = 1
+  CFG-USBOUTPROT-NMEA                            = 1
+  CFG-USBINPROT-RTCM3X                           = 1
+  CFG-UART1-BAUDRATE                             = 38400
+  CFG-UART1OUTPROT-UBX                           = 1
+  CFG-UART1OUTPROT-NMEA                          = no reply
+  CFG-UART1INPROT-RTCM3X                         = 1
+NAV-PVT samples (polled):
+  {"fixType": 3, "fixType_name": "3D", "carrSoln": "none", "numSV": 9, "hAcc_m": 10.762, "vAcc_m": 5.405, "velN_mps": 0.017, "velE_mps": -0.009, "velD_mps": 0.014, "gSpeed_mps": 0.02, "sAcc_mps": 0.267, "headMot_deg": 83.55014000000001, "headAcc_deg": 180.00000000000003, "headVehValid": false, "headVeh_deg": 0.0, "system_clock_minus_gps_s": -0.015}
+  {"fixType": 3, "fixType_name": "3D", "carrSoln": "none", "numSV": 9, "hAcc_m": 10.781, "vAcc_m": 5.413, "velN_mps": 0.012, "velE_mps": -0.009, "velD_mps": 0.011, "gSpeed_mps": 0.015, "sAcc_mps": 0.293, "headMot_deg": 83.55014000000001, "headAcc_deg": 180.00000000000003, "headVehValid": false, "headVeh_deg": 0.0, "system_clock_minus_gps_s": -0.014}
+  {"fixType": 3, "fixType_name": "3D", "carrSoln": "none", "numSV": 9, "hAcc_m": 10.801, "vAcc_m": 5.421, "velN_mps": 0.022, "velE_mps": -0.004, "velD_mps": 0.011, "gSpeed_mps": 0.022, "sAcc_mps": 0.255, "headMot_deg": 83.55014000000001, "headAcc_deg": 180.00000000000003, "headVehValid": false, "headVeh_deg": 0.0, "system_clock_minus_gps_s": -0.014}
+ESF-STATUS: no reply (None) -> no sensor fusion / IMU (expected on a ZED-F9P)
+ESF-INS: no reply (None)
+NAV-ATT: no reply (None)
+
+========================================================================
+3. JETSON UART PORTS (passive listen, to see if the GPS is wired by UART too)
+========================================================================
+  /dev/ttyTHS1     cannot open ([Errno 13] could not open port /dev/ttyTHS1: [Errno 13] Permission denied: '/dev/ttyTHS1')
+  /dev/ttyTHS2     nothing
+
+========================================================================
+4. ARDUINO RC READER (/dev/ttyACM1 @ 115200 baud)
+========================================================================
+Opened (the Uno resets on open); waiting 2.5 s...
+Numeric lines in 5 s: 101 (20.2 /s), fields per line: [2]
+First lines: [[1496, 1520], [1496, 1516], [1496, 1516]]
+  field 1: min 1492 max 1500 last 1496
+  field 2: min 1512 max 1520 last 1516
+
+INTERACTIVE: transmitter ON. After pressing Enter, for 10 s: move steering fully left/right,
+move the throttle trigger, and flip the CH3 (mode) switch several times.
+  field 1: min 1492 max 1500 (range 8)
+  field 2: min 1512 max 1520 (range 8)
+If only 2 fields exist, CH3 is not forwarded by the Arduino sketch.
+
+========================================================================
+5. PCA9685 PWM DRIVER (read only, I2C bus 0 addr 0x40)
+========================================================================
+MODE1=0x20 (sleep=False) MODE2=0x04 PRESCALE=121 -> 50.03 Hz assuming a 25 MHz oscillator
+  servo (channel 0): currently outputting 1752 us
+  esc (channel 1): currently outputting 1801 us
+Note: the real oscillator can differ from 25 MHz; that needs a scope or a loopback wire to measure.
+
+========================================================================
+6. NTRIP SERVER REACHABILITY (TCP connect only, no login sent)
+========================================================================
+rts2.ngii.go.kr:2101 -> reachable (182 ms)
+
+========================================================================
+SUMMARY
+========================================================================
+  gps_module               ZED-F9P (no IMU)
+  gps_fusion_mode          unavailable
+  detected_ports           {'arduino': '/dev/ttyACM1', 'gps': '/dev/ttyACM0'}
+  gps_fix_rate_hz          4.98
+  arduino_fields_per_line  [2]
+  ntrip_reachable          reachable (182 ms)
+  temperatures_c           {'AO-therm': 32.0, 'CPU-therm': 22.0, 'GPU-therm': 22.0, 'PLL-therm': 20.0, 'PMIC-Die': 50.0, 'thermal-fan-est': 22.5}
+
+# SUMMARY (JSON)
+{
+  "detected_ports": {
+    "arduino": "/dev/ttyACM1",
+    "gps": "/dev/ttyACM0"
+  },
+  "jetson_model": "NVIDIA Jetson Nano Developer Kit",
+  "python": "3.6.9",
+  "ntp_synchronized": "",
+  "serial_ports": [
+    {
+      "device": "/dev/ttyACM1",
+      "vid": "0x2341",
+      "pid": "0x0043",
+      "manufacturer": "Arduino (www.arduino.cc)",
+      "product": null,
+      "serial": "1453230353235121D040",
+      "location": "1-2.4:1.0"
+    },
+    {
+      "device": "/dev/ttyACM0",
+      "vid": "0x1546",
+      "pid": "0x01A9",
+      "manufacturer": "u-blox AG - www.u-blox.com",
+      "product": "u-blox GNSS receiver",
+      "serial": null,
+      "location": "1-2.2:1.0"
+    }
+  ],
+  "power_rails": {},
+  "temperatures_c": {
+    "AO-therm": 32.0,
+    "CPU-therm": 22.0,
+    "GPU-therm": 22.0,
+    "PLL-therm": 20.0,
+    "PMIC-Die": 50.0,
+    "thermal-fan-est": 22.5
+  },
+  "dmesg_power_usb_events": [
+    "[    3.856595] tegra_soctherm 700e2000.soctherm: soctherm: trip temperature -2147483647 forced to -127000",
+    "[    3.856609] tegra_soctherm 700e2000.soctherm: soctherm: trip temperature -2147483647 forced to -127000",
+    "[    4.135601] soctherm: OC ALARM 0x00000001",
+    "[    4.665445] cdc_acm 1-2.2:1.0: ttyACM0: USB ACM device",
+    "[    4.678337] cdc_acm 1-2.4:1.0: ttyACM1: USB ACM device",
+    "[    4.678928] usbcore: registered new interface driver cdc_acm",
+    "[    4.678932] cdc_acm: USB Abstract Control Model driver for USB modems and ISDN adapters",
+    "[    5.138917] soctherm: OC ALARM 0x00000001",
+    "[   32.754737] soctherm: OC ALARM 0x00000001",
+    "[   33.779193] soctherm: OC ALARM 0x00000001",
+    "[   35.096384] soctherm: OC ALARM 0x00000001",
+    "[  106.400167] usb 1-2.3: USB disconnect, device number 5",
+    "[  141.728158] usb 1-2.3: USB disconnect, device number 7",
+    "[  165.791913] usb 1-2.3: USB disconnect, device number 8",
+    "[  428.448135] usb 1-2.3: USB disconnect, device number 9",
+    "[  557.472135] usb 1-2.3: USB disconnect, device number 12",
+    "[  587.680191] usb 1-2.3: USB disconnect, device number 13",
+    "[  613.279903] usb 1-2.3: USB disconnect, device number 14",
+    "[  634.272154] usb 1-2.3: USB disconnect, device number 15",
+    "[  680.864133] usb 1-2.3: USB disconnect, device number 16"
+  ],
+  "free_disk_gb": 103.3,
+  "nmea_rates_per_s": {
+    "$GNRMC": 4.98,
+    "$GNVTG": 4.98,
+    "$GNGGA": 4.98,
+    "$GNGSA": 24.89,
+    "$GPGSV": 24.89,
+    "$GLGSV": 19.91,
+    "$GAGSV": 4.15,
+    "$GBGSV": 2.32,
+    "$GNTXT": 1.0
+  },
+  "gps_fix_rate_hz": 4.98,
+  "gga_fix_quality_counts": {
+    "2": 30
+  },
+  "gps_mon_ver": {
+    "sw": "EXT CORE 1.00 (9e1716)",
+    "hw": "00190000",
+    "ext": [
+      "ROM BASE 0x118B2060",
+      "FWVER=HPG 1.51",
+      "PROTVER=27.50",
+      "MOD=ZED-F9P",
+      "GPS;GLO;GAL;BDS",
+      "SBAS;QZSS"
+    ]
+  },
+  "gps_module": "ZED-F9P (no IMU)",
+  "gps_config": {
+    "CFG-RATE-MEAS (ms between fixes)": 200,
+    "CFG-RATE-NAV (fixes per solution)": 1,
+    "CFG-NAVSPG-DYNMODEL": "5 (sea)",
+    "CFG-NMEA-HIGHPREC": 1,
+    "CFG-SFCORE-USE_SF (sensor fusion, F9R only)": "not supported (NAK)",
+    "CFG-USBOUTPROT-UBX": 1,
+    "CFG-USBOUTPROT-NMEA": 1,
+    "CFG-USBINPROT-RTCM3X": 1,
+    "CFG-UART1-BAUDRATE": 38400,
+    "CFG-UART1OUTPROT-UBX": 1,
+    "CFG-UART1OUTPROT-NMEA": "no reply",
+    "CFG-UART1INPROT-RTCM3X": 1
+  },
+  "gps_nav_pvt": [
+    {
+      "fixType": 3,
+      "fixType_name": "3D",
+      "carrSoln": "none",
+      "numSV": 9,
+      "hAcc_m": 10.762,
+      "vAcc_m": 5.405,
+      "velN_mps": 0.017,
+      "velE_mps": -0.009,
+      "velD_mps": 0.014,
+      "gSpeed_mps": 0.02,
+      "sAcc_mps": 0.267,
+      "headMot_deg": 83.55014000000001,
+      "headAcc_deg": 180.00000000000003,
+      "headVehValid": false,
+      "headVeh_deg": 0.0,
+      "system_clock_minus_gps_s": -0.015
+    },
+    {
+      "fixType": 3,
+      "fixType_name": "3D",
+      "carrSoln": "none",
+      "numSV": 9,
+      "hAcc_m": 10.781,
+      "vAcc_m": 5.413,
+      "velN_mps": 0.012,
+      "velE_mps": -0.009,
+      "velD_mps": 0.011,
+      "gSpeed_mps": 0.015,
+      "sAcc_mps": 0.293,
+      "headMot_deg": 83.55014000000001,
+      "headAcc_deg": 180.00000000000003,
+      "headVehValid": false,
+      "headVeh_deg": 0.0,
+      "system_clock_minus_gps_s": -0.014
+    },
+    {
+      "fixType": 3,
+      "fixType_name": "3D",
+      "carrSoln": "none",
+      "numSV": 9,
+      "hAcc_m": 10.801,
+      "vAcc_m": 5.421,
+      "velN_mps": 0.022,
+      "velE_mps": -0.004,
+      "velD_mps": 0.011,
+      "gSpeed_mps": 0.022,
+      "sAcc_mps": 0.255,
+      "headMot_deg": 83.55014000000001,
+      "headAcc_deg": 180.00000000000003,
+      "headVehValid": false,
+      "headVeh_deg": 0.0,
+      "system_clock_minus_gps_s": -0.014
+    }
+  ],
+  "gps_fusion_mode": "unavailable",
+  "uart_probe": {
+    "/dev/ttyTHS1": "cannot open ([Errno 13] could not open port /dev/ttyTHS1: [Errno 13] Permission denied: '/dev/ttyTHS1')",
+    "/dev/ttyTHS2": "nothing"
+  },
+  "arduino_fields_per_line": [
+    2
+  ],
+  "arduino_line_rate_hz": 20.2,
+  "arduino_non_numeric_lines": [],
+  "arduino_interactive_ranges": {
+    "1": [
+      1492,
+      1500
+    ],
+    "2": [
+      1512,
+      1520
+    ]
+  },
+  "pca9685": {
+    "mode1": 32,
+    "mode2": 4,
+    "prescale": 121,
+    "freq_hz_nominal": 50.03,
+    "servo_pulse": "1752 us",
+    "esc_pulse": "1801 us"
+  },
+  "ntrip_reachable": "reachable (182 ms)"
+}
