@@ -51,6 +51,7 @@ import time
 
 from auto_strategies import AUTO_STRATEGIES, create_auto_strategy
 from gps_heading import MotionHeadingSelector
+from path_guidance import interpolate_lookahead
 from spresense_stream import (
     SpresenseGPSStreamer, reserved_spresense_ports, same_serial_port,
 )
@@ -941,6 +942,7 @@ class MultipathNavigator:
 
         self.active_lane = "center"
         self.target_idx = 1
+        self.guidance_segment_idx = 0    # Continuous projection progress, independent of waypoint arrival radius.
         self.disturb_dir = 0             # -1: leftward drift, 0: no drift, +1: rightward drift
         self.disturb_start_t = None
         self.last_shift_t = -999.0
@@ -1011,6 +1013,7 @@ class MultipathNavigator:
                 break
 
         self.target_idx = idx
+        self.guidance_segment_idx = best_seg
         self.disturb_dir = 0
         self.disturb_start_t = None
         self.last_shift_t = now_mono
@@ -1051,7 +1054,77 @@ class MultipathNavigator:
             idx += 1
         return idx, pts[idx]
 
-    def update(self, boat_lat, boat_lon, boat_heading_deg, now_mono=None, heading_confident=False):
+    def _fresh_selected_motion(self, motion, boat_heading_deg, now_mono):
+        """Keep heading/speed paired and recheck age before prediction or speed guidance."""
+        if not isinstance(motion, dict):
+            return None
+        if motion.get("source") not in ("gps_course", "position"):
+            return None
+        age_limit = {
+            "gps_course": self.strategy.options["course_max_age_sec"],
+            "position": self.strategy.options["position_heading_max_age_sec"],
+        }.get(motion.get("source"))
+        values = [motion.get(key) for key in ("speed_mps", "heading_deg", "age_sec", "observed_at_mono")]
+        try:
+            finite = all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+                         for v in values + [boat_heading_deg])
+        except OverflowError:
+            finite = False
+        if not finite:
+            return None
+        speed, heading, age, observed = values
+        if age < 0:
+            return None
+        # The GPS reader may publish between loop_t0 and get_snapshot().
+        age = max(age, now_mono - observed)
+        if (speed < self.strategy.options["min_course_speed_mps"] or not 0 <= heading < 360
+                or not 0 <= age <= age_limit or observed > now_mono + 1.0 / CONTROL_LOOP_HZ
+                or abs(wrap_180(heading - boat_heading_deg)) > 1e-6):
+            return None
+        return {"speed_mps": speed, "course_deg": heading, "age_sec": age}
+
+    def _prediction_context(self, bx, by, seg_idx, lookahead_idx, path_bearing_deg, motion):
+        """Sample constant-velocity travel against an envelope around the outer routes.
+
+        Outer paths are nominal routes, not surveyed banks. This is a conservative
+        throttle constraint using the existing boundary-guard allowance, not an
+        obstacle or vessel-dynamics prediction.
+        """
+        if motion is None:
+            return None
+        horizon = self.strategy.options["prediction_horizon_sec"]
+        distance = motion["speed_mps"] * horizon
+        if not math.isfinite(distance):
+            return None
+        course_rad = math.radians(motion["course_deg"])
+        allowance = self.params["shift_cte_m"] - self.strategy.options["prediction_corridor_margin_m"]
+        clearance = float("inf")
+        max_turn = 0.0
+        for fraction in (0.0, 0.25, 0.5, 0.75, 1.0):
+            px = bx + fraction * distance * math.sin(course_rad)
+            py = by + fraction * distance * math.cos(course_rad)
+            if not math.isfinite(px) or not math.isfinite(py):
+                return None
+            _, left_dist, left_cte, _ = self._closest_segment_metrics("left", px, py)
+            _, right_dist, right_cte, _ = self._closest_segment_metrics("right", px, py)
+            if not all(math.isfinite(v) for v in (left_dist, right_dist, left_cte, right_cte)):
+                return None
+            clearance = min(clearance, left_cte + allowance, allowance - right_cte)
+            _, _, _, bearing = self._closest_segment_metrics(self.active_lane, px, py, seg_idx + 1)
+            max_turn = max(max_turn, abs(wrap_180(bearing - path_bearing_deg)))
+        points = self.enu_paths[self.active_lane]
+        forecast_idx, _ = interpolate_lookahead(points, seg_idx, bx, by, distance)
+        # Inspect the route ahead too: a straight velocity ray can miss a bend.
+        for i in range(seg_idx, min(len(points) - 1, max(lookahead_idx, forecast_idx))):
+            dx, dy = points[i + 1][0] - points[i][0], points[i + 1][1] - points[i][1]
+            if math.hypot(dx, dy) > 1e-6:
+                bearing = math.degrees(math.atan2(dx, dy)) % 360.0
+                max_turn = max(max_turn, abs(wrap_180(bearing - path_bearing_deg)))
+        return dict(motion, path_bearing_deg=path_bearing_deg, corridor_clear=clearance >= 0,
+                    corridor_clearance_m=clearance, path_turn_deg=max_turn)
+
+    def update(self, boat_lat, boat_lon, boat_heading_deg, now_mono=None, heading_confident=False,
+               motion=None):
         """
         Call once per control cycle.
         Return a dict: finished, active_lane, shifted_to, wp_number, cte_right_m,
@@ -1063,8 +1136,10 @@ class MultipathNavigator:
         bx, by = latlon_to_enu(boat_lat, boat_lon, self.ref_lat, self.ref_lon)
 
         # 1) Calculate the closest segment and CTE on the current path.
+        predictive = getattr(self.strategy, "uses_predictive_guidance", False) is True
+        search_idx = self.guidance_segment_idx + 1 if predictive else self.target_idx
         seg_idx, _, cte_right_m, path_bearing_deg = self._closest_segment_metrics(
-            self.active_lane, bx, by, start_idx=self.target_idx
+            self.active_lane, bx, by, start_idx=search_idx
         )
         if seg_idx + 1 > self.target_idx:
             self.target_idx = min(len(self.paths[self.active_lane]) - 1, seg_idx + 1)
@@ -1147,15 +1222,26 @@ class MultipathNavigator:
             self.disturb_dir = 0
             self.disturb_start_t = None
             new_seg, _, cte_right_m, path_bearing_deg = self._closest_segment_metrics(
-                self.active_lane, bx, by, start_idx=max(0, self.target_idx - 2)
+                self.active_lane, bx, by, start_idx=0 if predictive else max(0, self.target_idx - 2)
             )
             self.target_idx = min(len(self.paths[self.active_lane]) - 1, new_seg + 1)
+            seg_idx = new_seg
 
         # 4) Calculate the lookahead target bearing and servo steering command.
         lh_dist = self.params["boundary_lookahead_m"] if boundary_guard else self.params["lookahead_dist_m"]
-        lh_idx, (lx, ly) = self._select_lookahead_point(
-            self.active_lane, self.target_idx, bx, by, lh_dist
-        )
+        prediction = None
+        if predictive:
+            self.guidance_segment_idx = seg_idx
+            selected_motion = self._fresh_selected_motion(motion, boat_heading_deg, now_mono)
+            lh_dist = self.strategy.lookahead_distance(
+                selected_motion["speed_mps"] if selected_motion else None, boundary_guard)
+            lh_idx, (lx, ly) = interpolate_lookahead(
+                self.enu_paths[self.active_lane], seg_idx, bx, by, lh_dist)
+            prediction = self._prediction_context(bx, by, seg_idx, lh_idx, path_bearing_deg, selected_motion)
+        else:
+            lh_idx, (lx, ly) = self._select_lookahead_point(
+                self.active_lane, self.target_idx, bx, by, lh_dist
+            )
         target_bearing_deg = (math.degrees(math.atan2(lx - bx, ly - by)) + 360.0) % 360.0
 
         heading_err = None if boat_heading_deg is None else wrap_180(target_bearing_deg - boat_heading_deg)
@@ -1165,9 +1251,10 @@ class MultipathNavigator:
             boundary_guard=boundary_guard,
             now_mono=now_mono,
             heading_confident=heading_confident,
+            **({"prediction": prediction} if predictive else {}),
         )
 
-        return {
+        result = {
             "finished": False,
             "active_lane": self.active_lane,
             "shifted_to": shifted_to,
@@ -1178,6 +1265,12 @@ class MultipathNavigator:
             "boundary_guard": boundary_guard,
             "throttle_blend": command["throttle_blend"]
         }
+        if predictive:
+            result.update(lookahead_m=lh_dist, lookahead_target_e_m=lx, lookahead_target_n_m=ly,
+                          prediction_corridor_clearance_m=prediction["corridor_clearance_m"] if prediction else None)
+            for key in ("cte_rate_mps", "predicted_cte_m", "prediction_status", "throttle_target_blend"):
+                result[key] = command.get(key)
+        return result
 
 
 def load_calibration(path):
@@ -1252,7 +1345,9 @@ def open_telemetry_log(stamp=None):
             "control_heading_source", "control_heading_age_sec", "heading_confident", "heading_state",
             "legacy_heading_deg", "gps_course_valid", "gps_course_age_sec", "gps_course_utc",
             "gps_course_gga_skew_sec", "position_heading_deg", "position_heading_age_sec",
-            "position_speed_mps", "gps_course_deg", "gps_course_speed_mps"
+            "position_speed_mps", "gps_course_deg", "gps_course_speed_mps",
+            "lookahead_m", "lookahead_target_e_m", "lookahead_target_n_m", "cte_rate_mps",
+            "predicted_cte_m", "prediction_status", "prediction_corridor_clearance_m", "throttle_target_blend"
         ])
         f.flush()
         print(f"[LOG] Started recording telemetry: {filepath}")
@@ -1592,6 +1687,7 @@ def main(session_stamp=None):
                         heading_info["heading_deg"],
                         now_mono=loop_t0,
                         heading_confident=heading_info["confident"],
+                        motion=heading_info,
                     )
 
                     if nav_info["shifted_to"] is not None:
@@ -1679,7 +1775,10 @@ def main(session_stamp=None):
                         gps_snap.get("course_age_sec"), gps_snap.get("course_utc"),
                         gps_snap.get("course_gga_skew_sec"), gps_snap.get("position_heading_deg"),
                         gps_snap.get("position_heading_age_sec"), gps_snap.get("position_speed_mps"),
-                        gps_snap.get("course_deg"), gps_snap.get("course_speed_mps")
+                        gps_snap.get("course_deg"), gps_snap.get("course_speed_mps"),
+                        *[nav_info.get(key) if nav_info else None for key in (
+                            "lookahead_m", "lookahead_target_e_m", "lookahead_target_n_m", "cte_rate_mps",
+                            "predicted_cte_m", "prediction_status", "prediction_corridor_clearance_m", "throttle_target_blend")]
                     ])
                 except OSError as exc:
                     log_event(f"[LOG WARNING] Telemetry write failed: {exc}", logging.WARNING)

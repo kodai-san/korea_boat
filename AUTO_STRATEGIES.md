@@ -20,6 +20,7 @@ and mode-switch sections alongside it.
 | `constant_cruise` | Original main behavior: proportional heading steering and constant cruise throttle. |
 | `adaptive_throttle` | Existing branch behavior: the same steering, with full throttle when absolute cross-track error is at most 0.30 m and absolute heading error is at most 11 degrees; cruise otherwise. |
 | `gps_course_progressive` | Experimental fresh GPS-course steering, validated forward-motion handover, and progressive power between cruise and full throttle. |
+| `predictive_recovery` | GPS-course handover with predictive recovery power and continuous, speed-dependent lookahead along the selected path. |
 
 Change only `autonomous.strategy` to switch strategies. The inactive strategy's
 settings can stay in the file. Missing `autonomous` or `strategy` settings select
@@ -40,6 +41,7 @@ To select a strategy for one run without changing the JSON:
 python3 multipath_boat.py --auto-strategy constant_cruise
 python3 multipath_boat.py --auto-strategy adaptive_throttle --throttle-ratio 0.60
 python3 multipath_boat.py --auto-strategy gps_course_progressive
+python3 multipath_boat.py --auto-strategy predictive_recovery
 ```
 
 These commands launch the normal boat controller and initialize its hardware.
@@ -48,12 +50,12 @@ The calibration tool preserves the autonomous section when loading and saving.
 
 ## GPS-course progressive experiment
 
-To enable the new mode for subsequent runs, set `autonomous.strategy` to
+To enable this mode for subsequent runs, set `autonomous.strategy` to
 `"gps_course_progressive"`. The checked-in JSON keeps `adaptive_throttle`
 selected and includes the new mode's settings for editing. The existing two
 strategies retain their heading and throttle behavior.
 
-The new mode uses the receiver's RMC course over ground as soon as it is usable,
+This mode uses the receiver's RMC course over ground as soon as it is usable,
 without waiting for a 25 cm position displacement. By default, a usable course
 requires speed of at least 0.45 m/s, a valid current position, course and position
 ages no greater than 0.6 seconds, and RMC/GGA source UTC times within 0.6 seconds.
@@ -115,9 +117,87 @@ rate must be positive finite numbers. These defaults are experimental and need
 field validation; earlier steering and intermediate power do not guarantee a
 faster run or better recovery.
 
+## Predictive recovery experiment
+
+Select `"predictive_recovery"` in `autonomous.strategy`, or use the CLI command
+above. Its independent settings live in `autonomous.predictive_recovery`.
+The checked-in JSON still selects `adaptive_throttle`; the other three modes
+retain their control behavior.
+
+This mode inherits the GPS-course progressive mode's heading acquisition,
+same-source speed checks, RTK boost requirement, steering controller, and power
+ramp. The selected course or pure position heading supplies its own speed and
+timestamp; prediction never pairs a position heading with a held RMC speed.
+Motion is rechecked against its source's age limit on every navigation update:
+0.6 seconds for course, or 0.8 seconds for the position fallback, by default.
+Missing or stale motion disables increased power.
+
+The short forecast is:
+
+```text
+lateral_speed = speed × sin(course − local_path_bearing)
+predicted_CTE = current_CTE + prediction_horizon × lateral_speed
+```
+
+CTE is positive to the right of the path, so the formula handles left and right
+recovery symmetrically. When the boat is clearly converging, the controller can
+use the smaller predicted error for its power score. By default, convergence
+must be at least 0.05 m/s. A forecast that crosses the centerline and overshoots
+by more than the 0.30 m full-power tolerance receives no extra recovery credit.
+Neither does a route ahead that turns more than 15 degrees relative to the local
+path. Without recovery credit, the larger of current and predicted absolute
+CTE limits power, allowing outward motion to reduce power before the current
+error becomes large. Heading error still independently limits power.
+
+The forecast also samples travel at 0%, 25%, 50%, 75%, and 100% of the configured
+horizon, which defaults to 1 second. Every sample, including the current
+position, must remain inside an envelope around the outer route paths. The
+outward allowance is the shared `shift_cte_m` boundary threshold minus
+`prediction_corridor_margin_m`: 0.70 − 0.20 = 0.50 m beyond each outer path with
+the defaults. These paths define a controller envelope; they are not surveyed
+banks or obstacle boundaries. The sampled constant-velocity forecast does not
+guarantee clearance between samples or model the boat's acceleration and turning.
+Current absolute CTE at or above `cruise_cte_m` (1.5 m by default), an envelope
+violation, or the existing boundary guard requests cruise even if the final
+predicted CTE is small.
+
+For steering, the navigator projects the boat onto the closest selected-path
+segment, then walks forward along the polyline and interpolates a target. It
+starts from that projection, not the already-advanced target waypoint index.
+This avoids jumping the steering target between discrete waypoints. The target
+distance is `speed × lookahead_time_sec`, clamped to the configured minimum and
+maximum. Defaults give 1.8 seconds of travel, bounded to 2.4–5.0 m. Boundary
+recovery caps this at the existing 2.4 m boundary lookahead. Missing or stale
+speed uses the fixed 3.5 m lookahead, clamped to the configured bounds, while
+power remains at cruise. Targets clamp to the final path endpoint. A lane
+change recomputes projection and prediction against the new lane.
+
+These settings are additional to the inherited GPS-course progressive options:
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `lookahead_time_sec` | 1.8 | Travel time used to calculate along-path lookahead. |
+| `lookahead_min_m` | 2.4 | Minimum normal lookahead distance. |
+| `lookahead_max_m` | 5.0 | Maximum normal lookahead distance. |
+| `prediction_horizon_sec` | 1.0 | Constant-velocity forecast horizon. |
+| `prediction_min_convergence_mps` | 0.05 | Minimum inward lateral speed for recovery credit. |
+| `prediction_max_path_turn_deg` | 15.0 | Maximum route turn ahead that permits recovery credit. |
+| `prediction_corridor_margin_m` | 0.2 | Margin subtracted from the outer-path boundary allowance. |
+
+Lookahead distances, travel time, horizon, and minimum convergence speed must be
+positive finite numbers. Maximum lookahead must be at least minimum lookahead.
+The turn limit is between 0 and 180 degrees. The corridor margin is nonnegative
+and must be smaller than the shared `shift_cte_m` threshold. These relationships
+are validated for inactive configuration blocks too, before hardware setup.
+
+The inherited 0.5-per-second increase limit still applies; reductions are
+immediate. This remains an experiment: compare repeated on-water runs for finish
+time, maximum deviation, and interventions. Replaying a log can compare commands,
+but cannot establish the trajectory or time savings caused by changed commands.
+
 ## Shared navigation and safety
 
-All strategies use the same path selection, lookahead, lane changes,
+All strategies use the same path selection, lane changes,
 boundary recovery, proportional steering, and steering slew limit. Missing
 heading uses cruise throttle and no initial steering correction. AUTO entry
 resets steering state. Manual control, transmitter override, RC-loss handling,
@@ -142,6 +222,16 @@ confidence estimate. Additional fields record `gps_course_valid`,
 The validity field describes the parsed observation; speed, age, and fix checks
 still determine whether the controller uses it.
 
+Predictive navigation additionally records `lookahead_m`,
+`lookahead_target_e_m`, `lookahead_target_n_m`, `cte_rate_mps`,
+`predicted_cte_m`, `prediction_status`, `prediction_corridor_clearance_m`, and
+`throttle_target_blend`. Target coordinates are local east/north metres relative
+to the first center-path waypoint. Corridor clearance is the smallest signed
+clearance across the five samples; a negative value disallows increased power.
+The target blend is the requested value before the increase ramp, while
+`throttle_blend` records the applied value. These fields are blank for modes or
+cycles that do not compute predictive navigation.
+
 ## Adding another strategy
 
 Implement a strategy in `auto_strategies.py` and register it in `AUTO_STRATEGIES`.
@@ -150,6 +240,8 @@ defaults. Each strategy provides:
 
 - A stable `name`, `default_options`, and option validation. `option_limits`
   supports finite numeric bounds; override `validate_options` for other options.
+  `validate_navigation_options(nav_params, options)` checks relationships with
+  shared navigation settings for active and explicitly configured inactive modes.
 - An initializer accepting navigation parameters and strategy options, with
   resolved settings exposed as `options`.
 - `reset()`, called on every AUTO entry to clear experimental controller state.
@@ -157,6 +249,9 @@ defaults. Each strategy provides:
   The progressive strategy clears its throttle and steering state here.
 - `uses_gps_course`, which selects the shared experimental motion-course policy
   when true; false preserves the legacy heading path.
+- `uses_predictive_guidance`, which enables continuous target interpolation,
+  `lookahead_distance(speed_mps, boundary_guard)`, and the `prediction` context
+  passed to `update`. It is false for all other current modes.
 - `update(cte_right_m=..., heading_error_deg=..., boundary_guard=..., now_mono=..., heading_confident=...)`,
   returning `steer_norm` in [-1, 1] and `throttle_blend` in [0, 1]. Heading error
   is wrapped to [-180, 180) or is `None`; time is monotonic seconds. The new
@@ -166,8 +261,8 @@ defaults. Each strategy provides:
 For a throttle-only experiment, subclass `ConstantCruiseStrategy` and override
 `throttle_blend`. For a different steering controller, override `update` and
 reset any added state in `reset`. Keep navigation and safety handling shared.
-The current interface supports throttle between cruise and full forward;
-strategies requiring a lower throttle or different path guidance need an
+The current interface supports throttle between cruise and full forward.
+Strategies requiring a lower throttle or another guidance method need an
 explicit extension of that interface.
 
 Add offline tests for the new strategy, its configuration, and mode transitions:

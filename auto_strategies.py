@@ -11,12 +11,14 @@ class ConstantCruiseStrategy:
 
     name = "constant_cruise"
     uses_gps_course = False
+    uses_predictive_guidance = False
     default_options = {}
     option_limits = {}
 
     def __init__(self, nav_params, options=None):
         self.nav_params = dict(nav_params)
         self.options = self.validate_options({} if options is None else options)
+        self.validate_navigation_options(self.nav_params, self.options)
         self.reset()
 
     @classmethod
@@ -39,6 +41,10 @@ class ConstantCruiseStrategy:
                 bounds = f"{minimum} to {maximum}" if maximum is not None else f">= {minimum}"
                 raise ValueError(f"autonomous.{cls.name}.{key} must be a finite number {bounds}")
         return resolved
+
+    @classmethod
+    def validate_navigation_options(cls, nav_params, options):
+        """Validate relationships with shared guidance settings, when applicable."""
 
     def reset(self):
         """Called on every AUTO entry, so previous steering does not carry over."""
@@ -188,9 +194,165 @@ class GpsCourseProgressiveStrategy(ConstantCruiseStrategy):
         )
 
 
+class PredictiveRecoveryStrategy(GpsCourseProgressiveStrategy):
+    """Give recovery credit only to fresh motion that predicts convergence.
+
+    The navigator checks the predicted motion against the route envelope and
+    supplies path geometry. This constant-velocity forecast does not model hull
+    dynamics, and its envelope is not a surveyed obstacle boundary.
+    """
+
+    name = "predictive_recovery"
+    uses_predictive_guidance = True
+    default_options = dict(
+        GpsCourseProgressiveStrategy.default_options,
+        lookahead_time_sec=1.8,
+        lookahead_min_m=2.4,
+        lookahead_max_m=5.0,
+        prediction_horizon_sec=1.0,
+        prediction_min_convergence_mps=0.05,
+        prediction_max_path_turn_deg=15.0,
+        prediction_corridor_margin_m=0.2,
+    )
+    option_limits = dict(
+        GpsCourseProgressiveStrategy.option_limits,
+        lookahead_time_sec=(0.0, None),
+        lookahead_min_m=(0.0, None),
+        lookahead_max_m=(0.0, None),
+        prediction_horizon_sec=(0.0, None),
+        prediction_min_convergence_mps=(0.0, None),
+        prediction_max_path_turn_deg=(0.0, 180.0),
+        prediction_corridor_margin_m=(0.0, None),
+    )
+
+    @classmethod
+    def validate_options(cls, options):
+        resolved = super().validate_options(options)
+        for key in ("lookahead_time_sec", "lookahead_min_m", "lookahead_max_m",
+                    "prediction_horizon_sec", "prediction_min_convergence_mps"):
+            if resolved[key] <= 0:
+                raise ValueError(f"autonomous.{cls.name}.{key} must be greater than zero")
+        if resolved["lookahead_max_m"] < resolved["lookahead_min_m"]:
+            raise ValueError(f"autonomous.{cls.name}.lookahead_max_m must be >= lookahead_min_m")
+        return resolved
+
+    @classmethod
+    def validate_navigation_options(cls, nav_params, options):
+        if options["prediction_corridor_margin_m"] >= nav_params.get("shift_cte_m", 0.70):
+            raise ValueError(
+                f"autonomous.{cls.name}.prediction_corridor_margin_m must be less than navigation shift_cte_m")
+
+    @staticmethod
+    def _finite_number(value):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return False
+        try:
+            return math.isfinite(value)
+        except OverflowError:
+            return False
+
+    def lookahead_distance(self, speed_mps=None, boundary_guard=False):
+        """Return bounded along-path lookahead; missing speed uses the fixed default."""
+        if self._finite_number(speed_mps) and speed_mps >= 0:
+            requested = speed_mps * self.options["lookahead_time_sec"]
+        else:
+            requested = self.nav_params.get("lookahead_dist_m", 3.5)
+        distance = max(self.options["lookahead_min_m"], min(self.options["lookahead_max_m"], requested))
+        if boundary_guard:
+            distance = min(distance, self.nav_params.get("boundary_lookahead_m", 2.4))
+        return distance
+
+    def _valid_prediction(self, prediction):
+        if not isinstance(prediction, dict):
+            return False
+        keys = ("speed_mps", "course_deg", "path_bearing_deg", "age_sec", "path_turn_deg")
+        if not all(self._finite_number(prediction.get(key)) for key in keys):
+            return False
+        max_age = max(self.options["course_max_age_sec"], self.options["position_heading_max_age_sec"])
+        return (prediction["speed_mps"] >= self.options["min_course_speed_mps"]
+                and 0 <= prediction["course_deg"] < 360
+                and 0 <= prediction["path_bearing_deg"] < 360
+                and 0 <= prediction["age_sec"] <= max_age
+                and 0 <= prediction["path_turn_deg"] <= 180)
+
+    def update(self, *, cte_right_m, heading_error_deg, boundary_guard, now_mono,
+               heading_confident=False, prediction=None):
+        cte_valid = self._finite_number(cte_right_m)
+        heading_valid = self._finite_number(heading_error_deg)
+        context_valid = self._valid_prediction(prediction)
+        effective_cte = abs(cte_right_m) if cte_valid else 0.0
+        rate = future = None
+        status = "prediction_missing" if prediction is None else "prediction_invalid"
+        qualified = False
+
+        if context_valid and cte_valid:
+            rate = prediction["speed_mps"] * math.sin(math.radians(
+                prediction["course_deg"] - prediction["path_bearing_deg"]))
+            future = cte_right_m + self.options["prediction_horizon_sec"] * rate
+            if not self._finite_number(future):
+                rate = future = None
+            else:
+                overshoot = (cte_right_m * future < 0
+                             and abs(future) > self.options["full_throttle_cte_m"])
+                bend = prediction["path_turn_deg"] > self.options["prediction_max_path_turn_deg"]
+                converging = (cte_right_m * rate < 0
+                              and abs(rate) >= self.options["prediction_min_convergence_mps"]
+                              and abs(future) < abs(cte_right_m))
+                recovery_credit = converging and not overshoot and not bend
+                effective_cte = abs(future) if recovery_credit else max(abs(cte_right_m), abs(future))
+                qualified = True
+                if boundary_guard:
+                    status, qualified = "boundary_guard", False
+                elif not heading_confident or not heading_valid:
+                    status, qualified = "heading_untrusted", False
+                elif prediction.get("corridor_clear") is not True:
+                    status, qualified = "outside_corridor", False
+                elif abs(cte_right_m) >= self.options["cruise_cte_m"]:
+                    status, qualified = "outside_tracking_envelope", False
+                elif overshoot:
+                    status = "overshoot"
+                elif bend:
+                    status = "bend"
+                elif recovery_credit:
+                    status = "recovering"
+                elif abs(future) > abs(cte_right_m):
+                    status = "diverging"
+                else:
+                    status = "tracking"
+
+        desired = 0.0
+        if qualified:
+            desired = min(
+                self._tracking_score(effective_cte, self.options["full_throttle_cte_m"],
+                                     self.options["cruise_cte_m"]),
+                self._tracking_score(heading_error_deg, self.options["full_throttle_heading_deg"],
+                                     self.options["cruise_heading_deg"]),
+            )
+        command = super().update(
+            cte_right_m=effective_cte,
+            heading_error_deg=heading_error_deg if heading_valid else None,
+            boundary_guard=boundary_guard,
+            now_mono=now_mono,
+            heading_confident=qualified,
+        )
+        command.update(predicted_cte_m=future, cte_rate_mps=rate, prediction_status=status,
+                       throttle_target_blend=desired)
+        return command
+
+    def describe_throttle(self, cruise_us, full_us):
+        return (
+            f"experimental predictive recovery: cruise {cruise_us} to full {full_us} us; "
+            f"forecast {self.options['prediction_horizon_sec']:.2f}s, "
+            f"lookahead {self.options['lookahead_min_m']:.2f}-{self.options['lookahead_max_m']:.2f}m "
+            f"at {self.options['lookahead_time_sec']:.2f}s of travel; "
+            f"boost rise {self.options['throttle_rise_per_sec']:.2f}/s, immediate reductions"
+        )
+
+
 # Register new control strategies here; the main loop does not need strategy branches.
 AUTO_STRATEGIES = {
-    cls.name: cls for cls in (ConstantCruiseStrategy, AdaptiveThrottleStrategy, GpsCourseProgressiveStrategy)
+    cls.name: cls for cls in (ConstantCruiseStrategy, AdaptiveThrottleStrategy, GpsCourseProgressiveStrategy,
+                            PredictiveRecoveryStrategy)
 }
 
 
@@ -214,5 +376,7 @@ def create_auto_strategy(config, nav_params):
         raise ValueError(f"Unknown autonomous strategy {name!r}; choose {', '.join(AUTO_STRATEGIES)}")
     for configured_name, options in config.items():
         if configured_name != "strategy":
-            AUTO_STRATEGIES[configured_name].validate_options(options)
+            strategy_type = AUTO_STRATEGIES[configured_name]
+            resolved = strategy_type.validate_options(options)
+            strategy_type.validate_navigation_options(nav_params, resolved)
     return AUTO_STRATEGIES[name](nav_params, config.get(name, {}))

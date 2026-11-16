@@ -3,6 +3,7 @@
 import contextlib
 import csv
 import io
+import math
 import os
 from pathlib import Path
 import tempfile
@@ -13,9 +14,9 @@ import multipath_boat as boat
 
 
 class CourseAutoIntegrationTests(unittest.TestCase):
-    def run_controller(self, launch="forward", disturbance=None):
+    def run_controller(self, launch="forward", disturbance=None, strategy="gps_course_progressive"):
         cal = boat.load_calibration(Path(boat.__file__).parent / "calibration.json")
-        cal["autonomous"]["strategy"] = "gps_course_progressive"
+        cal["autonomous"]["strategy"] = strategy
         cal["mode_switch"]["right_steer_hold_sec"] = .05
         clock, cycle = [100.0], [0]
         gps = boat.ZEDF9PReceiver("unused")
@@ -38,6 +39,13 @@ class CourseAutoIntegrationTests(unittest.TestCase):
                 result["fix_quality"] = 1
             elif disturbance == "turn" and cycle[0] >= 75:
                 result.update(course_deg=90., cog_deg=90.)
+            elif disturbance == "stale_course" and cycle[0] >= 75:
+                result.update(course_age_sec=.7, course_time_mono=clock[0] - .7)
+            elif disturbance in ("recovery", "overshoot") and cycle[0] >= 75:
+                offset, heading, speed = (.9, 340., 1.5) if disturbance == "recovery" else (.1, 350., 4.)
+                longitude = 129. + math.degrees(offset / (boat.EARTH_RADIUS_M * math.cos(math.radians(35.))))
+                result.update(lon=longitude, course_deg=heading, cog_deg=heading,
+                              course_speed_mps=speed, sog_mps=speed)
             return result
 
         def receiver():
@@ -54,6 +62,11 @@ class CourseAutoIntegrationTests(unittest.TestCase):
                     throttle = cal["rc"]["throttle_rev_us"]
             return steer, throttle, True
 
+        def waypoints(filename):
+            offset = {"left.csv": -1.5, "center.csv": 0., "right.csv": 1.5}[filename]
+            longitude = 129. + math.degrees(offset / (boat.EARTH_RADIUS_M * math.cos(math.radians(35.))))
+            return [(1, 35., longitude), (2, 35.001, longitude), (3, 35.002, longitude)]
+
         def sleep(delay):
             clock[0] += delay
 
@@ -67,11 +80,9 @@ class CourseAutoIntegrationTests(unittest.TestCase):
             for name, result in (("load_calibration", cal), ("PCA9685Driver", pca),
                                  ("ArduinoRCReader", rc), ("ZEDF9PReceiver", gps),
                                  ("NGII_NtripClient", ntrip),
-                                 ("detect_serial_ports", ("unused-rc", "unused-gps")),
-                                 ("load_waypoints_csv", [(1, 35., 129.),
-                                                         (2, 35.001, 129.),
-                                                         (3, 35.002, 129.)])):
+                                 ("detect_serial_ports", ("unused-rc", "unused-gps"))):
                 stack.enter_context(patch.object(boat, name, return_value=result))
+            stack.enter_context(patch.object(boat, "load_waypoints_csv", side_effect=waypoints))
             for obj in (gps, ntrip):
                 for name in ("start", "stop"):
                     stack.enter_context(patch.object(obj, name))
@@ -133,6 +144,41 @@ class CourseAutoIntegrationTests(unittest.TestCase):
                     self.assertEqual(rows[74]["heading_confident"], "0")
                 else:
                     self.assertNotEqual(int(rows[74]["servo_us"]), 1750)
+
+
+class PredictiveAutoIntegrationTests(CourseAutoIntegrationTests):
+    """Run the same mode-transition checks with predictive guidance enabled."""
+
+    def run_controller(self, launch="forward", disturbance=None, strategy="predictive_recovery"):
+        return super().run_controller(launch=launch, disturbance=disturbance, strategy=strategy)
+
+    def test_recovery_increases_actual_power_and_logs_continuous_target(self):
+        predictive, _, _ = self.run_controller(disturbance="recovery")
+        progressive, _, _ = self.run_controller(disturbance="recovery", strategy="gps_course_progressive")
+        row, baseline = predictive[-1], progressive[-1]
+        self.assertEqual(row["prediction_status"], "recovering")
+        self.assertGreater(int(row["esc_us"]), int(baseline["esc_us"]))
+        self.assertAlmostEqual(float(row["lookahead_m"]), 2.7)
+        self.assertLess(float(row["predicted_cte_m"]), float(row["cte_right_m"]))
+        self.assertGreater(float(row["prediction_corridor_clearance_m"]), 0)
+        self.assertNotEqual(row["lookahead_target_n_m"], "")
+
+    def test_overshoot_reduces_actual_power_before_crossing_center(self):
+        rows, _, _ = self.run_controller(disturbance="overshoot")
+        self.assertEqual(int(rows[73]["esc_us"]), 1990)
+        self.assertLess(int(rows[74]["esc_us"]), 1990)
+        self.assertEqual(rows[74]["prediction_status"], "overshoot")
+        self.assertGreater(float(rows[74]["cte_right_m"]), 0)
+        self.assertLess(float(rows[74]["predicted_cte_m"]), -.3)
+
+    def test_stale_course_removes_boost_and_uses_fixed_lookahead(self):
+        rows, _, _ = self.run_controller(disturbance="stale_course")
+        self.assertEqual(int(rows[73]["esc_us"]), 1990)
+        for row in rows[74:]:
+            self.assertEqual(int(row["esc_us"]), 1914)
+            self.assertEqual(row["prediction_status"], "prediction_missing")
+            self.assertEqual(float(row["lookahead_m"]), 3.5)
+            self.assertEqual(row["throttle_target_blend"], "0.0")
 
 
 if __name__ == "__main__":

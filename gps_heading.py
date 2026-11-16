@@ -75,7 +75,7 @@ class MotionHeadingSelector:
     @staticmethod
     def _missing(state):
         return {"heading_deg": None, "source": "none", "age_sec": None,
-                "confident": False, "state": state}
+                "confident": False, "state": state, "speed_mps": None, "observed_at_mono": None}
 
     def select(self, snap, now_mono):
         if not self._fresh_position(snap):
@@ -91,6 +91,7 @@ class MotionHeadingSelector:
                 and observed_at >= self._acquire_after):
             return {"heading_deg": snap["course_deg"], "source": "gps_course",
                     "age_sec": snap["course_age_sec"],
+                    "speed_mps": snap["course_speed_mps"], "observed_at_mono": observed_at,
                     "confident": snap.get("fix_quality") in (4, 5), "state": "tracking"}
 
         # A fresh low-speed report supersedes the previous movement vector.
@@ -110,5 +111,6 @@ class MotionHeadingSelector:
                 and _finite(observed_at) and observed_at >= self._acquire_after
                 and _finite(speed) and speed >= self.options["min_course_speed_mps"]):
             return {"heading_deg": heading, "source": "position", "age_sec": age,
+                    "speed_mps": speed, "observed_at_mono": observed_at,
                     "confident": True, "state": "tracking"}
         return self._missing("heading_unavailable")
