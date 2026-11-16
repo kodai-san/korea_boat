@@ -22,11 +22,11 @@
   },
   "pwm": {
     "servo_center_us": 1750,
-    "servo_left_us": 2150,
-    "servo_right_us": 1250,
+    "servo_left_us": 2130,
+    "servo_right_us": 1030,
     "esc_neutral_us": 1800,
-    "esc_fwd_max_us": 1950,
-    "esc_rev_max_us": 1680,
+    "esc_fwd_max_us": 1990,
+    "esc_rev_max_us": 1650,
     "auto_throttle_ratio": 0.6
   },
   "mode_switch": {
