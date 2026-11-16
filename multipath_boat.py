@@ -15,7 +15,7 @@ main controller for multipath navigation (Left/Center/Right).
    - Stay on the current path when there is no disturbance from wind or waves.
    - If cross-track error (CTE) and directional drift persist, move to an adjacent path with the disturbance.
    - If pushed toward the outer wall on the left/right path, block path changes and strengthen recovery steering.
-   - Throttle: ESC max when |CTE| and |heading error| are both within thresholds; otherwise cruise.
+   - AUTO strategy comes from calibration.json: constant cruise or adaptive full throttle.
    - After crossing the finish line at the final waypoint (#65), or entering its radius, stop in neutral and return to MANUAL.
 4. National Geographic Information Institute (NGII) RTK corrections (NTRIP):
    a built-in background client sends $GNGGA sentences and injects RTCM3 corrections.
@@ -49,6 +49,7 @@ import sys
 import threading
 import time
 
+from auto_strategies import AUTO_STRATEGIES, create_auto_strategy
 from spresense_stream import (
     SpresenseGPSStreamer, reserved_spresense_ports, same_serial_port,
 )
@@ -106,11 +107,7 @@ NAV_PARAMS = {
     "boundary_gain_boost": 1.45,      # Recovery steering gain multiplier when drifting outside an outer path toward a wall
     "servo_slew_per_cycle": 0.18,     # Maximum steering change per cycle to prevent abrupt servo motion (at 20 Hz)
     "min_heading_move_m": 0.25,       # Minimum movement to update GPS heading, filtering stationary noise (m)
-    "sog_cog_blend_mps": 0.45,        # Minimum speed at which to trust $GNRMC course over ground (m/s)
-
-    # Adaptive throttle: both axes must be within threshold for ESC max (else cruise)
-    "full_throttle_cte_m": 0.30,         # |CTE| <= this (m) allows max throttle
-    "full_throttle_heading_deg": 11.0    # |heading err| <= this (deg) allows max throttle
+    "sog_cog_blend_mps": 0.45         # Minimum speed at which to trust $GNRMC course over ground (m/s)
 }
 
 DEFAULT_CALIBRATION_FILE = "calibration.json"
@@ -793,9 +790,10 @@ class MultipathNavigator:
 
     LANE_ORDER = ["left", "center", "right"]
 
-    def __init__(self, paths_dict, params):
+    def __init__(self, paths_dict, params, strategy=None):
         self.paths = paths_dict
         self.params = params
+        self.strategy = strategy if strategy is not None else create_auto_strategy({}, params)
         self.ref_lat = paths_dict["center"][0][1]
         self.ref_lon = paths_dict["center"][0][2]
 
@@ -809,7 +807,6 @@ class MultipathNavigator:
         self.disturb_dir = 0             # -1: leftward drift, 0: no drift, +1: rightward drift
         self.disturb_start_t = None
         self.last_shift_t = -999.0
-        self.prev_steer_norm = 0.0
 
     def _closest_segment_metrics(self, lane_name, boat_x, boat_y, start_idx=0):
         """
@@ -880,7 +877,7 @@ class MultipathNavigator:
         self.disturb_dir = 0
         self.disturb_start_t = None
         self.last_shift_t = now_mono
-        self.prev_steer_norm = 0.0
+        self.strategy.reset()
         return self.active_lane, self.paths[self.active_lane][self.target_idx][0], best_dist
 
     def _check_finish_passed(self, lane_name, boat_x, boat_y):
@@ -1024,29 +1021,13 @@ class MultipathNavigator:
         )
         target_bearing_deg = (math.degrees(math.atan2(lx - bx, ly - by)) + 360.0) % 360.0
 
-        # Until at least 25 cm of movement provides a GPS heading, keep steering straight (0.0) as the boat accelerates.
-        heading_err = None
-        if boat_heading_deg is None:
-            raw_steer = 0.0
-        else:
-            heading_err = wrap_180(target_bearing_deg - boat_heading_deg)
-            gain = 1.0 / self.params["max_steer_angle_deg"]
-            if boundary_guard:
-                gain *= self.params["boundary_gain_boost"]
-            raw_steer = max(-1.0, min(1.0, heading_err * gain))
-
-        # Limit the slew rate to smooth abrupt steering changes.
-        max_step = self.params["servo_slew_per_cycle"]
-        delta = max(-max_step, min(max_step, raw_steer - self.prev_steer_norm))
-        steer_norm = max(-1.0, min(1.0, self.prev_steer_norm + delta))
-        self.prev_steer_norm = steer_norm
-
-        # Full ESC only when both CTE and heading are within their thresholds.
-        throttle_blend = 1.0 if (
-            heading_err is not None
-            and abs(cte_right_m) <= self.params["full_throttle_cte_m"]
-            and abs(heading_err) <= self.params["full_throttle_heading_deg"]
-        ) else 0.0
+        heading_err = None if boat_heading_deg is None else wrap_180(target_bearing_deg - boat_heading_deg)
+        command = self.strategy.update(
+            cte_right_m=cte_right_m,
+            heading_error_deg=heading_err,
+            boundary_guard=boundary_guard,
+            now_mono=now_mono,
+        )
 
         return {
             "finished": False,
@@ -1054,10 +1035,10 @@ class MultipathNavigator:
             "shifted_to": shifted_to,
             "wp_number": self.paths[self.active_lane][lh_idx][0],
             "cte_right_m": cte_right_m,
-            "steer_norm": steer_norm,
+            "steer_norm": command["steer_norm"],
             "target_bearing_deg": target_bearing_deg,
             "boundary_guard": boundary_guard,
-            "throttle_blend": throttle_blend
+            "throttle_blend": command["throttle_blend"]
         }
 
 
@@ -1128,7 +1109,8 @@ def open_telemetry_log(stamp=None):
             "target_bearing_deg", "servo_us", "esc_us",
             "rc_ch1_us", "rc_ch2_us", "rc_steer_norm", "rc_throttle_norm",
             "num_sats", "hdop",
-            *GPS_NTRIP_FIELDS
+            *GPS_NTRIP_FIELDS,
+            "auto_strategy", "throttle_blend"
         ])
         f.flush()
         print(f"[LOG] Started recording telemetry: {filepath}")
@@ -1148,14 +1130,26 @@ def main(session_stamp=None):
     parser.add_argument("--spresense-serial-number", default=None,
                         help="USB serial number identifying the Spresense, including generic CP210x bridges")
     parser.add_argument("--no-spresense", action="store_true", help="Disable the ArbaLabs GPS USB stream")
-    parser.add_argument("--throttle-ratio", type=float, default=None, help="Override the AUTO throttle ratio (e.g., 0.60, 0.70)")
+    parser.add_argument("--throttle-ratio", type=float, default=None, help="Override AUTO cruise throttle (adaptive strategy can still use full power)")
+    parser.add_argument("--auto-strategy", choices=sorted(AUTO_STRATEGIES), default=None,
+                        help="Override autonomous.strategy from the calibration JSON for this run")
     args = parser.parse_args()
+
+    cal = load_calibration(args.config)
+    auto_config = cal.get("autonomous", {})
+    try:
+        if args.auto_strategy is not None:
+            if not isinstance(auto_config, dict):
+                raise ValueError("autonomous must be a JSON object")
+            auto_config = dict(auto_config, strategy=args.auto_strategy)
+        auto_strategy = create_auto_strategy(auto_config, NAV_PARAMS)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     if serial is None or SMBus is None:
         print("[ERROR] Required packages (pyserial, smbus2) are not installed.")
         sys.exit(1)
 
-    cal = load_calibration(args.config)
     hw = cal["hardware"]
     rc_cfg = cal["rc"]
     pwm_cfg = cal["pwm"]
@@ -1175,7 +1169,7 @@ def main(session_stamp=None):
         f"Center: {len(paths['center'])} waypoints, Right: {len(paths['right'])} waypoints)"
     )
 
-    navigator = MultipathNavigator(paths, NAV_PARAMS)
+    navigator = MultipathNavigator(paths, NAV_PARAMS, strategy=auto_strategy)
 
     # 2) Initialize the PCA9685 and safely arm the ESC for 2 seconds.
     pca = PCA9685Driver(
@@ -1249,7 +1243,7 @@ def main(session_stamp=None):
     last_no_gps_warn_t = 0.0
     last_non_rtk_warn_t = 0.0
 
-    # Calculate the constant forward cruise PWM for AUTO mode.
+    # Cruise is the constant strategy output and the adaptive strategy's lower level.
     auto_cruise_us = int(round(
         pwm_cfg["esc_neutral_us"]
         + pwm_cfg["auto_throttle_ratio"] * (pwm_cfg["esc_fwd_max_us"] - pwm_cfg["esc_neutral_us"])
@@ -1257,11 +1251,15 @@ def main(session_stamp=None):
 
     print("\n=====================================================================")
     print("  Haesucheon multipath autonomous navigation started (initial mode: MANUAL)")
-    print(
-        f"  - AUTO throttle  : cruise {int(pwm_cfg['auto_throttle_ratio']*100)}% ({auto_cruise_us} us); "
-        f"full {pwm_cfg['esc_fwd_max_us']} us when |CTE|<={NAV_PARAMS['full_throttle_cte_m']:.2f}m "
-        f"and |hdg err|<={NAV_PARAMS['full_throttle_heading_deg']:.0f}deg"
-    )
+    log_event("[AUTO STRATEGY] " + json.dumps({
+        "strategy": auto_strategy.name,
+        "parameters": auto_strategy.options,
+        "navigation": NAV_PARAMS,
+        "cruise_ratio": pwm_cfg["auto_throttle_ratio"],
+        "cruise_pwm_us": auto_cruise_us,
+        "full_pwm_us": pwm_cfg["esc_fwd_max_us"],
+    }, sort_keys=True))
+    print(f"  - AUTO throttle  : {auto_strategy.describe_throttle(auto_cruise_us, pwm_cfg['esc_fwd_max_us'])}")
     print("  - MANUAL -> AUTO : Hold neutral throttle + right steering for 2.0 seconds (then transmitter steering is ignored)")
     print("  - AUTO -> MANUAL : Apply full reverse throttle to return to MANUAL immediately")
     print("  - Safe shutdown  : Ctrl + C (immediate neutral stop)")
@@ -1465,7 +1463,7 @@ def main(session_stamp=None):
                     f"\r[AUTO:{nav_info['active_lane'].upper():6s}{guard_tag}] "
                     f"WP#{nav_info['wp_number']:02d} | CTE:{nav_info['cte_right_m']:+5.2f}m | "
                     f"Heading:{hdg_txt}deg->Target:{nav_info['target_bearing_deg']:5.1f}deg | "
-                    f"GPS:{fq_short} | Thr:{thr_pct:3d}% Servo:{servo_us:4d} ESC:{esc_us:4d}   "
+                    f"GPS:{fq_short} | Boost:{thr_pct:3d}% Servo:{servo_us:4d} ESC:{esc_us:4d}   "
                 )
             else:
                 status_line = (
@@ -1496,7 +1494,9 @@ def main(session_stamp=None):
                         th_norm,
                         gps_snap["num_sats"],
                         gps_snap["hdop"],
-                        *diagnostics.values()
+                        *diagnostics.values(),
+                        auto_strategy.name,
+                        nav_info["throttle_blend"] if nav_info else ""
                     ])
                 except OSError as exc:
                     log_event(f"[LOG WARNING] Telemetry write failed: {exc}", logging.WARNING)
