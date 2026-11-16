@@ -2,15 +2,15 @@
 # -*- coding: utf-8 -*-
 """
 calibrate_tool.py
-국립한국해양대학교 해수천 자율운항 보트 - RC 수신기(SR215) 및 서보·ESC PWM 터미널 보정 툴
+Haesucheon autonomous boat, Korea Maritime & Ocean University - terminal calibration tool for the RC receiver (SR215) and servo/ESC PWM
 
-[주요 기능]
-1. 아두이노(SR215 수신기) 실시간 펄스 모니터 (CH1 조향, CH2 추진)
-2. 조종기(RC) 중립 / 좌·우 최대 조향 / 최대 전·후진 펄스 측정 (채널 반전 자동 대응)
-3. PCA9685(I2C Bus 0) 서보 모터 직진 중립 및 좌·우 최대 타각 PWM 설정
-4. PCA9685(I2C Bus 0) ESC 중립 시동(Arming), 최대 전·후진 및 자동모드 추진 비율 설정
-5. 수동 매핑 및 모드 전환 트리거(중립+우조향 2초 / 풀 후진 즉시 복귀) 통합 검증
-6. calibration.json 저장 (메인 멀티패스 자율주행 코드와 자동 연동)
+[Main features]
+1. Live Arduino (SR215 receiver) pulse monitor (CH1 steering, CH2 throttle)
+2. Measure RC transmitter neutral, full left/right steering, and full forward/reverse pulses (automatically handles reversed channels)
+3. Set PCA9685 (I2C bus 0) servo PWM for straight-ahead neutral and full left/right steering
+4. Set PCA9685 (I2C bus 0) ESC neutral arming, full forward/reverse, and automatic-mode throttle ratio
+5. Test manual control mapping and mode-switch triggers (neutral throttle + right steering for 2 seconds / immediate return on full reverse)
+6. Save calibration.json (automatically used by the main multipath autonomous navigation code)
 """
 
 import argparse
@@ -46,8 +46,8 @@ def default_calibration():
             "i2c_bus": 0,
             "pca9685_addr": 64,       # 0x40
             "pca9685_freq_hz": 50,
-            "servo_channel": 0,       # CH0: 조향 서보
-            "esc_channel": 1          # CH1: 추진 ESC
+            "servo_channel": 0,       # CH0: steering servo
+            "esc_channel": 1          # CH1: propulsion ESC
         },
         "rc": {
             "steer_neutral_us": 1500,
@@ -77,7 +77,7 @@ def default_calibration():
 
 
 class PCA9685Driver:
-    """외부 CircuitPython 의존성 없이 smbus2로 직접 동작하는 PCA9685 드라이버"""
+    """PCA9685 driver using smbus2 directly, without a CircuitPython dependency."""
     MODE1 = 0x00
     PRESCALE = 0xFE
     LED0_ON_L = 0x06
@@ -85,7 +85,7 @@ class PCA9685Driver:
 
     def __init__(self, bus_num=0, address=0x40, freq_hz=50):
         if SMBus is None:
-            raise RuntimeError("smbus2 패키지가 없습니다 ('pip3 install smbus2').")
+            raise RuntimeError("The smbus2 package is missing ('pip3 install smbus2').")
         self.bus_num = bus_num
         self.address = address
         self.bus = SMBus(bus_num)
@@ -101,12 +101,12 @@ class PCA9685Driver:
         self.actual_freq_hz = self.OSC_CLOCK_HZ / (4096.0 * (prescale + 1))
 
         old_mode = self.bus.read_byte_data(self.address, self.MODE1)
-        sleep_mode = (old_mode & 0x7F) | 0x10  # SLEEP 진입
+        sleep_mode = (old_mode & 0x7F) | 0x10  # Enter SLEEP mode
         self.bus.write_byte_data(self.address, self.MODE1, sleep_mode)
         self.bus.write_byte_data(self.address, self.PRESCALE, prescale)
         self.bus.write_byte_data(self.address, self.MODE1, old_mode)
         time.sleep(0.005)
-        # RESTART(0x80) + AI(Auto-Increment, 0x20) 활성화
+        # Enable RESTART (0x80) + AI (Auto-Increment, 0x20)
         self.bus.write_byte_data(self.address, self.MODE1, old_mode | 0xA0)
 
     def set_pwm_us(self, channel, pulse_us):
@@ -127,11 +127,11 @@ class PCA9685Driver:
 
 
 class ArduinoRCReader:
-    """아두이노 시리얼("CH1,CH2\n") 비동기 수신 스레드"""
+    """Asynchronous reader thread for Arduino serial data ("CH1,CH2\n")."""
 
     def __init__(self, port, baud=115200):
         if serial is None:
-            raise RuntimeError("pyserial 패키지가 없습니다 ('pip3 install pyserial').")
+            raise RuntimeError("The pyserial package is missing ('pip3 install pyserial').")
         self.port = port
         self.baud = baud
         self.ser = None
@@ -144,7 +144,7 @@ class ArduinoRCReader:
 
     def start(self):
         self.ser = serial.Serial(self.port, self.baud, timeout=0.1)
-        print(f"[안내] 아두이노 포트({self.port}) 연결 중... (초기 리셋 대기 2초)")
+        print(f"[INFO] Connecting to Arduino port ({self.port})... (waiting 2 seconds for startup reset)")
         time.sleep(2.0)
         self.ser.reset_input_buffer()
         self.running = True
@@ -206,7 +206,7 @@ class ArduinoRCReader:
 
 def detect_arduino_port(preferred_port="auto"):
     if list_ports is None:
-        print("[경고] pyserial이 없어 시리얼 포트를 탐색할 수 없습니다 ('pip3 install pyserial').")
+        print("[WARNING] Cannot scan serial ports without pyserial ('pip3 install pyserial').")
         return None
 
     ports = list(list_ports.comports())
@@ -216,7 +216,7 @@ def detect_arduino_port(preferred_port="auto"):
     candidates = []
     for p in ports:
         desc = f"{p.manufacturer or ''} {p.description or ''} {p.hwid or ''}".lower()
-        # u-blox GPS(VID 0x1546) 제외
+        # Exclude u-blox GPS devices (VID 0x1546)
         if p.vid == 0x1546 or "u-blox" in desc or "ublox" in desc:
             continue
         if p.vid in (0x2341, 0x2A03, 0x1A86, 0x10C4, 0x0403) or "arduino" in desc or "ttyacm" in p.device.lower() or "ttyusb" in p.device.lower():
@@ -225,15 +225,15 @@ def detect_arduino_port(preferred_port="auto"):
     if len(candidates) == 1:
         return candidates[0].device
 
-    print("\n[감지된 시리얼 포트 목록]")
+    print("\n[Detected serial ports]")
     for idx, p in enumerate(ports, start=1):
         print(f"  {idx}) {p.device}  ({p.manufacturer or 'Unknown'} - {p.description or ''})")
 
     if not ports:
-        manual = input("연결된 포트가 보이지 않습니다. 직접 경로 입력 (취소 Enter): ").strip()
+        manual = input("No connected ports found. Enter a port path manually (Enter to cancel): ").strip()
         return manual if manual else None
 
-    sel = input("아두이노 포트 번호 또는 경로를 입력하세요 (기본 1): ").strip()
+    sel = input("Enter the Arduino port number or path (default: 1): ").strip()
     if not sel:
         return ports[0].device
     if sel.isdigit() and 1 <= int(sel) <= len(ports):
@@ -243,9 +243,9 @@ def detect_arduino_port(preferred_port="auto"):
 
 def normalize_axis(pulse_us, neutral_us, neg_limit_us, pos_limit_us, deadband_us):
     """
-    채널 방향(정방향/역방향)에 상관없이 입력 펄스를 -1.0 ~ +1.0으로 정규화
-    - 조향: 왼쪽 = -1.0, 중립 = 0.0, 오른쪽 = +1.0
-    - 추진: 후진 = -1.0, 중립 = 0.0, 전진   = +1.0
+    Normalize input pulses to -1.0 to +1.0 regardless of channel direction (normal/reversed).
+    - Steering: left = -1.0, neutral = 0.0, right = +1.0
+    - Throttle: reverse = -1.0, neutral = 0.0, forward = +1.0
     """
     diff = pulse_us - neutral_us
     if abs(diff) <= deadband_us:
@@ -256,7 +256,7 @@ def normalize_axis(pulse_us, neutral_us, neg_limit_us, pos_limit_us, deadband_us
     if pos_span == 0 or neg_span == 0:
         return 0.0
 
-    # 입력이 양(+)의 끝점 방향과 같은 부호인지 확인
+    # Check whether the input has the same sign as the positive endpoint.
     if (diff > 0 and pos_span > 0) or (diff < 0 and pos_span < 0):
         effective = abs(diff) - deadband_us
         max_eff = max(1, abs(pos_span) - deadband_us)
@@ -268,7 +268,7 @@ def normalize_axis(pulse_us, neutral_us, neg_limit_us, pos_limit_us, deadband_us
 
 
 def map_norm_to_pwm(norm_val, center_us, neg_pwm_us, pos_pwm_us):
-    """정규화된 값(-1.0 ~ +1.0)을 서보/ESC 실제 PWM(us)으로 변환"""
+    """Convert a normalized value (-1.0 to +1.0) to servo/ESC PWM (us)."""
     norm_val = max(-1.0, min(1.0, norm_val))
     if norm_val >= 0.0:
         return int(round(center_us + norm_val * (pos_pwm_us - center_us)))
@@ -284,83 +284,83 @@ def load_config(path):
             for section in cfg:
                 if section in loaded and isinstance(loaded[section], dict):
                     cfg[section].update(loaded[section])
-            print(f"[불러오기 완료] 기존 설정 파일({path})을 읽었습니다.")
+            print(f"[LOADED] Read the existing configuration file ({path}).")
         except Exception as exc:
-            print(f"[경고] 기존 설정 파일 읽기 실패({exc}), 기본값으로 시작합니다.")
+            print(f"[WARNING] Could not read the existing configuration file ({exc}); starting with defaults.")
     return cfg
 
 
 def save_config(cfg, path):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2, ensure_ascii=False)
-    print(f"\n[저장 완료] 보정 설정이 '{os.path.abspath(path)}'에 저장되었습니다.")
+    print(f"\n[SAVED] Calibration settings saved to '{os.path.abspath(path)}'.")
 
 
 def monitor_rc_live(rc_reader):
-    print("\n--- [1] 실시간 RC 수신기 신호 모니터 (종료: Ctrl+C) ---")
+    print("\n--- [1] Live RC receiver signal monitor (exit: Ctrl+C) ---")
     try:
         while True:
             c1, c2, alive = rc_reader.get_latest()
-            status = "정상 수신" if alive else "신호 끊김/대기"
+            status = "Receiving" if alive else "No signal/waiting"
             sys.stdout.write(
-                f"\r상태: {status:10s} | CH1(STR 조향): {c1:4d} us | CH2(THR 추진): {c2:4d} us   "
+                f"\rStatus: {status:10s} | CH1(STR steering): {c1:4d} us | CH2(THR throttle): {c2:4d} us   "
             )
             sys.stdout.flush()
             time.sleep(0.05)
     except KeyboardInterrupt:
-        print("\n모니터를 종료합니다.")
+        print("\nExiting the monitor.")
 
 
 def calibrate_rc_wizard(rc_reader, cfg):
-    print("\n--- [2] RC 조종기(SR215) 펄스 보정 마법사 ---")
-    print("안내에 따라 조종기를 조작한 채로 Enter를 누르세요 (약 1.2초간 평균 측정).\n")
+    print("\n--- [2] RC transmitter (SR215 receiver) pulse calibration wizard ---")
+    print("Hold the transmitter controls as instructed and press Enter (averaged over approximately 1.2 seconds).\n")
 
-    input("1단계 [중립]: 조종기 핸들과 스로틀에서 손을 완전히 떼고 Enter를 누르세요...")
+    input("Step 1 [Neutral]: Release the steering wheel and throttle completely, then press Enter...")
     res = rc_reader.sample_average(1.2)
     if not res:
-        print("[실패] 유효한 RC 신호가 들어오지 않습니다. 배선과 전원을 확인하세요.")
+        print("[FAILED] No valid RC signal received. Check the wiring and power.")
         return
     st_neu, th_neu, st_jit, th_jit = res
     st_db = max(30, st_jit + 15)
     th_db = max(35, th_jit + 15)
-    print(f"  -> 중립 측정 완료: 조향={st_neu}us (흔들림 {st_jit}us), 추진={th_neu}us (흔들림 {th_jit}us)")
+    print(f"  -> Neutral measured: steering={st_neu}us (jitter {st_jit}us), throttle={th_neu}us (jitter {th_jit}us)")
 
-    input("\n2단계 [좌조향 끝]: 조종기 핸들을 왼쪽 끝까지 돌린 상태로 유지하며 Enter...")
+    input("\nStep 2 [Full left]: Hold the steering wheel fully left, then press Enter...")
     res = rc_reader.sample_average(1.0)
     if not res:
-        print("[실패] 신호 끊김이 발생했습니다.")
+        print("[FAILED] Signal lost.")
         return
     st_left = res[0]
-    print(f"  -> 좌조향 최대 측정값: {st_left} us")
+    print(f"  -> Full left measured: {st_left} us")
 
-    input("\n3단계 [우조향 끝]: 조종기 핸들을 오른쪽 끝까지 돌린 상태로 유지하며 Enter...")
+    input("\nStep 3 [Full right]: Hold the steering wheel fully right, then press Enter...")
     res = rc_reader.sample_average(1.0)
     if not res:
-        print("[실패] 신호 끊김이 발생했습니다.")
+        print("[FAILED] Signal lost.")
         return
     st_right = res[0]
-    print(f"  -> 우조향 최대 측정값: {st_right} us")
+    print(f"  -> Full right measured: {st_right} us")
 
-    input("\n4단계 [최대 전진]: 스로틀 트리거를 전진 끝까지 당긴 상태로 유지하며 Enter...")
+    input("\nStep 4 [Full forward]: Hold the throttle trigger fully pulled for forward, then press Enter...")
     res = rc_reader.sample_average(1.0)
     if not res:
-        print("[실패] 신호 끊김이 발생했습니다.")
+        print("[FAILED] Signal lost.")
         return
     th_fwd = res[1]
-    print(f"  -> 최대 전진 측정값: {th_fwd} us")
+    print(f"  -> Full forward measured: {th_fwd} us")
 
-    input("\n5단계 [최대 후진]: 스로틀 트리거를 후진 끝까지 민 상태로 유지하며 Enter...")
+    input("\nStep 5 [Full reverse]: Hold the throttle trigger fully pushed for reverse, then press Enter...")
     res = rc_reader.sample_average(1.0)
     if not res:
-        print("[실패] 신호 끊김이 발생했습니다.")
+        print("[FAILED] Signal lost.")
         return
     th_rev = res[1]
-    print(f"  -> 최대 후진 측정값: {th_rev} us")
+    print(f"  -> Full reverse measured: {th_rev} us")
 
     if abs(st_right - st_neu) < 100 or abs(st_left - st_neu) < 100:
-        print("[경고] 조향 변화폭이 100us 미만입니다. 조종기 Dual Rate 다이얼을 확인하세요.")
+        print("[WARNING] Steering range is less than 100us. Check the transmitter Dual Rate dial.")
     if abs(th_fwd - th_neu) < 100 or abs(th_rev - th_neu) < 100:
-        print("[경고] 추진 변화폭이 100us 미만입니다. 배선(D2/D3 뒤바뀜 여부)을 확인하세요.")
+        print("[WARNING] Throttle range is less than 100us. Check the wiring (D2/D3 may be swapped).")
 
     cfg["rc"].update({
         "steer_neutral_us": st_neu,
@@ -372,7 +372,7 @@ def calibrate_rc_wizard(rc_reader, cfg):
         "throttle_rev_us": th_rev,
         "throttle_deadband_us": th_db
     })
-    print("\n[완료] RC 조종기 보정값이 메모리에 반영되었습니다.")
+    print("\n[DONE] RC transmitter calibration values updated in memory.")
 
 
 def calibrate_servo_wizard(pca, cfg):
@@ -380,33 +380,33 @@ def calibrate_servo_wizard(pca, cfg):
     cur = cfg["pwm"]["servo_center_us"]
     pca.set_pwm_us(ch, cur)
 
-    print(f"\n--- [3] 조향 서보 모터 PWM 보정 (PCA9685 CH{ch}) ---")
-    print("조작 명령어:")
-    print("  -50 / -10 / +10 / +50 : 현재 펄스 증감 (예: -10 입력 후 Enter)")
-    print("  직접 숫자 입력 (900~2100): 해당 us 즉시 출력 (예: 1480)")
-    print("  set_center : 현재 위치를 '직진 중립'으로 저장")
-    print("  set_left   : 현재 위치를 '최대 좌조향'으로 저장 (기구물 간섭 직전까지만!)")
-    print("  set_right  : 현재 위치를 '최대 우조향'으로 저장 (기구물 간섭 직전까지만!)")
-    print("  q          : 중립 복귀 후 메뉴로 나가기\n")
+    print(f"\n--- [3] Steering servo PWM calibration (PCA9685 CH{ch}) ---")
+    print("Commands:")
+    print("  -50 / -10 / +10 / +50 : adjust the current pulse (e.g., enter -10 and press Enter)")
+    print("  Enter a number (900~2100): immediately output that pulse in us (e.g., 1480)")
+    print("  set_center : save the current position as 'straight-ahead neutral'")
+    print("  set_left   : save the current position as 'full left' (stop before mechanical interference!)")
+    print("  set_right  : save the current position as 'full right' (stop before mechanical interference!)")
+    print("  q          : return to neutral and exit to the menu\n")
 
     while True:
         print(
-            f"[현재 출력: {cur} us] (저장값 -> 좌:{cfg['pwm']['servo_left_us']} / "
-            f"중립:{cfg['pwm']['servo_center_us']} / 우:{cfg['pwm']['servo_right_us']})"
+            f"[Current output: {cur} us] (saved -> left:{cfg['pwm']['servo_left_us']} / "
+            f"neutral:{cfg['pwm']['servo_center_us']} / right:{cfg['pwm']['servo_right_us']})"
         )
-        cmd = input("서보 명령 입력: ").strip().lower()
+        cmd = input("Enter a servo command: ").strip().lower()
         if cmd == "q":
             pca.set_pwm_us(ch, cfg["pwm"]["servo_center_us"])
             break
         elif cmd == "set_center":
             cfg["pwm"]["servo_center_us"] = cur
-            print(f"  -> 직진 중립 저장됨: {cur} us")
+            print(f"  -> Straight-ahead neutral saved: {cur} us")
         elif cmd == "set_left":
             cfg["pwm"]["servo_left_us"] = cur
-            print(f"  -> 최대 좌조향 저장됨: {cur} us")
+            print(f"  -> Full left saved: {cur} us")
         elif cmd == "set_right":
             cfg["pwm"]["servo_right_us"] = cur
-            print(f"  -> 최대 우조향 저장됨: {cur} us")
+            print(f"  -> Full right saved: {cur} us")
         elif cmd.startswith(("+", "-")) and cmd[1:].isdigit():
             cur = max(850, min(2150, cur + int(cmd)))
             pca.set_pwm_us(ch, cur)
@@ -416,9 +416,9 @@ def calibrate_servo_wizard(pca, cfg):
                 cur = val
                 pca.set_pwm_us(ch, cur)
             else:
-                print("  [안내] 안전 범위(850 ~ 2150 us) 내 숫자를 입력하세요.")
+                print("  [INFO] Enter a number within the safe range (850 ~ 2150 us).")
         else:
-            print("  [안내] 알 수 없는 명령어입니다.")
+            print("  [INFO] Unknown command.")
 
 
 def calibrate_esc_wizard(pca, cfg):
@@ -426,17 +426,17 @@ def calibrate_esc_wizard(pca, cfg):
     cur = cfg["pwm"]["esc_neutral_us"]
     pca.set_pwm_us(ch, cur)
 
-    print(f"\n--- [4] 추진 ESC 모터 PWM 보정 (PCA9685 CH{ch}) ---")
-    print("[안전 경고] 반드시 프로펠러가 공중에 떠 있거나 분리된 상태에서 진행하세요!")
-    print("조작 명령어:")
-    print("  arm        : 중립 신호를 2초간 보내 ESC 시동(Arming) 수행")
-    print("  0 (또는 s) : 즉시 중립 정지 출력")
-    print("  -50 / -10 / +10 / +50 또는 직접 숫자(1000~2000) : 출력 변경")
-    print("  set_neutral: 현재 값을 'ESC 중립(정지)'으로 저장")
-    print("  set_fwd    : 현재 값을 '수동 최대 전진'으로 저장")
-    print("  set_rev    : 현재 값을 '수동 최대 후진'으로 저장")
-    print("  ratio      : 자동 모드 추진 비율(기본 0.60 = 60%) 변경 및 전진 PWM 미리보기")
-    print("  q          : 중립 정지 후 메뉴로 나가기\n")
+    print(f"\n--- [4] Propulsion ESC PWM calibration (PCA9685 CH{ch}) ---")
+    print("[SAFETY WARNING] Proceed only with the propeller suspended in the air or removed!")
+    print("Commands:")
+    print("  arm        : arm the ESC by sending a neutral signal for 2 seconds")
+    print("  0 (or s)   : immediately output neutral to stop")
+    print("  -50 / -10 / +10 / +50 or a number (1000~2000): change the output")
+    print("  set_neutral: save the current value as 'ESC neutral (stop)'")
+    print("  set_fwd    : save the current value as 'manual full forward'")
+    print("  set_rev    : save the current value as 'manual full reverse'")
+    print("  ratio      : change the automatic-mode throttle ratio (default 0.60 = 60%) and preview forward PWM")
+    print("  q          : stop at neutral and exit to the menu\n")
 
     while True:
         neu = cfg["pwm"]["esc_neutral_us"]
@@ -444,44 +444,44 @@ def calibrate_esc_wizard(pca, cfg):
         ratio = cfg["pwm"]["auto_throttle_ratio"]
         auto_us = int(round(neu + ratio * (fwd - neu)))
         print(
-            f"[현재 ESC 출력: {cur} us] (후진최대:{cfg['pwm']['esc_rev_max_us']} / "
-            f"중립:{neu} / 전진최대:{fwd} / 자동추진({int(ratio*100)}%):{auto_us} us)"
+            f"[Current ESC output: {cur} us] (full reverse:{cfg['pwm']['esc_rev_max_us']} / "
+            f"neutral:{neu} / full forward:{fwd} / auto throttle({int(ratio*100)}%):{auto_us} us)"
         )
-        cmd = input("ESC 명령 입력: ").strip().lower()
+        cmd = input("Enter an ESC command: ").strip().lower()
         if cmd == "q":
             pca.set_pwm_us(ch, cfg["pwm"]["esc_neutral_us"])
             break
         elif cmd in ("0", "s", "stop"):
             cur = cfg["pwm"]["esc_neutral_us"]
             pca.set_pwm_us(ch, cur)
-            print(f"  -> 즉시 중립 정지 ({cur} us)")
+            print(f"  -> Stopped immediately at neutral ({cur} us)")
         elif cmd == "arm":
             cur = cfg["pwm"]["esc_neutral_us"]
-            print(f"  -> ESC 중립({cur} us) 2.0초 인가 중...")
+            print(f"  -> Applying ESC neutral ({cur} us) for 2.0 seconds...")
             pca.set_pwm_us(ch, cur)
             time.sleep(2.0)
-            print("  -> 시동(Arming) 완료.")
+            print("  -> Arming complete.")
         elif cmd == "set_neutral":
             cfg["pwm"]["esc_neutral_us"] = cur
-            print(f"  -> ESC 중립 저장됨: {cur} us")
+            print(f"  -> ESC neutral saved: {cur} us")
         elif cmd == "set_fwd":
             cfg["pwm"]["esc_fwd_max_us"] = cur
-            print(f"  -> 수동 최대 전진 저장됨: {cur} us")
+            print(f"  -> Manual full forward saved: {cur} us")
         elif cmd == "set_rev":
             cfg["pwm"]["esc_rev_max_us"] = cur
-            print(f"  -> 수동 최대 후진 저장됨: {cur} us")
+            print(f"  -> Manual full reverse saved: {cur} us")
         elif cmd == "ratio":
-            val_str = input("자동 모드 추진 비율 입력 (0.30 ~ 1.00, 예: 0.60 또는 0.70): ").strip()
+            val_str = input("Enter the automatic-mode throttle ratio (0.30 ~ 1.00, e.g., 0.60 or 0.70): ").strip()
             try:
                 r = float(val_str)
                 if 0.20 <= r <= 1.00:
                     cfg["pwm"]["auto_throttle_ratio"] = round(r, 2)
                     preview_us = int(round(cfg["pwm"]["esc_neutral_us"] + r * (cfg["pwm"]["esc_fwd_max_us"] - cfg["pwm"]["esc_neutral_us"])))
-                    print(f"  -> 자동 모드 추진 비율 {int(r*100)}% 저장 (출력 예정 PWM: {preview_us} us)")
+                    print(f"  -> Automatic-mode throttle ratio saved: {int(r*100)}% (preview PWM: {preview_us} us)")
                 else:
-                    print("  [안내] 0.20 ~ 1.00 사이로 입력하세요.")
+                    print("  [INFO] Enter a value between 0.20 and 1.00.")
             except ValueError:
-                print("  [안내] 올바른 소수를 입력하세요.")
+                print("  [INFO] Enter a valid decimal number.")
         elif cmd.startswith(("+", "-")) and cmd[1:].isdigit():
             cur = max(950, min(2050, cur + int(cmd)))
             pca.set_pwm_us(ch, cur)
@@ -491,16 +491,16 @@ def calibrate_esc_wizard(pca, cfg):
                 cur = val
                 pca.set_pwm_us(ch, cur)
             else:
-                print("  [안내] 안전 범위(950 ~ 2050 us) 내 숫자를 입력하세요.")
+                print("  [INFO] Enter a number within the safe range (950 ~ 2050 us).")
         else:
-            print("  [안내] 알 수 없는 명령어입니다.")
+            print("  [INFO] Unknown command.")
 
 
 def run_integrated_test(rc_reader, pca, cfg):
-    print("\n--- [5] 통합 수동 연동 및 모드 전환 트리거 검증 (종료: Ctrl+C) ---")
-    print("1) 조종기 조작에 따라 서보·모터가 올바른 방향으로 움직이는지 확인하세요.")
-    print("2) [수동->자동 테스트] 스로틀 중립 + 우조향 2초 유지 시 AUTO 전환 판정이 뜨는지 확인하세요.")
-    print("3) [자동->수동 테스트] AUTO 상태에서 풀 후진 입력 시 즉시 MANUAL로 복귀하는지 확인하세요.\n")
+    print("\n--- [5] Integrated manual control and mode-switch trigger test (exit: Ctrl+C) ---")
+    print("1) Check that the servo and motor move in the correct direction in response to transmitter input.")
+    print("2) [MANUAL->AUTO test] Hold neutral throttle + right steering for 2 seconds and check for the AUTO transition message.")
+    print("3) [AUTO->MANUAL test] In AUTO mode, apply full reverse and check that it immediately returns to MANUAL.\n")
 
     rc_cfg = cfg["rc"]
     pwm_cfg = cfg["pwm"]
@@ -526,7 +526,7 @@ def run_integrated_test(rc_reader, pca, cfg):
                 if pca is not None:
                     pca.set_pwm_us(hw_cfg["servo_channel"], st_out)
                     pca.set_pwm_us(hw_cfg["esc_channel"], th_out)
-                sys.stdout.write("\r[신호 끊김] 안전 중립 출력 중...                                         ")
+                sys.stdout.write("\r[SIGNAL LOST] Outputting safe neutral...                                         ")
                 sys.stdout.flush()
                 time.sleep(0.05)
                 continue
@@ -559,7 +559,7 @@ def run_integrated_test(rc_reader, pca, cfg):
                     pwm_cfg["esc_rev_max_us"],
                     pwm_cfg["esc_fwd_max_us"]
                 )
-                # 중립 추진 + 우조향 2초 감지
+                # Detect neutral throttle + right steering held for 2 seconds.
                 if th_norm == 0.0 and st_norm >= ms_cfg["right_steer_ratio_threshold"]:
                     if right_hold_start is None:
                         right_hold_start = now
@@ -567,31 +567,31 @@ def run_integrated_test(rc_reader, pca, cfg):
                     if held >= ms_cfg["right_steer_hold_sec"]:
                         sim_mode = "AUTO"
                         right_hold_start = None
-                        print("\n[전환 성공] >>> 우조향 2.0초 감지 -> AUTO 모드 진입 (조종기 조향 무시 시작)")
+                        print("\n[SWITCHED] >>> Right steering held for 2.0 seconds -> AUTO mode (transmitter steering is now ignored)")
                 else:
                     right_hold_start = None
                 hold_txt = f"{(now - right_hold_start):.1f}s" if right_hold_start else "0.0s"
             else:
-                # AUTO 시뮬레이션: 조종기 조향은 무시(서보 직진 중립 고정), 추진 풀 후진만 감시
+                # AUTO simulation: ignore transmitter steering (servo fixed at straight-ahead neutral); monitor only full reverse.
                 st_out = pwm_cfg["servo_center_us"]
-                th_out = pwm_cfg["esc_neutral_us"]  # 지상 테스트 안전을 위해 모터는 중립 유지
-                hold_txt = "무시중"
+                th_out = pwm_cfg["esc_neutral_us"]  # Keep the motor at neutral for safe testing on land.
+                hold_txt = "Ignored"
                 if th_norm <= -ms_cfg["full_reverse_ratio_threshold"]:
                     sim_mode = "MANUAL"
-                    print("\n[복귀 성공] <<< 풀 후진 감지 -> 즉시 MANUAL 모드 복귀!")
+                    print("\n[RETURNED] <<< Full reverse detected -> immediately returning to MANUAL mode!")
 
             if pca is not None:
                 pca.set_pwm_us(hw_cfg["servo_channel"], st_out)
                 pca.set_pwm_us(hw_cfg["esc_channel"], th_out)
 
             sys.stdout.write(
-                f"\r모드:{sim_mode:6s} | 조향:{st_norm:+.2f}({st_out:4d}us) | "
-                f"추진:{th_norm:+.2f}({th_out:4d}us) | 우조향유지:{hold_txt:5s}   "
+                f"\rMode:{sim_mode:6s} | Steering:{st_norm:+.2f}({st_out:4d}us) | "
+                f"Throttle:{th_norm:+.2f}({th_out:4d}us) | Right-steer hold:{hold_txt:5s}   "
             )
             sys.stdout.flush()
             time.sleep(0.05)
     except KeyboardInterrupt:
-        print("\n통합 테스트를 종료하고 중립으로 복귀합니다.")
+        print("\nExiting the integrated test and returning to neutral.")
     finally:
         if pca is not None:
             pca.set_pwm_us(hw_cfg["servo_channel"], pwm_cfg["servo_center_us"])
@@ -599,10 +599,10 @@ def run_integrated_test(rc_reader, pca, cfg):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="해수천 자율운항 보트 RC·PWM 터미널 보정 툴")
-    parser.add_argument("--config", default=DEFAULT_CONFIG_PATH, help="보정 JSON 파일 경로")
-    parser.add_argument("--port", default="auto", help="아두이노 시리얼 포트 (기본: auto)")
-    parser.add_argument("--i2c-bus", type=int, default=None, help="PCA9685 I2C 버스 번호 (기본: 0)")
+    parser = argparse.ArgumentParser(description="Haesucheon autonomous boat RC/PWM terminal calibration tool")
+    parser.add_argument("--config", default=DEFAULT_CONFIG_PATH, help="Path to the calibration JSON file")
+    parser.add_argument("--port", default="auto", help="Arduino serial port (default: auto)")
+    parser.add_argument("--i2c-bus", type=int, default=None, help="PCA9685 I2C bus number (default: 0)")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -627,7 +627,7 @@ def main():
 
     signal.signal(signal.SIGTERM, lambda s, f: (safe_shutdown(), sys.exit(0)))
 
-    # PCA9685 연결 시도
+    # Try to connect to the PCA9685.
     try:
         pca = PCA9685Driver(
             bus_num=cfg["hardware"]["i2c_bus"],
@@ -636,12 +636,12 @@ def main():
         )
         pca.set_pwm_us(cfg["hardware"]["servo_channel"], cfg["pwm"]["servo_center_us"])
         pca.set_pwm_us(cfg["hardware"]["esc_channel"], cfg["pwm"]["esc_neutral_us"])
-        print(f"[정상] PCA9685 연결됨 (I2C Bus {cfg['hardware']['i2c_bus']}, 주소 0x{cfg['hardware']['pca9685_addr']:02X})")
+        print(f"[OK] PCA9685 connected (I2C bus {cfg['hardware']['i2c_bus']}, address 0x{cfg['hardware']['pca9685_addr']:02X})")
     except Exception as exc:
-        print(f"[참고] PCA9685 미연결 상태 ({exc}) -> RC 조종기 단독 보정은 정상 사용 가능합니다.")
+        print(f"[NOTE] PCA9685 is not connected ({exc}) -> RC transmitter calibration is still available.")
         pca = None
 
-    # 아두이노 시리얼 연결 시도
+    # Try to connect to the Arduino serial port.
     ard_port = detect_arduino_port(cfg["hardware"]["arduino_port"])
     if ard_port:
         try:
@@ -649,65 +649,65 @@ def main():
             rc_reader.start()
             cfg["hardware"]["arduino_port"] = ard_port
         except Exception as exc:
-            print(f"[경고] 아두이노 포트({ard_port}) 열기 실패: {exc}")
+            print(f"[WARNING] Could not open Arduino port ({ard_port}): {exc}")
             rc_reader = None
 
     try:
         while True:
             print("\n=======================================================")
-            print("  해수천 보트 RC 수신기 & 모터 PWM 보정 툴 (CLI)")
+            print("  Haesucheon boat RC receiver & motor PWM calibration tool (CLI)")
             print("=======================================================")
-            print("  1. 실시간 RC 수신기 펄스 모니터 (CH1 조향 / CH2 추진)")
-            print("  2. RC 조종기 중립·끝점 자동 측정 마법사")
-            print("  3. 조향 서보 모터 PWM 중립·좌우 끝각 보정 (PCA9685 CH0)")
-            print("  4. 추진 ESC 모터 시동(Arming)·전후진 PWM 보정 (PCA9685 CH1)")
-            print("  5. 통합 매핑 및 모드 전환 트리거(우조향 2초/풀후진) 테스트")
-            print("  6. 현재 보정 설정 확인 및 calibration.json 저장")
-            print("  0. 안전 정지 후 종료")
+            print("  1. Live RC receiver pulse monitor (CH1 steering / CH2 throttle)")
+            print("  2. RC transmitter neutral and endpoint measurement wizard")
+            print("  3. Steering servo neutral and left/right endpoint PWM calibration (PCA9685 CH0)")
+            print("  4. Propulsion ESC arming and forward/reverse PWM calibration (PCA9685 CH1)")
+            print("  5. Integrated mapping and mode-switch trigger test (2-second right steering/full reverse)")
+            print("  6. Review current calibration settings and save calibration.json")
+            print("  0. Stop safely and exit")
             print("=======================================================")
-            choice = input("메뉴 번호 선택: ").strip()
+            choice = input("Select a menu number: ").strip()
 
             if choice == "1":
                 if rc_reader is None:
-                    print("[오류] 아두이노가 연결되어 있지 않습니다.")
+                    print("[ERROR] Arduino is not connected.")
                 else:
                     monitor_rc_live(rc_reader)
             elif choice == "2":
                 if rc_reader is None:
-                    print("[오류] 아두이노가 연결되어 있지 않습니다.")
+                    print("[ERROR] Arduino is not connected.")
                 else:
                     calibrate_rc_wizard(rc_reader, cfg)
             elif choice == "3":
                 if pca is None:
-                    print("[오류] PCA9685(I2C Bus 0)가 연결되어 있지 않습니다.")
+                    print("[ERROR] PCA9685 (I2C bus 0) is not connected.")
                 else:
                     calibrate_servo_wizard(pca, cfg)
             elif choice == "4":
                 if pca is None:
-                    print("[오류] PCA9685(I2C Bus 0)가 연결되어 있지 않습니다.")
+                    print("[ERROR] PCA9685 (I2C bus 0) is not connected.")
                 else:
                     calibrate_esc_wizard(pca, cfg)
             elif choice == "5":
                 if rc_reader is None:
-                    print("[오류] 아두이노가 연결되어 있지 않습니다.")
+                    print("[ERROR] Arduino is not connected.")
                 else:
                     run_integrated_test(rc_reader, pca, cfg)
             elif choice == "6":
-                print("\n[현재 보정 데이터 요약]")
+                print("\n[Current calibration data summary]")
                 print(json.dumps(cfg, indent=2, ensure_ascii=False))
-                yn = input(f"\n'{args.config}' 파일로 저장할까요? (Y/n): ").strip().lower()
+                yn = input(f"\nSave to '{args.config}'? (Y/n): ").strip().lower()
                 if yn in ("", "y", "yes"):
                     save_config(cfg, args.config)
             elif choice == "0":
-                yn = input(f"종료 전 '{args.config}'에 변경사항을 저장할까요? (Y/n): ").strip().lower()
+                yn = input(f"Save changes to '{args.config}' before exiting? (Y/n): ").strip().lower()
                 if yn in ("", "y", "yes"):
                     save_config(cfg, args.config)
                 break
             else:
-                print("[안내] 0 ~ 6 사이의 번호를 선택하세요.")
+                print("[INFO] Select a number from 0 to 6.")
     finally:
         safe_shutdown()
-        print("서보·ESC 중립 복귀 및 포트 종료 완료.")
+        print("Servo and ESC returned to neutral; ports closed.")
 
 
 if __name__ == "__main__":
