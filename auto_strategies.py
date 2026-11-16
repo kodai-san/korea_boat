@@ -10,6 +10,7 @@ class ConstantCruiseStrategy:
     """Original main behavior: proportional heading steering and constant cruise."""
 
     name = "constant_cruise"
+    uses_gps_course = False
     default_options = {}
     option_limits = {}
 
@@ -43,7 +44,11 @@ class ConstantCruiseStrategy:
         """Called on every AUTO entry, so previous steering does not carry over."""
         self.prev_steer_norm = 0.0
 
-    def update(self, *, cte_right_m, heading_error_deg, boundary_guard, now_mono):
+    def suspend(self):
+        """Called while GPS control is suspended; legacy strategies retain their behavior."""
+
+    def update(self, *, cte_right_m, heading_error_deg, boundary_guard, now_mono,
+               heading_confident=True):
         """Return normalized steering [-1, 1] and cruise-to-full throttle blend [0, 1]."""
         if heading_error_deg is None:
             raw_steer = 0.0
@@ -91,9 +96,101 @@ class AdaptiveThrottleStrategy(ConstantCruiseStrategy):
         )
 
 
+class GpsCourseProgressiveStrategy(ConstantCruiseStrategy):
+    """Experimental fresh-course steering with gradually increasing tracking power.
+
+    The heading selector uses the speed, freshness, and forward-motion options.
+    Throttle interpolates between the full-power and cruise error limits, taking
+    the more restrictive error. Power reductions are immediate; increases are
+    limited in time so GPS reacquisition cannot produce a full-power step.
+    """
+
+    name = "gps_course_progressive"
+    uses_gps_course = True
+    default_options = {
+        "full_throttle_cte_m": 0.30,
+        "cruise_cte_m": 1.5,
+        "full_throttle_heading_deg": 11.0,
+        "cruise_heading_deg": 35.0,
+        "throttle_rise_per_sec": 0.5,
+        "min_course_speed_mps": 0.45,
+        "course_max_age_sec": 0.6,
+        "position_heading_max_age_sec": 0.8,
+        "forward_acquire_sec": 0.6,
+        "forward_memory_sec": 4.0,
+    }
+    option_limits = {
+        key: (0.0, 180.0 if key.endswith("heading_deg") else None)
+        for key in default_options
+    }
+
+    @classmethod
+    def validate_options(cls, options):
+        resolved = super().validate_options(options)
+        for full_key, cruise_key in (
+                ("full_throttle_cte_m", "cruise_cte_m"),
+                ("full_throttle_heading_deg", "cruise_heading_deg")):
+            if resolved[cruise_key] <= resolved[full_key]:
+                raise ValueError(f"autonomous.{cls.name}.{cruise_key} must exceed {full_key}")
+        for key in ("throttle_rise_per_sec", "min_course_speed_mps", "course_max_age_sec",
+                    "position_heading_max_age_sec", "forward_acquire_sec", "forward_memory_sec"):
+            if resolved[key] <= 0.0:
+                raise ValueError(f"autonomous.{cls.name}.{key} must be greater than zero")
+        return resolved
+
+    def reset(self):
+        super().reset()
+        self.suspend()
+
+    def suspend(self):
+        # The main controller centers the physical servo during a neutral hold.
+        # Match that output before resuming the steering slew limiter.
+        self.prev_steer_norm = 0.0
+        self.prev_throttle_blend = 0.0
+        self.last_update_mono = None
+
+    @staticmethod
+    def _tracking_score(error, full_limit, cruise_limit):
+        return max(0.0, min(1.0, (cruise_limit - abs(error)) / (cruise_limit - full_limit)))
+
+    def update(self, *, cte_right_m, heading_error_deg, boundary_guard, now_mono,
+               heading_confident=False):
+        heading_finite = heading_error_deg is not None and math.isfinite(heading_error_deg)
+        command = super().update(
+            cte_right_m=cte_right_m,
+            heading_error_deg=heading_error_deg if heading_finite else None,
+            boundary_guard=boundary_guard,
+            now_mono=now_mono,
+        )
+        desired = 0.0
+        if heading_confident and heading_finite and math.isfinite(cte_right_m) and not boundary_guard:
+            desired = min(
+                self._tracking_score(cte_right_m, self.options["full_throttle_cte_m"],
+                                     self.options["cruise_cte_m"]),
+                self._tracking_score(heading_error_deg, self.options["full_throttle_heading_deg"],
+                                     self.options["cruise_heading_deg"]),
+            )
+        # At 20 Hz the normal step is 0.025. Cap elapsed time so a delayed loop
+        # cannot skip the ramp. The first control update starts at cruise.
+        dt = 0.0 if self.last_update_mono is None else max(0.0, min(0.1, now_mono - self.last_update_mono))
+        blend = min(desired, self.prev_throttle_blend + self.options["throttle_rise_per_sec"] * dt)
+        self.prev_throttle_blend = blend
+        self.last_update_mono = now_mono
+        command["throttle_blend"] = blend
+        return command
+
+    def describe_throttle(self, cruise_us, full_us):
+        return (
+            f"experimental GPS-course progressive: cruise {cruise_us} to full {full_us} us; "
+            f"CTE {self.options['cruise_cte_m']:.2f}->{self.options['full_throttle_cte_m']:.2f}m, "
+            f"heading {self.options['cruise_heading_deg']:.1f}->{self.options['full_throttle_heading_deg']:.1f}deg; "
+            f"boost rise {self.options['throttle_rise_per_sec']:.2f}/s, immediate reductions"
+        )
+
+
 # Register new control strategies here; the main loop does not need strategy branches.
 AUTO_STRATEGIES = {
-    cls.name: cls for cls in (ConstantCruiseStrategy, AdaptiveThrottleStrategy)
+    cls.name: cls for cls in (ConstantCruiseStrategy, AdaptiveThrottleStrategy, GpsCourseProgressiveStrategy)
 }
 
 

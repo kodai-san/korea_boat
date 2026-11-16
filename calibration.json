@@ -39,6 +39,18 @@
     "adaptive_throttle": {
       "full_throttle_cte_m": 0.30,
       "full_throttle_heading_deg": 11.0
+    },
+    "gps_course_progressive": {
+      "full_throttle_cte_m": 0.30,
+      "cruise_cte_m": 1.5,
+      "full_throttle_heading_deg": 11.0,
+      "cruise_heading_deg": 35.0,
+      "throttle_rise_per_sec": 0.5,
+      "min_course_speed_mps": 0.45,
+      "course_max_age_sec": 0.6,
+      "position_heading_max_age_sec": 0.8,
+      "forward_acquire_sec": 0.6,
+      "forward_memory_sec": 4.0
     }
   }
 }

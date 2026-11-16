@@ -50,6 +50,7 @@ import threading
 import time
 
 from auto_strategies import AUTO_STRATEGIES, create_auto_strategy
+from gps_heading import MotionHeadingSelector
 from spresense_stream import (
     SpresenseGPSStreamer, reserved_spresense_ports, same_serial_port,
 )
@@ -380,6 +381,23 @@ def parse_float_or_none(text):
         return None
 
 
+def parse_nmea_time_seconds(text):
+    """Return seconds since UTC midnight, or None for an invalid NMEA time."""
+    try:
+        if not isinstance(text, str):
+            return None
+        parts = text.split(".")
+        if (len(parts) > 2 or len(parts[0]) != 6 or not parts[0].isdigit()
+                or (len(parts) == 2 and not parts[1].isdigit())):
+            return None
+        hours, minutes, seconds = int(text[:2]), int(text[2:4]), float(text[4:])
+        if hours >= 24 or minutes >= 60 or not math.isfinite(seconds) or not 0 <= seconds < 60:
+            return None
+        return hours * 3600 + minutes * 60 + seconds
+    except (TypeError, ValueError):
+        return None
+
+
 def verify_nmea_checksum(sentence):
     """Validate an NMEA 0183 checksum (*XX)."""
     if not sentence.startswith("$") or "*" not in sentence:
@@ -415,6 +433,14 @@ class ZEDF9PReceiver:
         self.hdop = 99.9
         self.sog_mps = 0.0
         self.cog_deg = None
+        # Validated RMC observations are separate from the legacy blend inputs.
+        self.course_deg = None
+        self.course_speed_mps = None
+        self.course_time_mono = None
+        self.course_utc = ""
+        self.course_valid = False
+        self._course_time_seconds = None
+        self._last_course_epoch = None
         self.alt_m = None
         self.diff_age_sec = None          # Age of the RTK/DGPS corrections in use (GGA field 13)
         self.gps_utc = ""                 # GPS UTC time of the latest GGA (hhmmss.ss)
@@ -432,6 +458,13 @@ class ZEDF9PReceiver:
         self._anchor_lat = None
         self._anchor_lon = None
         self.heading_deg = None
+        self._position_anchor_lat = None
+        self._position_anchor_lon = None
+        self._position_anchor_time_mono = None
+        self._last_position_gga_seconds = None
+        self.position_heading_deg = None
+        self.position_heading_time_mono = None
+        self.position_speed_mps = None
 
     def start(self):
         self.ser = serial.Serial(self.port, self.baud, timeout=0.2)
@@ -480,6 +513,85 @@ class ZEDF9PReceiver:
             else:
                 self.heading_deg = vec_heading
 
+    def _clear_position_observation(self):
+        self.position_heading_deg = None
+        self.position_heading_time_mono = None
+        self.position_speed_mps = None
+        self._position_anchor_lat = None
+        self._position_anchor_lon = None
+        self._position_anchor_time_mono = None
+
+    def _update_position_observation(self, lat, lon, utc, quality):
+        """Pure displacement fallback from advancing RTK fixes, separate from legacy anchors."""
+        seconds = parse_nmea_time_seconds(utc)
+        if seconds is None:
+            self._clear_position_observation()
+            return
+        delta = ((seconds - self._last_position_gga_seconds + 43200.0) % 86400.0 - 43200.0
+                 if self._last_position_gga_seconds is not None else None)
+        advancing = delta is None or delta > 0
+        if quality not in (4, 5) or lat is None or lon is None:
+            self._clear_position_observation()
+            if advancing:
+                self._last_position_gga_seconds = seconds
+            return
+        if not advancing:
+            return
+        self._last_position_gga_seconds = seconds
+        now = time.monotonic()
+        if self._position_anchor_lat is None:
+            self._position_anchor_lat = lat
+            self._position_anchor_lon = lon
+            self._position_anchor_time_mono = now
+            return
+        moved = distance_m_between(self._position_anchor_lat, self._position_anchor_lon, lat, lon)
+        if moved >= NAV_PARAMS["min_heading_move_m"]:
+            elapsed = now - self._position_anchor_time_mono
+            if elapsed > 0 and math.isfinite(moved):
+                self.position_heading_deg = bearing_deg_between(
+                    self._position_anchor_lat, self._position_anchor_lon, lat, lon)
+                self.position_heading_time_mono = now
+                self.position_speed_mps = moved / elapsed
+            self._position_anchor_lat = lat
+            self._position_anchor_lon = lon
+            self._position_anchor_time_mono = now
+
+    def _update_course_observation(self, fields):
+        """Accept complete, advancing RMC observations. Caller holds state_lock."""
+        try:
+            seconds = parse_nmea_time_seconds(fields[1])
+            date = datetime.datetime.strptime(fields[9], "%d%m%y")
+            if seconds is None or len(fields[9]) != 6:
+                raise ValueError("invalid RMC timestamp")
+            epoch = date + datetime.timedelta(seconds=seconds)
+            speed = float(fields[7]) * 0.514444
+            # Low-speed receivers may leave COG blank: retain the valid speed
+            # observation so the new mode can reject a held movement heading.
+            course = float(fields[8]) if fields[8] else None
+            if (fields[2] != "A" or (len(fields) > 12 and fields[12] == "N")
+                    or not math.isfinite(speed) or speed < 0
+                    or (course is not None and (not math.isfinite(course) or not 0 <= course < 360))):
+                raise ValueError("invalid RMC motion observation")
+        except (IndexError, TypeError, ValueError, OverflowError):
+            self.course_deg = None
+            self.course_speed_mps = None
+            self.course_time_mono = None
+            self.course_utc = ""
+            self._course_time_seconds = None
+            self.course_valid = False
+            return
+
+        # Replayed sentences must not turn an old course into a fresh estimate.
+        if self._last_course_epoch is not None and epoch <= self._last_course_epoch:
+            return
+        self._last_course_epoch = epoch
+        self.course_deg = course
+        self.course_speed_mps = speed
+        self.course_time_mono = time.monotonic()
+        self.course_utc = epoch.isoformat(timespec="milliseconds") + "Z"
+        self._course_time_seconds = seconds
+        self.course_valid = course is not None
+
     def _read_loop(self):
         while self.running:
             try:
@@ -518,6 +630,7 @@ class ZEDF9PReceiver:
                         self.alt_m = alt
                         self.diff_age_sec = diff_age
                         self.gps_utc = fields[1]
+                        self._update_position_observation(lat, lon, fields[1], qual)
                         if qual > 0 and lat is not None and lon is not None:
                             self.lat = lat
                             self.lon = lon
@@ -525,9 +638,10 @@ class ZEDF9PReceiver:
                             self.last_fix_time = time.monotonic()
                             self._update_movement_heading(lat, lon, self.sog_mps, self.cog_deg)
 
-                elif talker_msg.endswith("RMC") and len(fields) >= 9:
-                    status = fields[2]
-                    if status == "A":
+                elif talker_msg.endswith("RMC"):
+                    with self.state_lock:
+                        self._update_course_observation(fields)
+                    if len(fields) >= 9 and fields[2] == "A":
                         knots = float(fields[7]) if fields[7] else 0.0
                         sog = knots * 0.514444
                         cog = float(fields[8]) if fields[8] else None
@@ -542,6 +656,12 @@ class ZEDF9PReceiver:
             self._anchor_lat = self.lat
             self._anchor_lon = self.lon
             self.heading_deg = None
+            self._clear_position_observation()
+            self._last_position_gga_seconds = parse_nmea_time_seconds(self.gps_utc)
+            if self.fix_quality in (4, 5) and self._last_position_gga_seconds is not None:
+                self._position_anchor_lat = self.lat
+                self._position_anchor_lon = self.lon
+                self._position_anchor_time_mono = time.monotonic()
 
     def get_latest_gps_sample(self):
         """Copy one complete GGA observation; callers do I/O after releasing the lock."""
@@ -550,8 +670,13 @@ class ZEDF9PReceiver:
 
     def get_snapshot(self):
         with self.state_lock:
-            age = time.monotonic() - self.last_fix_time if self.last_fix_time > 0 else 999.0
+            now = time.monotonic()
+            age = now - self.last_fix_time if self.last_fix_time > 0 else 999.0
             valid = (self.fix_quality > 0) and (self.lat is not None) and (age <= 2.5)
+            gga_seconds = parse_nmea_time_seconds(self.gps_utc)
+            course_skew = None
+            if gga_seconds is not None and self._course_time_seconds is not None:
+                course_skew = (self._course_time_seconds - gga_seconds + 43200.0) % 86400.0 - 43200.0
             return {
                 "valid": valid,
                 "lat": self.lat,
@@ -561,10 +686,22 @@ class ZEDF9PReceiver:
                 "hdop": self.hdop,
                 "sog_mps": self.sog_mps,
                 "cog_deg": self.cog_deg,
+                "course_deg": self.course_deg,
+                "course_speed_mps": self.course_speed_mps,
+                "course_valid": self.course_valid,
+                "course_time_mono": self.course_time_mono,
+                "course_age_sec": now - self.course_time_mono if self.course_time_mono is not None else None,
+                "course_utc": self.course_utc,
+                "course_gga_skew_sec": course_skew,
                 "alt_m": self.alt_m,
                 "diff_age_sec": self.diff_age_sec,
                 "gps_utc": self.gps_utc,
                 "heading_deg": self.heading_deg,
+                "position_heading_deg": self.position_heading_deg,
+                "position_heading_time_mono": self.position_heading_time_mono,
+                "position_heading_age_sec": (now - self.position_heading_time_mono
+                                             if self.position_heading_time_mono is not None else None),
+                "position_speed_mps": self.position_speed_mps,
                 "gga_raw": self.latest_gga_raw,
                 "age_sec": age,
                 "rtcm_bytes_written": self.rtcm_bytes_written,
@@ -914,7 +1051,7 @@ class MultipathNavigator:
             idx += 1
         return idx, pts[idx]
 
-    def update(self, boat_lat, boat_lon, boat_heading_deg, now_mono=None):
+    def update(self, boat_lat, boat_lon, boat_heading_deg, now_mono=None, heading_confident=False):
         """
         Call once per control cycle.
         Return a dict: finished, active_lane, shifted_to, wp_number, cte_right_m,
@@ -1027,6 +1164,7 @@ class MultipathNavigator:
             heading_error_deg=heading_err,
             boundary_guard=boundary_guard,
             now_mono=now_mono,
+            heading_confident=heading_confident,
         )
 
         return {
@@ -1110,7 +1248,11 @@ def open_telemetry_log(stamp=None):
             "rc_ch1_us", "rc_ch2_us", "rc_steer_norm", "rc_throttle_norm",
             "num_sats", "hdop",
             *GPS_NTRIP_FIELDS,
-            "auto_strategy", "throttle_blend"
+            "auto_strategy", "throttle_blend",
+            "control_heading_source", "control_heading_age_sec", "heading_confident", "heading_state",
+            "legacy_heading_deg", "gps_course_valid", "gps_course_age_sec", "gps_course_utc",
+            "gps_course_gga_skew_sec", "position_heading_deg", "position_heading_age_sec",
+            "position_speed_mps", "gps_course_deg", "gps_course_speed_mps"
         ])
         f.flush()
         print(f"[LOG] Started recording telemetry: {filepath}")
@@ -1145,6 +1287,8 @@ def main(session_stamp=None):
         auto_strategy = create_auto_strategy(auto_config, NAV_PARAMS)
     except ValueError as exc:
         parser.error(str(exc))
+
+    heading_selector = MotionHeadingSelector(auto_strategy.options) if auto_strategy.uses_gps_course else None
 
     if serial is None or SMBus is None:
         print("[ERROR] Required packages (pyserial, smbus2) are not installed.")
@@ -1304,6 +1448,9 @@ def main(session_stamp=None):
 
             ch1_us, ch2_us, rc_alive = rc.get_latest()
             gps_snap = gps.get_snapshot()
+            heading_info = {"heading_deg": gps_snap["heading_deg"], "source": "legacy_blend",
+                            "age_sec": None, "confident": gps_snap["heading_deg"] is not None,
+                            "state": "legacy"}
 
             # [Safety] Stop in neutral immediately if the Arduino serial connection or wiring is lost.
             if not rc_alive:
@@ -1312,6 +1459,9 @@ def main(session_stamp=None):
                 pca.set_pwm_us(servo_ch, servo_us)
                 pca.set_pwm_us(esc_ch, esc_us)
                 right_steer_hold_start = None
+                if heading_selector is not None:
+                    heading_selector.reset()
+                    auto_strategy.suspend()
                 if mode == "AUTO":
                     mode = "MANUAL"
                     print("\n[FAILSAFE] RC receiver signal lost -> stopping in neutral and switching to MANUAL")
@@ -1339,6 +1489,8 @@ def main(session_stamp=None):
             nav_info = None
 
             if mode == "MANUAL":
+                if heading_selector is not None:
+                    heading_selector.observe_manual(gps_snap, th_norm, loop_t0)
                 servo_us = map_norm_to_pwm(
                     st_norm,
                     pwm_cfg["servo_center_us"],
@@ -1370,6 +1522,17 @@ def main(session_stamp=None):
                                 last_non_rtk_warn_t = loop_t0
 
                             gps.reset_heading_anchor()
+                            if heading_selector is not None:
+                                # Preserve only fresh course backed by recent forward motion.
+                                # Position fallback still starts from the new AUTO anchor.
+                                # Keep the position/course snapshot whose validity was
+                                # checked above, while reflecting the anchor reset.
+                                gps_snap = dict(gps_snap, heading_deg=None, position_heading_deg=None,
+                                                position_heading_age_sec=None, position_heading_time_mono=None,
+                                                position_speed_mps=None)
+                                reused = heading_selector.enter_auto(gps_snap, loop_t0)
+                                heading_info = heading_selector.select(gps_snap, loop_t0)
+                                log_event(f"[AUTO HEADING] {'Reusing forward GPS course' if reused else 'Acquiring forward motion'}")
                             lane, wp_no, init_dist = navigator.enter_auto_mode(
                                 gps_snap["lat"], gps_snap["lon"], now_mono=loop_t0
                             )
@@ -1388,6 +1551,9 @@ def main(session_stamp=None):
                 # 1) Ignore transmitter steering (st_norm); monitor for full reverse throttle.
                 if th_norm <= -ms_cfg["full_reverse_ratio_threshold"]:
                     mode = "MANUAL"
+                    if heading_selector is not None:
+                        heading_selector.reset()
+                        auto_strategy.suspend()
                     right_steer_hold_start = None
                     servo_us = pwm_cfg["servo_center_us"]
                     esc_us = map_norm_to_pwm(
@@ -1402,6 +1568,10 @@ def main(session_stamp=None):
                     # Stop in neutral without abrupt steering during a temporary GPS outage.
                     servo_us = pwm_cfg["servo_center_us"]
                     esc_us = pwm_cfg["esc_neutral_us"]
+                    if heading_selector is not None:
+                        heading_selector.suspend()
+                        auto_strategy.suspend()
+                        heading_info = heading_selector.select(gps_snap, loop_t0)
                     if loop_t0 - last_no_gps_warn_t > 2.0:
                         print("\n[GPS WARNING] GPS reception delayed -> holding neutral until reception recovers.")
                         last_no_gps_warn_t = loop_t0
@@ -1414,11 +1584,14 @@ def main(session_stamp=None):
                         print(f"\n[POSITION WARNING] RTK is not active ({fq_str}) - continuing in AUTO mode.")
                         last_non_rtk_warn_t = loop_t0
 
+                    if heading_selector is not None:
+                        heading_info = heading_selector.select(gps_snap, loop_t0)
                     nav_info = navigator.update(
                         gps_snap["lat"],
                         gps_snap["lon"],
-                        gps_snap["heading_deg"],
-                        now_mono=loop_t0
+                        heading_info["heading_deg"],
+                        now_mono=loop_t0,
+                        heading_confident=heading_info["confident"],
                     )
 
                     if nav_info["shifted_to"] is not None:
@@ -1429,6 +1602,9 @@ def main(session_stamp=None):
 
                     if nav_info["finished"]:
                         mode = "MANUAL"
+                        if heading_selector is not None:
+                            heading_selector.reset()
+                            auto_strategy.suspend()
                         servo_us = pwm_cfg["servo_center_us"]
                         esc_us = pwm_cfg["esc_neutral_us"]
                         print(
@@ -1455,7 +1631,7 @@ def main(session_stamp=None):
             # 5) Display the live terminal status line and write CSV telemetry.
             diagnostics = record_diagnostics(loop_t0, gps_snap)
             fq_short = FIX_QUALITY_NAMES.get(gps_snap["fix_quality"], str(gps_snap["fix_quality"]))
-            hdg_txt = f"{gps_snap['heading_deg']:5.1f}" if gps_snap["heading_deg"] is not None else " N/A "
+            hdg_txt = f"{heading_info['heading_deg']:5.1f}" if heading_info["heading_deg"] is not None else " N/A "
             if mode == "AUTO" and nav_info is not None and not nav_info["finished"]:
                 guard_tag = "[WALL GUARD]" if nav_info["boundary_guard"] else ""
                 thr_pct = int(round(100.0 * nav_info.get("throttle_blend", 0.0)))
@@ -1484,7 +1660,7 @@ def main(session_stamp=None):
                         f"{gps_snap['lat']:.8f}" if gps_snap["lat"] is not None else "",
                         f"{gps_snap['lon']:.8f}" if gps_snap["lon"] is not None else "",
                         f"{nav_info['cte_right_m']:.3f}" if nav_info else "",
-                        f"{gps_snap['heading_deg']:.1f}" if gps_snap["heading_deg"] is not None else "",
+                        f"{heading_info['heading_deg']:.1f}" if heading_info["heading_deg"] is not None else "",
                         f"{nav_info['target_bearing_deg']:.1f}" if nav_info else "",
                         servo_us,
                         esc_us,
@@ -1496,7 +1672,14 @@ def main(session_stamp=None):
                         gps_snap["hdop"],
                         *diagnostics.values(),
                         auto_strategy.name,
-                        nav_info["throttle_blend"] if nav_info else ""
+                        nav_info["throttle_blend"] if nav_info else "",
+                        heading_info["source"], heading_info["age_sec"],
+                        int(heading_info["confident"]), heading_info["state"],
+                        gps_snap["heading_deg"], int(gps_snap.get("course_valid", False)),
+                        gps_snap.get("course_age_sec"), gps_snap.get("course_utc"),
+                        gps_snap.get("course_gga_skew_sec"), gps_snap.get("position_heading_deg"),
+                        gps_snap.get("position_heading_age_sec"), gps_snap.get("position_speed_mps"),
+                        gps_snap.get("course_deg"), gps_snap.get("course_speed_mps")
                     ])
                 except OSError as exc:
                     log_event(f"[LOG WARNING] Telemetry write failed: {exc}", logging.WARNING)
