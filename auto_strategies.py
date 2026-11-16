@@ -91,9 +91,47 @@ class AdaptiveThrottleStrategy(ConstantCruiseStrategy):
         )
 
 
+class FullThrottleStrategy(ConstantCruiseStrategy):
+    """Race behavior: full ESC whenever AUTO is steering, plus an optional integral on heading error.
+
+    benchmark.py (paired 8 s windows validated on held-out logs, three fitted models) found constant full
+    throttle ~6 s faster over the 92 m course than adaptive_throttle, which drops to cruise whenever the
+    boat is slightly off line. The integral removes the steady offset caused by rudder trim that changes
+    between runs; heading_integral_gain is in 1/s and integral_limit_deg caps its contribution.
+    """
+
+    name = "full_throttle"
+    default_options = {"heading_integral_gain": 0.0, "integral_limit_deg": 20.0}
+    option_limits = {"heading_integral_gain": (0.0, 5.0), "integral_limit_deg": (0.0, 90.0)}
+
+    def reset(self):
+        super().reset()
+        self.integral_deg_s = 0.0
+        self.last_t = None
+
+    def update(self, *, cte_right_m, heading_error_deg, boundary_guard, now_mono):
+        ki = self.options["heading_integral_gain"]
+        dt = 0.0 if self.last_t is None else max(0.0, min(0.2, now_mono - self.last_t))
+        self.last_t = now_mono
+        effective = heading_error_deg
+        if heading_error_deg is not None and ki > 0:
+            limit = self.options["integral_limit_deg"] / ki
+            self.integral_deg_s = max(-limit, min(limit, self.integral_deg_s + heading_error_deg * dt))
+            effective = heading_error_deg + ki * self.integral_deg_s
+        return super().update(cte_right_m=cte_right_m, heading_error_deg=effective,
+                              boundary_guard=boundary_guard, now_mono=now_mono)
+
+    def throttle_blend(self, cte_right_m, heading_error_deg):
+        return 1.0
+
+    def describe_throttle(self, cruise_us, full_us):
+        ki = self.options["heading_integral_gain"]
+        return f"full {full_us} us whenever AUTO is steering" + (f"; heading integral {ki:.2f}/s" if ki > 0 else "")
+
+
 # Register new control strategies here; the main loop does not need strategy branches.
 AUTO_STRATEGIES = {
-    cls.name: cls for cls in (ConstantCruiseStrategy, AdaptiveThrottleStrategy)
+    cls.name: cls for cls in (ConstantCruiseStrategy, AdaptiveThrottleStrategy, FullThrottleStrategy)
 }
 
 

@@ -19,6 +19,7 @@ and mode-switch sections alongside it.
 | --- | --- |
 | `constant_cruise` | Original main behavior: proportional heading steering and constant cruise throttle. |
 | `adaptive_throttle` | Existing branch behavior: the same steering, with full throttle when absolute cross-track error is at most 0.30 m and absolute heading error is at most 11 degrees; cruise otherwise. |
+| `full_throttle` | Race behavior: the same steering plus an optional integral on heading error (`heading_integral_gain`, 1/s; `integral_limit_deg` caps its contribution), and full throttle whenever AUTO is steering. Recommended race settings: `heading_integral_gain` 0.6 with `NAV_PARAMS["heading_source"] = "cog"` (see `RACE_SPEED.md`). |
 
 Change only `autonomous.strategy` to switch strategies. The inactive strategy's
 settings can stay in the file. Missing `autonomous` or `strategy` settings select

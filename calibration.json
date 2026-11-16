@@ -35,10 +35,14 @@
     "full_reverse_ratio_threshold": 0.75
   },
   "autonomous": {
-    "strategy": "adaptive_throttle",
+    "strategy": "full_throttle",
     "adaptive_throttle": {
-      "full_throttle_cte_m": 0.30,
+      "full_throttle_cte_m": 0.3,
       "full_throttle_heading_deg": 11.0
+    },
+    "full_throttle": {
+      "heading_integral_gain": 0.6,
+      "integral_limit_deg": 20.0
     }
   }
 }

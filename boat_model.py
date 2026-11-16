@@ -216,10 +216,12 @@ class GPSEmulator:
     and the same movement-based heading estimator as ZEDF9PReceiver._update_movement_heading.
     """
 
-    def __init__(self, rate_hz=5.0, noise_m=0.02, bias_walk_m=0.0, seed=0):
+    def __init__(self, rate_hz=5.0, noise_m=0.02, bias_walk_m=0.0, seed=0, vel_noise_mps=0.025, heading_source=None):
         self.period = 1.0 / rate_hz
         self.noise_m = noise_m
         self.bias_walk_m = bias_walk_m
+        self.vel_noise = vel_noise_mps        # Doppler velocity noise per axis (2026-11-16 log: ~0.035 m/s fix-to-fix)
+        self.heading_source = heading_source or NAV_PARAMS.get("heading_source", "blend")
         self.rng = np.random.default_rng(seed)
         self.bias = np.zeros(2)
         self.next_t = 0.0
@@ -245,8 +247,15 @@ class GPSEmulator:
         self.y = true_y + self.bias[1] + self.rng.normal(0.0, self.noise_m)
 
         # RMC speed/course from the receiver's own (Doppler) velocity: low noise.
-        self.sog = math.hypot(true_vx, true_vy)
-        self.cog = (math.degrees(math.atan2(true_vx, true_vy)) + 360.0) % 360.0
+        vx = true_vx + self.rng.normal(0.0, self.vel_noise)
+        vy = true_vy + self.rng.normal(0.0, self.vel_noise)
+        self.sog = math.hypot(vx, vy)
+        self.cog = (math.degrees(math.atan2(vx, vy)) + 360.0) % 360.0
+
+        if self.heading_source == "cog" and self._anchor is not None and self.sog >= NAV_PARAMS["sog_cog_blend_mps"]:
+            self.heading_deg = self.cog
+            self._anchor = (self.x, self.y)
+            return True
 
         if self._anchor is None:
             self._anchor = (self.x, self.y)

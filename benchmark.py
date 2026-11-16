@@ -148,7 +148,7 @@ def sample_scenarios(n, seed, course, meta):
 # =====================================================================
 
 class Episode:
-    def __init__(self, sc, model, course, cal, window_sec=None):
+    def __init__(self, sc, model, course, cal, window_sec=None, heading_source=None):
         self.sc, self.model, self.course = sc, model, course
         self.pwm = cal["pwm"]
         self.n_steps = int(round((window_sec or WINDOW_SEC) / DT))
@@ -156,7 +156,8 @@ class Episode:
         self.state = tuple(sc["state0"])
         x, y, psi, u, _ = self.state
         vx, vy = u * math.sin(psi) + sc["drift"][0], u * math.cos(psi) + sc["drift"][1]
-        self.gps = GPSEmulator(noise_m=sc["gps_noise"], bias_walk_m=sc["gps_bias_walk"], seed=sc["seed"])
+        self.gps = GPSEmulator(noise_m=sc["gps_noise"], bias_walk_m=sc["gps_bias_walk"], seed=sc["seed"],
+                               heading_source=heading_source)
         self.gps.update(0.0, x, y, vx, vy)
         self.gps.reset_heading_anchor()     # As on AUTO entry: heading unknown until 0.25 m of movement
         self.gps_hist = [(x, y, vx, vy)] * (int(round(GPS_LATENCY_SEC / DT)) + 1)
@@ -219,7 +220,7 @@ class Episode:
 
 
 def run_episode(controller, sc, model, course, cal, window_sec=None):
-    ep = Episode(sc, model, course, cal, window_sec)
+    ep = Episode(sc, model, course, cal, window_sec, getattr(controller, "heading_source", None))
     controller.reset(ep.obs(), cal)
     done = False
     while not done:
@@ -289,14 +290,19 @@ class PursuitController(Controller):
 
 
 class NavigatorController(Controller):
-    """The boat's real MultipathNavigator (lane switching, wall guard and the configured AUTO strategy)."""
+    """The boat's real MultipathNavigator (lane switching, wall guard and an AUTO strategy).
+    strategy/options override calibration.json's autonomous section; heading_source ("blend"/"cog") selects the
+    receiver heading estimate (NAV_PARAMS["heading_source"]) emulated for this controller."""
 
-    def __init__(self, name="boat_code"):
+    def __init__(self, name="boat_code", strategy=None, options=None, heading_source=None):
         self.name = name
+        self.strategy, self.options, self.heading_source = strategy, options or {}, heading_source
 
     def reset(self, obs, cal):
         from simulate_boat import make_navigator
         paths = {lane: mb.load_waypoints_csv(p) for lane, p in mb.PATH_FILES.items()}
+        if self.strategy is not None:
+            cal = dict(cal, autonomous={"strategy": self.strategy, self.strategy: dict(self.options)})
         self.nav = make_navigator(mb.MultipathNavigator, paths, cal)
         self.nav.enter_auto_mode(obs["lat"], obs["lon"], now_mono=obs["t"])
         self.cruise = cal["pwm"]["auto_throttle_ratio"]
@@ -312,6 +318,10 @@ class NavigatorController(Controller):
 def builtin_controllers():
     ctrls = [
         NavigatorController("boat_code (lanes + configured strategy)"),
+        NavigatorController("boat_code full_throttle", "full_throttle"),
+        NavigatorController("boat_code full_throttle + cog heading", "full_throttle", heading_source="cog"),
+        NavigatorController("boat_code full_throttle + cog + integral 0.6", "full_throttle",
+                            {"heading_integral_gain": 0.6}, heading_source="cog"),
         PursuitController("cruise_60 (constant 60%)", throttle="cruise"),
         PursuitController("adaptive (full if |CTE|<=0.3 & |herr|<=11)", throttle="adaptive"),
         PursuitController("full (always 100%)", throttle="full"),

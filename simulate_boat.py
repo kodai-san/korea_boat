@@ -129,6 +129,33 @@ def run_replay(args):
 # Closed-loop AUTO mode
 # =====================================================================
 
+def add_strategy_args(p):
+    p.add_argument("--strategy", default=None, help="Override calibration.json autonomous.strategy")
+    p.add_argument("--strategy-option", action="append", default=[], metavar="KEY=VALUE",
+                   help="Strategy option override, e.g. heading_integral_gain=0.3 (repeatable)")
+    p.add_argument("--heading-source", choices=["blend", "cog"], default=None,
+                   help="Receiver heading estimate (NAV_PARAMS heading_source) to emulate")
+    p.add_argument("--nav-param", action="append", default=[], metavar="KEY=VALUE",
+                   help="NAV_PARAMS override, e.g. shift_cte_m=99 to hold the start lane (repeatable)")
+
+
+def apply_strategy_args(cal, args):
+    if getattr(args, "heading_source", None):
+        mb.NAV_PARAMS["heading_source"] = args.heading_source
+    for kv in getattr(args, "nav_param", []):
+        k, v = kv.split("=", 1)
+        mb.NAV_PARAMS[k] = float(v)
+    if getattr(args, "strategy", None) or getattr(args, "strategy_option", None):
+        auto = dict(cal.get("autonomous", {}))
+        name = args.strategy or auto.get("strategy", "adaptive_throttle")
+        opts = dict(auto.get(name, {}))
+        for kv in args.strategy_option:
+            k, v = kv.split("=", 1)
+            opts[k] = float(v)
+        cal = dict(cal, autonomous={"strategy": name, name: opts})
+    return cal
+
+
 def make_navigator(nav_cls, paths, cal):
     """Build the navigator with the AUTO strategy configured in calibration.json, as the boat does.
     Older multipath_boat.py versions (before auto_strategies.py) have the throttle law built in."""
@@ -168,7 +195,8 @@ def simulate_auto_once(args, model, env, cal, nav_cls, seed, log_path=None, init
     state = (x, y, psi, 0.0, 0.0) if init_state is None else tuple(init_state)
     x, y = state[0], state[1]
 
-    gps = GPSEmulator(noise_m=args.gps_noise, bias_walk_m=args.gps_bias_walk, seed=seed)
+    gps = GPSEmulator(noise_m=args.gps_noise, bias_walk_m=args.gps_bias_walk, seed=seed,
+                      heading_source=getattr(args, "heading_source", None))
     gps.update(0.0, x, y, 0.0, 0.0)
     gps.reset_heading_anchor()
     lat, lon = gps.latlon()
@@ -264,7 +292,7 @@ def run_auto(args):
     model, meta = load_model_and_env()
     env = session_env(meta, args.session, args)
     drift, scale, bias = env
-    cal = mb.load_calibration(args.config)
+    cal = apply_strategy_args(mb.load_calibration(args.config), args)
     nav_cls = load_controller_class(args.controller)
     os.makedirs(OUT_DIR, exist_ok=True)
 
@@ -332,7 +360,7 @@ def run_validate_auto(args):
     session = os.path.basename(args.log)[len("multipath_log_"):-len(".csv")]
     env = session_env(meta, session, args)
     drift, scale, bias = env
-    cal = mb.load_calibration(args.config)
+    cal = apply_strategy_args(mb.load_calibration(args.config), args)
     nav_cls = load_controller_class(args.controller)
     i0, i1 = run.index_at(args.t0), run.index_at(args.t1)
     x0, y0, psi0, u0, r0 = run.state_at(i0)
@@ -441,6 +469,7 @@ def main():
     p_auto.add_argument("--start-offset", type=float, default=0.0, help="Lateral start offset, + = right of the lane (m)")
     p_auto.add_argument("--start-heading", type=float, default=0.0, help="Start heading offset from the path (deg)")
     p_auto.add_argument("--max-time", type=float, default=300.0)
+    add_strategy_args(p_auto)
 
     p_val = sub.add_parser("validate-auto", parents=[common], help="Closed-loop replay of a real AUTO run")
     p_val.add_argument("log")
@@ -454,6 +483,7 @@ def main():
     p_val.add_argument("--gust", type=float, default=6.0)
     p_val.add_argument("--gps-noise", type=float, default=0.02)
     p_val.add_argument("--gps-bias-walk", type=float, default=0.0)
+    add_strategy_args(p_val)
 
     args = parser.parse_args()
     if args.cmd == "replay":
