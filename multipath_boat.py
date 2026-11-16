@@ -18,6 +18,18 @@ main controller for multipath navigation (Left/Center/Right).
    - After crossing the finish line at the final waypoint (#65), or entering its radius, stop in neutral and return to MANUAL.
 4. National Geographic Information Institute (NGII) RTK corrections (NTRIP):
    a built-in background client sends $GNGGA sentences and injects RTCM3 corrections.
+
+[Session diagnostics]
+- logs/multipath_log_<session>.csv: telemetry plus GPS validity/age, NTRIP connection
+  state/attempts/response/errors, stream bytes received and their age, GGA sends,
+  and bytes written to the GPS serial port / write errors. Original columns stay first.
+- logs/multipath_events_<session>.log: UTC-timestamped connection attempts, server
+  responses, errors, GPS fix/validity transitions, and diagnostic summaries every 10 s
+  (also recorded while waiting for RC). Passwords and authorization headers are excluded.
+- Counters accumulate across reconnects. Blank rtcm_rx_age_sec means no stream data
+  has arrived; a growing age means data stopped, even if ntrip_connected remains 1.
+  Received/written byte counts do not prove the receiver accepted the corrections;
+  fix_quality 4/5 indicates an RTK solution. Telemetry is flushed once per second.
 """
 
 import argparse
@@ -25,6 +37,7 @@ import base64
 import csv
 import datetime
 import json
+import logging
 import math
 import os
 import signal
@@ -91,6 +104,21 @@ NAV_PARAMS = {
 
 DEFAULT_CALIBRATION_FILE = "calibration.json"
 CONTROL_LOOP_HZ = 20.0                # Main control loop frequency (20 Hz = 50 ms)
+SESSION_LOG = logging.getLogger("multipath_boat.session")
+SESSION_LOG.addHandler(logging.NullHandler())
+SESSION_LOG.propagate = False
+GPS_NTRIP_FIELDS = (
+    "gps_valid", "gps_age_sec", "ntrip_connected", "ntrip_status",
+    "ntrip_connection_attempts", "ntrip_last_response", "ntrip_last_error",
+    "rtcm_bytes_rx", "rtcm_rx_age_sec", "ntrip_gga_sent",
+    "rtcm_bytes_written", "rtcm_write_errors", "rtcm_last_write_error"
+)
+
+
+def log_event(message, level=logging.INFO):
+    """Keep important diagnostics in both the terminal and the session event log."""
+    print(message)
+    SESSION_LOG.log(level, message)
 
 # =====================================================================
 
@@ -365,6 +393,10 @@ class ZEDF9PReceiver:
         self.cog_deg = None
         self.latest_gga_raw = None
         self.last_fix_time = 0.0
+        self.rtcm_bytes_written = 0
+        self.rtcm_write_errors = 0
+        self.last_rtcm_write_error = ""
+        self._last_write_warning = None
 
         # Anchor position for estimating boat heading from the movement vector.
         self._anchor_lat = None
@@ -379,13 +411,25 @@ class ZEDF9PReceiver:
         print(f"[GPS] Connected to ZED-F9P ({self.port}, {self.baud} bps)")
 
     def write_rtcm(self, data_bytes):
-        if not data_bytes or self.ser is None or not self.ser.is_open:
+        if not data_bytes:
             return
         with self.write_lock:
             try:
-                self.ser.write(data_bytes)
-            except Exception:
-                pass
+                if self.ser is None or not self.ser.is_open:
+                    raise OSError("GPS serial port is not open")
+                written = self.ser.write(data_bytes)
+                with self.state_lock:
+                    self.rtcm_bytes_written += written
+                if written != len(data_bytes):
+                    raise OSError(f"Incomplete GPS serial write: {written}/{len(data_bytes)} bytes")
+            except Exception as exc:
+                with self.state_lock:
+                    self.rtcm_write_errors += 1
+                    self.last_rtcm_write_error = str(exc)
+                now = time.monotonic()
+                if self._last_write_warning is None or now - self._last_write_warning >= 10.0:
+                    log_event(f"[GPS RTCM ERROR] {exc}", logging.WARNING)
+                    self._last_write_warning = now
 
     def _update_movement_heading(self, new_lat, new_lon, sog_mps, rmc_cog):
         """Combine a minimum movement threshold with RMC course over ground for a stable boat heading."""
@@ -469,7 +513,10 @@ class ZEDF9PReceiver:
                 "sog_mps": self.sog_mps,
                 "heading_deg": self.heading_deg,
                 "gga_raw": self.latest_gga_raw,
-                "age_sec": age
+                "age_sec": age,
+                "rtcm_bytes_written": self.rtcm_bytes_written,
+                "rtcm_write_errors": self.rtcm_write_errors,
+                "last_rtcm_write_error": self.last_rtcm_write_error
             }
 
     def stop(self):
@@ -490,18 +537,68 @@ class NGII_NtripClient:
         self.thread = None
         self.connected = False
         self.rtcm_bytes_rx = 0
+        self.state_lock = threading.Lock()
+        self.status = "not_started"
+        self.connection_attempts = 0
+        self.last_response = ""
+        self.last_error = ""
+        self.last_rtcm_rx_time = None
+        self.gga_sent = 0
+
+    def get_snapshot(self):
+        with self.state_lock:
+            return {
+                "connected": self.connected,
+                "status": self.status,
+                "connection_attempts": self.connection_attempts,
+                "last_response": self.last_response,
+                "last_error": self.last_error,
+                "rtcm_bytes_rx": self.rtcm_bytes_rx,
+                "rtcm_rx_age_sec": (time.monotonic() - self.last_rtcm_rx_time
+                                    if self.last_rtcm_rx_time is not None else None),
+                "gga_sent": self.gga_sent
+            }
 
     def start(self):
         if not self.cfg.get("enabled", True):
-            print("[NTRIP] Disabled in the configuration.")
+            self.status = "disabled"
+            log_event("[NTRIP] Disabled in the configuration.")
             return
         user = str(self.cfg.get("user", "")).strip()
         if not user or user == "YOUR_NGII_ID":
-            print("[NTRIP WARNING] No NGII user ID is set in NTRIP_CONFIG. Continuing with standard GPS/DGPS.")
+            self.status = "missing_account"
+            log_event("[NTRIP WARNING] No NGII user ID is set in NTRIP_CONFIG. Continuing with standard GPS/DGPS.", logging.WARNING)
             return
         self.running = True
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
+
+    def _read_response(self, sock):
+        """Read a status line and preserve correction bytes sharing its TCP packet."""
+        response = b""
+        while self.running:
+            if len(response) > 16384:
+                raise ConnectionError("NTRIP response header exceeded 16 KiB")
+            if b"\n" in response:
+                first, remainder = response.split(b"\n", 1)
+                first_line = first.rstrip(b"\r").decode("ascii", errors="replace")
+                parts = first_line.split()
+                accepted = len(parts) >= 2 and parts[1] == "200" and (
+                    parts[0].startswith("HTTP/") or parts[0] == "ICY"
+                )
+                if not accepted:
+                    return first_line, False, b""
+                # NTRIP v1 may send only an ICY status line, without HTTP headers.
+                if parts[0] == "ICY":
+                    return first_line, True, remainder[2:] if remainder.startswith(b"\r\n") else remainder
+                for separator in (b"\r\n\r\n", b"\n\n"):
+                    if separator in response:
+                        return first_line, True, response.split(separator, 1)[1]
+            chunk = sock.recv(256)
+            if not chunk:
+                raise ConnectionError("NTRIP connection closed before a complete response")
+            response += chunk
+        raise ConnectionError("NTRIP stopped while awaiting a response")
 
     def _run(self):
         host = self.cfg["host"].strip()
@@ -514,6 +611,12 @@ class NGII_NtripClient:
         while self.running:
             sock = None
             try:
+                with self.state_lock:
+                    self.connection_attempts += 1
+                    attempt = self.connection_attempts
+                    self.status = "connecting"
+                    self.last_response = ""
+                log_event(f"[NTRIP] Connection attempt {attempt}: {host}:{port}/{mp}")
                 sock = socket.create_connection((host, port), timeout=8.0)
                 req = (
                     f"GET /{mp} HTTP/1.0\r\n"
@@ -525,50 +628,63 @@ class NGII_NtripClient:
                 )
                 sock.sendall(req.encode("ascii"))
 
-                header = b""
-                while self.running and b"\r\n\r\n" not in header and b"\n\n" not in header:
-                    chunk = sock.recv(256)
-                    if not chunk:
-                        break
-                    header += chunk
-                    if b"ICY 200 OK" in header or b"200 OK" in header:
-                        break
-
-                if b"200 OK" not in header:
-                    msg = header.decode("ascii", errors="ignore").strip().splitlines()
-                    first_line = msg[0] if msg else "No response"
-                    print(f"[NTRIP ERROR] Check server credentials and mountpoint: {first_line}")
+                # Only save the response status line, never the authorization request.
+                first_line, accepted, pending_data = self._read_response(sock)
+                with self.state_lock:
+                    self.last_response = first_line
+                if not accepted:
+                    with self.state_lock:
+                        self.status = "rejected"
+                        self.last_error = first_line
+                    log_event(f"[NTRIP ERROR] Check server credentials and mountpoint: {first_line}", logging.WARNING)
                     time.sleep(5.0)
                     continue
 
-                self.connected = True
-                print(f"[NTRIP] Connected to NGII ({host}:{port}/{mp})! Starting RTCM3 reception")
+                with self.state_lock:
+                    self.connected = True
+                    self.status = "connected"
+                    self.last_error = ""
+                log_event(f"[NTRIP] Connected to NGII ({host}:{port}/{mp})! Response: {first_line}")
                 sock.settimeout(2.0)
                 last_gga_sent = 0.0
+                first_data = True
 
                 while self.running:
                     now = time.monotonic()
                     snap = self.gps.get_snapshot()
                     if snap["gga_raw"] and (now - last_gga_sent >= gga_interval):
                         sock.sendall((snap["gga_raw"] + "\r\n").encode("ascii"))
+                        with self.state_lock:
+                            self.gga_sent += 1
                         last_gga_sent = now
 
                     try:
-                        data = sock.recv(2048)
+                        if pending_data:
+                            data, pending_data = pending_data, b""
+                        else:
+                            data = sock.recv(2048)
                         if not data:
                             raise ConnectionError("NTRIP stream closed")
-                        self.rtcm_bytes_rx += len(data)
+                        with self.state_lock:
+                            self.rtcm_bytes_rx += len(data)
+                            self.last_rtcm_rx_time = time.monotonic()
+                        if first_data:
+                            log_event(f"[NTRIP] First correction-stream data received: {len(data)} bytes")
+                            first_data = False
                         self.gps.write_rtcm(data)
                     except socket.timeout:
                         continue
 
             except Exception as exc:
-                if self.connected:
-                    print(f"[NTRIP RECONNECT PENDING] Connection lost: {exc}")
-                self.connected = False
+                with self.state_lock:
+                    self.connected = False
+                    self.status = "error"
+                    self.last_error = str(exc)
+                log_event(f"[NTRIP RECONNECT PENDING] {type(exc).__name__}: {exc}", logging.WARNING)
                 time.sleep(5.0)
             finally:
-                self.connected = False
+                with self.state_lock:
+                    self.connected = False
                 if sock is not None:
                     try:
                         sock.close()
@@ -579,6 +695,10 @@ class NGII_NtripClient:
         self.running = False
         if self.thread is not None:
             self.thread.join(timeout=1.0)
+        with self.state_lock:
+            if self.status not in ("disabled", "missing_account"):
+                self.status = "stopping" if self.thread and self.thread.is_alive() else "stopped"
+        SESSION_LOG.info("[NTRIP STOP] %s", self.get_snapshot())
 
 
 def load_waypoints_csv(filepath):
@@ -875,11 +995,49 @@ def load_calibration(path):
         return json.load(f)
 
 
-def open_telemetry_log():
+def open_session_log(stamp):
+    """Save timestamped diagnostic events separately from the 20 Hz telemetry."""
+    try:
+        os.makedirs("logs", exist_ok=True)
+        filepath = os.path.join("logs", f"multipath_events_{stamp}.log")
+        handler = logging.FileHandler(filepath, encoding="utf-8")
+        formatter = logging.Formatter("%(asctime)s UTC %(levelname)s %(message)s", "%Y-%m-%dT%H:%M:%S")
+        formatter.converter = time.gmtime
+        handler.setFormatter(formatter)
+        SESSION_LOG.setLevel(logging.INFO)
+        SESSION_LOG.addHandler(handler)
+        log_event(f"[LOG] Started recording diagnostic events: {filepath}")
+        return handler
+    except OSError as exc:
+        print(f"[LOG WARNING] Cannot write diagnostic events ({exc}); continuing without event logging.")
+        return None
+
+
+def gps_ntrip_diagnostics(gps_snap, ntrip_snap):
+    """Keep CSV columns and periodic event summaries consistent. Ages are seconds."""
+    return {
+        "gps_valid": int(gps_snap["valid"]),
+        "gps_age_sec": round(gps_snap["age_sec"], 3),
+        "ntrip_connected": int(ntrip_snap["connected"]),
+        "ntrip_status": ntrip_snap["status"],
+        "ntrip_connection_attempts": ntrip_snap["connection_attempts"],
+        "ntrip_last_response": ntrip_snap["last_response"],
+        "ntrip_last_error": ntrip_snap["last_error"],
+        "rtcm_bytes_rx": ntrip_snap["rtcm_bytes_rx"],
+        "rtcm_rx_age_sec": (round(ntrip_snap["rtcm_rx_age_sec"], 3)
+                            if ntrip_snap["rtcm_rx_age_sec"] is not None else ""),
+        "ntrip_gga_sent": ntrip_snap["gga_sent"],
+        "rtcm_bytes_written": gps_snap["rtcm_bytes_written"],
+        "rtcm_write_errors": gps_snap["rtcm_write_errors"],
+        "rtcm_last_write_error": gps_snap["last_rtcm_write_error"]
+    }
+
+
+def open_telemetry_log(stamp=None):
     """Create a telemetry CSV for QGIS/analysis; allow operation to continue if the filesystem is read-only."""
     try:
         os.makedirs("logs", exist_ok=True)
-        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        stamp = stamp or datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         filepath = os.path.join("logs", f"multipath_log_{stamp}.csv")
         f = open(filepath, "w", newline="", encoding="utf-8")
         writer = csv.writer(f)
@@ -888,8 +1046,10 @@ def open_telemetry_log():
             "latitude", "longitude", "cte_right_m", "boat_heading_deg",
             "target_bearing_deg", "servo_us", "esc_us",
             "rc_ch1_us", "rc_ch2_us", "rc_steer_norm", "rc_throttle_norm",
-            "num_sats", "hdop"
+            "num_sats", "hdop",
+            *GPS_NTRIP_FIELDS
         ])
+        f.flush()
         print(f"[LOG] Started recording telemetry: {filepath}")
         return f, writer
     except OSError as exc:
@@ -897,7 +1057,7 @@ def open_telemetry_log():
         return None, None
 
 
-def main():
+def main(session_stamp=None):
     parser = argparse.ArgumentParser(description="Haesucheon multipath autonomous boat controller")
     parser.add_argument("--config", default=DEFAULT_CALIBRATION_FILE, help="Path to calibration.json")
     parser.add_argument("--arduino-port", default=None, help="Manually override the Arduino port")
@@ -959,7 +1119,7 @@ def main():
     rc = ArduinoRCReader(ard_port, hw.get("arduino_baud", 115200))
     gps = ZEDF9PReceiver(gps_port, hw.get("gps_baud", 115200))
     ntrip = NGII_NtripClient(NTRIP_CONFIG, gps)
-    log_file, log_writer = open_telemetry_log()
+    log_file, log_writer = open_telemetry_log(session_stamp)
 
     running = True
 
@@ -994,6 +1154,32 @@ def main():
     print("=====================================================================\n")
 
     period_sec = 1.0 / CONTROL_LOOP_HZ
+    last_gps_state = None
+    last_diagnostic_log = None
+    last_log_flush = time.monotonic()
+
+    def record_diagnostics(now, gps_snap):
+        # Called after PWM outputs, including neutral failsafe outputs, are applied.
+        nonlocal last_gps_state, last_diagnostic_log, last_log_flush, log_writer
+        diagnostics = gps_ntrip_diagnostics(gps_snap, ntrip.get_snapshot())
+        gps_state = (gps_snap["fix_quality"], gps_snap["valid"])
+        if gps_state != last_gps_state:
+            SESSION_LOG.info("[GPS STATE] fix_quality=%d (%s), valid=%s, age=%.3fs",
+                             gps_snap["fix_quality"], FIX_QUALITY_NAMES.get(gps_snap["fix_quality"], "Unknown"),
+                             gps_snap["valid"], gps_snap["age_sec"])
+            last_gps_state = gps_state
+        if last_diagnostic_log is None or now - last_diagnostic_log >= 10.0:
+            SESSION_LOG.info("[DIAGNOSTICS] mode=%s, fix_quality=%d, %s",
+                             mode, gps_snap["fix_quality"], diagnostics)
+            last_diagnostic_log = now
+        if log_writer is not None and now - last_log_flush >= 1.0:
+            try:
+                log_file.flush()
+            except OSError as exc:
+                log_event(f"[LOG WARNING] Telemetry flush failed: {exc}", logging.WARNING)
+                log_writer = None
+            last_log_flush = now
+        return diagnostics
 
     try:
         while running:
@@ -1012,6 +1198,7 @@ def main():
                 if mode == "AUTO":
                     mode = "MANUAL"
                     print("\n[FAILSAFE] RC receiver signal lost -> stopping in neutral and switching to MANUAL")
+                record_diagnostics(loop_t0, gps_snap)
                 sys.stdout.write("\r[WAITING] Checking for an RC receiver signal...                                            ")
                 sys.stdout.flush()
                 time.sleep(period_sec)
@@ -1145,6 +1332,7 @@ def main():
             pca.set_pwm_us(esc_ch, esc_us)
 
             # 5) Display the live terminal status line and write CSV telemetry.
+            diagnostics = record_diagnostics(loop_t0, gps_snap)
             fq_short = FIX_QUALITY_NAMES.get(gps_snap["fix_quality"], str(gps_snap["fix_quality"]))
             hdg_txt = f"{gps_snap['heading_deg']:5.1f}" if gps_snap["heading_deg"] is not None else " N/A "
             if mode == "AUTO" and nav_info is not None and not nav_info["finished"]:
@@ -1183,9 +1371,11 @@ def main():
                         st_norm,
                         th_norm,
                         gps_snap["num_sats"],
-                        gps_snap["hdop"]
+                        gps_snap["hdop"],
+                        *diagnostics.values()
                     ])
-                except OSError:
+                except OSError as exc:
+                    log_event(f"[LOG WARNING] Telemetry write failed: {exc}", logging.WARNING)
                     log_writer = None
 
             elapsed = time.monotonic() - loop_t0
@@ -1212,4 +1402,15 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    session_stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    session_handler = open_session_log(session_stamp)
+    try:
+        main(session_stamp)
+    except Exception:
+        SESSION_LOG.exception("[SESSION ERROR] Controller exited with an exception")
+        raise
+    finally:
+        SESSION_LOG.info("[SESSION END]")
+        if session_handler is not None:
+            SESSION_LOG.removeHandler(session_handler)
+            session_handler.close()
