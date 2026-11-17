@@ -59,6 +59,31 @@ These commands launch the normal boat controller and initialize its hardware.
 `--config path/to/calibration.json` selects a different configuration file.
 The calibration tool preserves the autonomous section when loading and saving.
 
+## boat.py (web control page)
+
+`boat.py` uses the same AUTO controller: the multipath navigator, the strategy
+selected here, the GPS-course heading selector, and `navigation.finish_margin_m`.
+It reads `autonomous`, `navigation` and `pwm.auto_throttle_ratio` from
+`calibration.json` at start-up. Without that file it uses `02_adaptive_throttle`
+and a 0.60 cruise ratio. It ignores the other sections, because boat.py keeps its
+own ports and PWM constants.
+
+- **Steering:** the strategy's [-1, 1] output maps to `CENTER`..`max_RIGHT`
+  (positive) or `CENTER`..`max_LEFT` (negative). `STEER_SIGN = -1` swaps sides.
+- **Throttle:** cruise is `auto_throttle_ratio` of the way from `STOP` to the web
+  page's `max_GO`, and full power is `max_GO`. With a ratio of 1.0, cruise and
+  full power are the same.
+- **Lanes:** the web page's lane lock sets the AUTO lane and turns off lane
+  changes. Wall-guard recovery still applies.
+- **Safety:** boat.py keeps its own failsafes. These are the RC override, E-stop,
+  link-loss hold, GPS timeout, the 1 s bad-fix stop, the 5 s stall stop, and a 5 s
+  no-heading stop.
+- **Log columns:** the `auto_log_*.csv` file has these extra columns: `CTE_m`,
+  `Strategy`, `ThrottleBlend`, `HeadingSrc` and `WallGuard`.
+
+The web page's P/PID steering gains no longer affect AUTO. The camera BALLOON
+mode is unchanged.
+
 ## Finish margin
 
 Set `navigation.finish_margin_m` in `calibration.json` to continue past the finish

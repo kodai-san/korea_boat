@@ -62,6 +62,11 @@ except Exception:
     np = None
     CV_AVAILABLE = False
 
+# AUTO path following uses the same navigator, strategies and heading selector as multipath_boat.py
+from multipath_boat import MultipathNavigator, ZEDF9PReceiver, resolve_navigation_params, latlon_to_enu
+from auto_strategies import create_auto_strategy
+from gps_heading import MotionHeadingSelector
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # 스크립트 기준 경로 반환
@@ -384,7 +389,9 @@ def pwm_ready():
 
 log_filename = os.path.join(BASE_DIR, f"auto_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
 log_file = open(log_filename, "w", encoding="utf-8", buffering=8192)
-log_file.write("Time,Mode,Path,WP,Distance,Error,Lat,Lon,RTK,Speed_mps,PWM_Steer,PWM_Thr\n")
+log_file.write("Time,Mode,Path,WP,Distance,Error,Lat,Lon,RTK,Speed_mps,PWM_Steer,PWM_Thr,"
+               "CTE_m,Strategy,ThrottleBlend,HeadingSrc,WallGuard\n")
+LOG_NAV_BLANK = ",,,,,"  # MANUAL/BALLOON rows leave the AUTO-only columns blank
 
 # 범위 제한
 def clamp(v, lo, hi):
@@ -522,6 +529,64 @@ try:
     }).encode("utf-8")
 except Exception as e:
     raise SystemExit(f"CSV load error: {e}")
+
+# ---------------------------------------------------------------------------
+# AUTO controller (shared with multipath_boat.py). Uses the autonomous / navigation /
+# pwm.auto_throttle_ratio settings in calibration.json; without that file the defaults
+# apply (02_adaptive_throttle, cruise ratio 0.60). Steering [-1, 1] maps to
+# CENTER..max_LEFT/max_RIGHT; throttle blend [0, 1] maps from cruise (that ratio of
+# STOP..max_GO) up to max_GO.
+# ---------------------------------------------------------------------------
+AUTO_CONFIG_FILE = "calibration.json"
+LANE_KEYS = {"Left": "left", "Center": "center", "Right": "right"}
+LANE_NAMES = {v: k for k, v in LANE_KEYS.items()}
+
+
+def load_auto_controller():
+    cfg = {}
+    cfg_path = resolve_path(AUTO_CONFIG_FILE)
+    found = os.path.exists(cfg_path)
+    if found:
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+    nav_params = resolve_navigation_params(cfg.get("navigation", {}))
+    strategy = create_auto_strategy(cfg.get("autonomous", {}), nav_params)
+    ratio = cfg.get("pwm", {}).get("auto_throttle_ratio", 0.60)
+    if isinstance(ratio, bool) or not isinstance(ratio, (int, float)) or not math.isfinite(ratio):
+        raise ValueError("pwm.auto_throttle_ratio must be a finite number")
+    nav_paths = {
+        LANE_KEYS[name]: [(i + 1, lat, lon) for i, (lat, lon) in enumerate(pts)]
+        for name, pts in PATHS.items()
+    }
+    navigator = MultipathNavigator(nav_paths, nav_params, strategy=strategy)
+    selector = MotionHeadingSelector(strategy.options) if strategy.uses_gps_course else None
+    return navigator, strategy, selector, clamp(float(ratio), 0.20, 1.00), found
+
+
+try:
+    NAVIGATOR, AUTO_STRATEGY, HEADING_SELECTOR, AUTO_CRUISE_RATIO, AUTO_CONFIG_FOUND = load_auto_controller()
+except Exception as e:
+    raise SystemExit(f"AUTO controller config error ({AUTO_CONFIG_FILE}): {e}")
+
+# Parser copy for the controller: read_latest_gps() hands it every NMEA sentence (boat.py owns the port)
+NAV_GPS = ZEDF9PReceiver(port=None)
+
+
+def nav_steer_to_pwm(steer_norm):
+    """+1 = full right rudder; STEER_SIGN = -1 swaps sides."""
+    n = clamp(float(steer_norm), -1.0, 1.0) * STEER_SIGN
+    if n >= 0.0:
+        raw = CENTER + n * (max_RIGHT - CENTER)
+    else:
+        raw = CENTER + (-n) * (max_LEFT - CENTER)
+    return int(round(clamp(raw, max_LEFT, max_RIGHT)))
+
+
+def nav_throttle_to_pwm(blend):
+    """Blend 0 = cruise, 1 = max_GO (the web max-forward setting)."""
+    cruise = lerp(STOP, max_GO, AUTO_CRUISE_RATIO)
+    b = clamp(float(blend), 0.0, 1.0)
+    return int(round(cruise + b * (max_GO - cruise)))
 
 # NMEA XOR 체크섬 검증
 def verify_nmea_checksum(line):
@@ -698,6 +763,11 @@ def read_latest_gps(is_reversing=False):
             while gps_ser is not None and gps_ser.in_waiting > 0 and lines_read < MAX_SERIAL_LINES_LOOP:
                 line = gps_ser.readline().decode("ascii", errors="ignore").strip()
                 lines_read += 1
+                if line.startswith(("$GNGGA", "$GPGGA", "$GNRMC", "$GPRMC")):
+                    try:
+                        NAV_GPS.ingest_nmea_line(line)
+                    except (ValueError, IndexError):
+                        pass
                 if line.startswith("$GNGGA") or line.startswith("$GPGGA"):
                     gga = parse_gga(line)
                     if gga:
@@ -926,17 +996,6 @@ def safe_stop():
     _last_drive = None
     _need_safe_stop_retry = True
 
-# AUTO 전진 출력 계산
-def auto_drive(angle_err):
-    a = abs(angle_err)
-    if a >= 70:
-        t = 0.15
-    elif a <= 15:
-        t = 1.0
-    else:
-        t = 0.15 + 0.85 * (70.0 - a) / 55.0
-    return lerp(STOP, max_GO, t)
-
 _pid_integral = 0.0
 _pid_prev_err = None
 _pid_prev_t = 0.0
@@ -1085,69 +1144,6 @@ def reset_pid_state():
         shared_state["pidITerm"] = 0.0
         shared_state["pidDTerm"] = 0.0
 
-# AUTO 조향 출력 계산 (P / PID)
-def auto_steer(angle_err, now_t=None, spd_mps=0.0, gps_updated=True, wp_changed=False):
-    global _pid_integral, _pid_prev_err, _pid_prev_t, _pid_prev_err_t, _pid_d_filt
-    global _pid_last_p, _pid_last_i, _pid_last_d
-
-    if now_t is None:
-        now_t = time.time()
-
-    if STEER_CTRL_MODE != "PID":
-        p_term = angle_err * PID_KP
-        _pid_last_p, _pid_last_i, _pid_last_d = p_term, 0.0, 0.0
-        raw = CENTER - int(STEER_SIGN * p_term)
-        return clamp(raw, max_LEFT, max_RIGHT)
-
-    dt_loop = (now_t - _pid_prev_t) if (_pid_prev_t > 0.0 and (now_t - _pid_prev_t) <= 0.5) else 0.02
-    dt_loop = max(0.005, dt_loop)
-    _pid_prev_t = now_t
-
-    # P항
-    p_term = angle_err * PID_KP
-
-    # I항 (저속 잠금 및 Anti-Windup)
-    if PID_KI <= 0.0:
-        _pid_integral = 0.0
-        i_term = 0.0
-    else:
-        if _pid_prev_err is not None and not wp_changed and (angle_err * _pid_prev_err) < 0.0:
-            _pid_integral *= 0.5
-        if spd_mps >= 0.35 and abs(angle_err) < 60.0:
-            _pid_integral = clamp(_pid_integral + angle_err * dt_loop, -PID_I_MAX_DEG, PID_I_MAX_DEG)
-        i_term = _pid_integral * PID_KI
-
-    # D항 (GPS 주기 기준 변화율 및 LPF)
-    if PID_KD <= 0.0:
-        _pid_d_filt = 0.0
-        d_term = 0.0
-        _pid_prev_err = angle_err
-        _pid_prev_err_t = now_t
-    elif _pid_prev_err is None or wp_changed:
-        was_none = (_pid_prev_err is None)
-        _pid_prev_err = angle_err
-        _pid_prev_err_t = now_t
-        if was_none:
-            _pid_d_filt = 0.0
-        d_term = _pid_d_filt * PID_KD
-    else:
-        if gps_updated or abs(wrap180(angle_err - _pid_prev_err)) > 1e-4:
-            dt_gps = max(0.02, min(0.5, now_t - _pid_prev_err_t)) if _pid_prev_err_t > 0.0 else dt_loop
-            delta_err = wrap180(angle_err - _pid_prev_err)
-            raw_rate = clamp(delta_err / dt_gps, -45.0, 45.0)
-            _pid_d_filt = 0.60 * _pid_d_filt + 0.40 * raw_rate
-            _pid_prev_err = angle_err
-            _pid_prev_err_t = now_t
-        elif _pid_prev_err_t > 0.0 and (now_t - _pid_prev_err_t) > 0.5:
-            _pid_d_filt *= 0.9
-        d_term = _pid_d_filt * PID_KD
-
-    _pid_last_p, _pid_last_i, _pid_last_d = p_term, i_term, d_term
-
-    total_term = p_term + i_term + d_term
-    raw = CENTER - int(STEER_SIGN * total_term)
-    return clamp(raw, max_LEFT, max_RIGHT)
-
 # WP 좌표 조회
 def wp_coord(path_list, idx):
     return path_list[idx]
@@ -1166,23 +1162,6 @@ def pick_path(c_lat, c_lon, idx, current_name):
     if cur_d > SWITCH_DIST_M and (cur_d - best_d) >= SWITCH_MARGIN_M:
         return best_name, dists
     return current_name, dists
-
-# WP 도달 판정 및 인덱스 갱신
-def advance_index(c_lat, c_lon, path_name, idx):
-    path_list = PATHS[path_name]
-    while idx < total_waypoints:
-        lat, lon = path_list[idx]
-        d_cur = haversine(c_lat, c_lon, lat, lon)
-        if d_cur <= ARRIVE_DIST_M:
-            idx += 1
-            continue
-        if idx + 1 < total_waypoints and d_cur <= ARRIVE_DIST_M * 2.5:
-            nlat, nlon = path_list[idx + 1]
-            d_next = haversine(c_lat, c_lon, nlat, nlon)
-            if d_next + 0.3 < d_cur:
-                idx += 1
-        break
-    return idx
 
 # 전방 주시 좌표(Lookahead) 계산
 def get_lookahead_target(c_lat, c_lon, path_list, idx):
@@ -1208,23 +1187,6 @@ def get_lookahead_target(c_lat, c_lon, path_list, idx):
             )
         curr_i += 1
     return path_list[-1]
-
-# 전방 최근접 WP 탐색
-def find_forward_waypoint(c_lat, c_lon, path_name, current_idx):
-    if c_lat is None or c_lon is None:
-        return current_idx if current_idx < total_waypoints else 0
-    path_list = PATHS[path_name]
-    start_i = 0 if current_idx >= total_waypoints else max(0, current_idx)
-
-    best_idx = start_i
-    best_dist = float("inf")
-    for i in range(start_i, total_waypoints):
-        lat, lon = path_list[i]
-        d = haversine(c_lat, c_lon, lat, lon)
-        if d < best_dist:
-            best_dist = d
-            best_idx = i
-    return best_idx
 
 # 시스템 온도·부하 조회
 def read_jetson_health():
@@ -2166,6 +2128,11 @@ def main_loop():
     high_power_warn_8m = False
     prev_loop_t = time.time()
 
+    nav_info = None
+    heading_info = None
+    last_nav_t = 0.0
+    was_auto = False
+
     balloon_last_seen_t = 0.0
     balloon_mode_start_t = 0.0
     balloon_last_angle_err = 0.0
@@ -2189,6 +2156,14 @@ def main_loop():
 
     load_pid_config()
     gcs_watchdog_enabled = bool(shared_state.get("linkWatchdog", True))
+    shared_state["autoStrategy"] = AUTO_STRATEGY.name
+    add_event_log(
+        "AUTO",
+        f"AUTO controller: {AUTO_STRATEGY.name} | cruise ratio {AUTO_CRUISE_RATIO:.2f} | "
+        f"finish margin {NAVIGATOR.finish_margin_m:g} m | settings: "
+        + (AUTO_CONFIG_FILE if AUTO_CONFIG_FOUND else "defaults (no calibration.json)"),
+        "auto",
+    )
 
     if NTRIP_ENABLE:
         threading.Thread(target=ntrip_worker, daemon=True).start()
@@ -2205,6 +2180,7 @@ def main_loop():
 
     while True:
         now = time.time()
+        now_mono = time.monotonic()
         loop_counter += 1
 
         if now - loop_rate_t >= 1.0:
@@ -2341,17 +2317,36 @@ def main_loop():
                       if spd_mps < 0.5:
                           _last_cog = None
                           last_lat, last_lon = c_lat, c_lon
-                      current_point = find_forward_waypoint(c_lat, c_lon, target_path, current_point)
-                      if path_auto_switch and current_point < total_waypoints:
-                          init_cand, _ = pick_path(c_lat, c_lon, current_point, target_path)
-                          if init_cand != target_path:
-                              target_path = init_cand
-                              current_point = find_forward_waypoint(c_lat, c_lon, target_path, current_point)
+                      # Shared navigator entry: nearest lane (or the locked lane) and a waypoint ahead
+                      NAV_GPS.reset_heading_anchor()
+                      heading_reused = False
+                      if HEADING_SELECTOR is not None:
+                          entry_snap = dict(
+                              NAV_GPS.get_snapshot(), heading_deg=None, position_heading_deg=None,
+                              position_heading_age_sec=None, position_heading_time_mono=None,
+                              position_speed_mps=None,
+                          )
+                          heading_reused = HEADING_SELECTOR.enter_auto(entry_snap, now_mono)
+                      NAVIGATOR.allow_lane_shift = path_auto_switch
+                      nav_lane, nav_wp, nav_dist = NAVIGATOR.enter_auto_mode(
+                          c_lat, c_lon, now_mono=now_mono,
+                          lane=None if path_auto_switch else LANE_KEYS[target_path],
+                      )
+                      target_path = LANE_NAMES[nav_lane]
+                      current_point = NAVIGATOR.target_idx
+                      nav_info = None
+                      last_nav_t = 0.0
                       with state_lock:
                           shared_state["mode"] = current_mode
                           shared_state["targetPath"] = target_path
                       mode_tag = "AUTO-LANE" if path_auto_switch else f"{target_path}-LOCKED"
-                      add_event_log("MODE", f"Web command -> AUTO (WP {current_point + 1}, {target_path} [{mode_tag}])", "auto")
+                      hdg_tag = " | heading: reusing recent GPS course" if heading_reused else ""
+                      add_event_log(
+                          "MODE",
+                          f"Web command -> AUTO (WP {nav_wp}, {target_path} [{mode_tag}], {nav_dist:.2f} m from lane, "
+                          f"{AUTO_STRATEGY.name}){hdg_tag}",
+                          "auto",
+                      )
               elif cmd_val == "MANUAL" and current_mode != "MANUAL":
                   current_mode = "MANUAL"
                   balloon_substate = "IDLE"
@@ -2429,6 +2424,18 @@ def main_loop():
                       shared_state["targetPath"] = target_path
                       shared_state["pathAutoSwitch"] = False
                   add_event_log("PATH", f"Follow lane '{target_path}' locked manually (AUTO disturbance switch off)", "auto")
+              # Apply to the shared navigator (re-enter on that lane when already in AUTO)
+              NAVIGATOR.allow_lane_shift = path_auto_switch
+              if current_mode == "AUTO" and c_lat is not None and c_lon is not None:
+                  nav_lane, _, _ = NAVIGATOR.enter_auto_mode(
+                      c_lat, c_lon, now_mono=now_mono,
+                      lane=None if path_auto_switch else LANE_KEYS[target_path],
+                  )
+                  target_path = LANE_NAMES[nav_lane]
+                  current_point = NAVIGATOR.target_idx
+                  last_nav_t = 0.0
+                  with state_lock:
+                      shared_state["targetPath"] = target_path
           elif cmd == "set_ctrl_mode" and cmd_val in ("P", "PID"):
               STEER_CTRL_MODE = cmd_val
               reset_pid_state()
@@ -2745,6 +2752,13 @@ def main_loop():
             stall_check_start_t = 0.0
             heading_none_start_t = now
             bad_fix_start_t = 0.0
+            if current_mode == "AUTO":
+                # Holding still breaks forward motion: reacquire heading and power ramp on resume
+                nav_info = None
+                last_nav_t = 0.0
+                if HEADING_SELECTOR is not None:
+                    HEADING_SELECTOR.suspend()
+                AUTO_STRATEGY.suspend()
             if now - last_dbg > 1.0:
                 safe_print(f"LINK_HOLD [waiting for GCS link -> holding stop] mode={current_mode} [RTK:{fix_status}]")
                 last_dbg = now
@@ -2785,7 +2799,7 @@ def main_loop():
                     val_lat = f"{c_lat:.7f}" if c_lat is not None else "0.0"
                     val_lon = f"{c_lon:.7f}" if c_lon is not None else "0.0"
                     try:
-                        log_file.write(f"{current_time},{current_mode},{target_path},{current_point + 1},{t_dist:.1f},{angle_err:.1f},{val_lat},{val_lon},{fix_status},{spd_mps:.2f},{steer},{drive}\n")
+                        log_file.write(f"{current_time},{current_mode},{target_path},{current_point + 1},{t_dist:.1f},{angle_err:.1f},{val_lat},{val_lon},{fix_status},{spd_mps:.2f},{steer},{drive}{LOG_NAV_BLANK}\n")
                     except Exception:
                         pass
             else:
@@ -2921,19 +2935,16 @@ def main_loop():
                         try:
                             log_file.write(
                                 f"{current_time},{current_mode},Balloon_{balloon_substate},{current_point + 1},"
-                                f"{t_dist:.1f},{angle_err:.1f},{val_lat},{val_lon},{fix_status},{spd_mps:.2f},{steer},{drive}\n"
+                                f"{t_dist:.1f},{angle_err:.1f},{val_lat},{val_lon},{fix_status},{spd_mps:.2f},{steer},{drive}"
+                                f"{LOG_NAV_BLANK}\n"
                             )
                         except Exception:
                             pass
 
-        # AUTO 모드 경로 tracking
+        # AUTO mode: shared multipath navigator + selected strategy (same control as multipath_boat.py)
         else:
-            balloon_substate = "IDLE" 
-            if current_point >= total_waypoints:
-                safe_stop()
-                current_mode = "MANUAL"
-                add_event_log("FINISH", f"Final WP {total_waypoints} reached -> MANUAL idle", "auto")
-            elif not gps_ok:
+            balloon_substate = "IDLE"
+            if not gps_ok:
                 safe_stop()
                 current_mode = "MANUAL"
                 add_event_log("FAILSAFE", "GPS timeout -> immediate stop and MANUAL", "warn")
@@ -2951,84 +2962,79 @@ def main_loop():
                 else:
                     bad_fix_start_t = 0.0
 
-                if not fix_abort:
+                # Update at the PWM rate (20 Hz): the strategies' steering slew limit assumes 20 Hz
+                if not fix_abort and (now - last_nav_t) >= PWM_PERIOD:
+                    last_nav_t = now
+                    nav_snap = NAV_GPS.get_snapshot()
+                    if HEADING_SELECTOR is not None:
+                        heading_info = HEADING_SELECTOR.select(nav_snap, now_mono)
+                    else:
+                        heading_info = {
+                            "heading_deg": nav_snap["heading_deg"], "source": "legacy_blend", "age_sec": None,
+                            "confident": nav_snap["heading_deg"] is not None, "state": "legacy",
+                        }
                     prev_wp = current_point
-                    current_point = advance_index(c_lat, c_lon, target_path, current_point)
-
-                    if current_point != prev_wp and current_point < total_waypoints:
+                    nav_info = NAVIGATOR.update(
+                        c_lat, c_lon, heading_info["heading_deg"], now_mono=now_mono,
+                        heading_confident=heading_info["confident"], motion=heading_info,
+                    )
+                    target_path = LANE_NAMES[nav_info["active_lane"]]
+                    current_point = NAVIGATOR.target_idx
+                    if nav_info["shifted_to"] is not None:
+                        add_event_log(
+                            "PATH",
+                            f"Disturbance AUTO lane switch -> {target_path} (CTE {nav_info['cte_right_m']:+.2f} m)",
+                            "auto",
+                        )
+                    elif current_point != prev_wp and not nav_info["finished"]:
                         add_event_log("NAV", f"WP {prev_wp + 1} passed -> WP {current_point + 1} tracking", "auto")
 
-                    if current_point >= total_waypoints:
+                    # Values shown on the web page
+                    nav_pts = NAVIGATOR.paths[nav_info["active_lane"]]
+                    _, t_lat, t_lon = nav_pts[min(current_point, len(nav_pts) - 1)]
+                    t_dist = haversine(c_lat, c_lon, t_lat, t_lon)
+                    target_angle = nav_info["target_bearing_deg"]
+                    if heading_info["heading_deg"] is not None:
+                        heading = heading_info["heading_deg"]
+                        angle_err = wrap180(target_angle - heading)
+                    else:
+                        angle_err = 0.0
+                    bx, by = latlon_to_enu(c_lat, c_lon, NAVIGATOR.ref_lat, NAVIGATOR.ref_lon)
+                    for lane_key, lane_name in LANE_NAMES.items():
+                        _, lane_d, _, _ = NAVIGATOR._closest_segment_metrics(lane_key, bx, by)
+                        shared_state["dist" + lane_name] = round(lane_d, 2)
+
+                    if nav_info["finished"]:
                         safe_stop()
                         current_mode = "MANUAL"
-                        add_event_log("FINISH", f"Final WP {total_waypoints} finished -> MANUAL", "auto")
+                        add_event_log(
+                            "FINISH",
+                            f"Finish crossed (WP {nav_info['wp_number']}, margin {NAVIGATOR.finish_margin_m:g} m) -> stop and MANUAL",
+                            "auto",
+                        )
                     else:
-                        cand_path, dists = pick_path(c_lat, c_lon, current_point, target_path)
-                        if path_auto_switch and cand_path != target_path:
-                            if gps:
-                                if path_switch_candidate == cand_path:
-                                    path_switch_count += 1
-                                else:
-                                    path_switch_candidate = cand_path
-                                    path_switch_count = 1
-                                if path_switch_count >= 2:
-                                    add_event_log("PATH", f"Disturbance AUTO lane switch: {target_path} -> {cand_path}", "auto")
-                                    target_path = cand_path
-                                    path_switch_count = 0
-                                    current_point = min(advance_index(c_lat, c_lon, target_path, current_point), total_waypoints - 1)
-                        else:
-                            path_switch_candidate = None
-                            path_switch_count = 0
+                        steer = nav_steer_to_pwm(nav_info["steer_norm"])
+                        drive = nav_throttle_to_pwm(nav_info["throttle_blend"])
+                        auto_abort = False
 
-                        shared_state["distCenter"] = round(dists.get("Center", 0.0), 2)
-                        shared_state["distLeft"] = round(dists.get("Left", 0.0), 2)
-                        shared_state["distRight"] = round(dists.get("Right", 0.0), 2)
-
-                        t_lat, t_lon = wp_coord(PATHS[target_path], current_point)
-                        t_dist = haversine(c_lat, c_lon, t_lat, t_lon)
-                        look_lat, look_lon = get_lookahead_target(c_lat, c_lon, PATHS[target_path], current_point)
-                        target_angle = gps_bearing(c_lat, c_lon, look_lat, look_lon)
-
-                        heading_abort = False
-                        if heading is None:
+                        # No heading yet: cruise straight ahead to acquire one; stop if it takes too long
+                        if heading_info["heading_deg"] is None:
                             if heading_none_start_t == 0.0:
                                 heading_none_start_t = now
-                            if last_lat is not None and last_lon is not None and haversine(last_lat, last_lon, c_lat, c_lon) >= HEADING_INIT_MOVE_M:
-                                est_heading = gps_bearing(last_lat, last_lon, c_lat, c_lon)
-                                last_lat, last_lon = c_lat, c_lon
-                                heading = est_heading
-                                heading_none_start_t = 0.0
-                                angle_err = wrap180(target_angle - heading)
-                                steer = auto_steer(
-                                    angle_err,
-                                    now_t=now,
-                                    spd_mps=spd_mps,
-                                    gps_updated=(gps is not None),
-                                    wp_changed=(current_point != prev_wp),
-                                )
-                                drive = auto_drive(angle_err)
-                            elif (now - heading_none_start_t) > min(HEADING_INIT_MAX_SEC, 2.5):
+                            elif (now - heading_none_start_t) > HEADING_INIT_MAX_SEC:
                                 safe_stop()
                                 current_mode = "MANUAL"
-                                heading_abort = True
-                                add_event_log("FAILSAFE", "Initial heading not acquired (>2.5s) -> safe stop and MANUAL", "warn")
-                            else:
-                                angle_err = 0.0
-                                steer, drive = CENTER, lerp(STOP, max_GO, 0.20)
+                                auto_abort = True
+                                add_event_log(
+                                    "FAILSAFE",
+                                    f"Heading not acquired (>{HEADING_INIT_MAX_SEC:g}s, {heading_info['state']}) -> safe stop and MANUAL",
+                                    "warn",
+                                )
                         else:
                             heading_none_start_t = 0.0
-                            angle_err = wrap180(target_angle - heading)
-                            steer = auto_steer(
-                                angle_err,
-                                now_t=now,
-                                spd_mps=spd_mps,
-                                gps_updated=(gps is not None),
-                                wp_changed=(current_point != prev_wp),
-                            )
-                            drive = auto_drive(angle_err)
 
-                        if not heading_abort:
-                            stall_abort = False
+                        # Stall watchdog while driving forward
+                        if not auto_abort:
                             if drive > STOP + 100:
                                 if stall_check_start_t == 0.0 or stall_ref_lat is None:
                                     stall_check_start_t = now
@@ -3043,28 +3049,49 @@ def main_loop():
                                         safe_stop()
                                         current_mode = "MANUAL"
                                         stall_check_start_t = 0.0
-                                        stall_abort = True
+                                        auto_abort = True
                                         shared_state["lampStall"] = "err"
                                         add_event_log("STALL", "Boat stalled ≥5s -> MANUAL", "warn")
                             else:
                                 stall_check_start_t = 0.0
 
-                            if not stall_abort:
-                                if ready and (now - last_pwm_t) >= PWM_PERIOD:
-                                    set_pwm(steer, drive)
-                                    last_pwm_t = now
+                        if not auto_abort:
+                            if ready:
+                                set_pwm(steer, drive)
+                                last_pwm_t = now
 
-                                if now - last_dbg > 0.5:
-                                    fix_str = "FIX" if fix_status == 4 else "FLT" if fix_status == 5 else "DGN" if fix_status == 2 else str(fix_status)
-                                    safe_print(f"AUTO P:{target_path} WP:{current_point + 1}/{total_waypoints} D:{t_dist:.1f}m ERR:{angle_err:.1f}deg [{fix_str}]")
-                                    last_dbg = now
-                                    current_time = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                                    val_lat = f"{c_lat:.7f}" if c_lat is not None else "0.0"
-                                    val_lon = f"{c_lon:.7f}" if c_lon is not None else "0.0"
-                                    try:
-                                        log_file.write(f"{current_time},{current_mode},{target_path},{current_point + 1},{t_dist:.1f},{angle_err:.1f},{val_lat},{val_lon},{fix_status},{spd_mps:.2f},{steer},{drive}\n")
-                                    except Exception:
-                                        pass
+                            if now - last_dbg > 0.5:
+                                fix_str = "FIX" if fix_status == 4 else "FLT" if fix_status == 5 else "DGN" if fix_status == 2 else str(fix_status)
+                                guard = " [WALL]" if nav_info["boundary_guard"] else ""
+                                safe_print(
+                                    f"AUTO {AUTO_STRATEGY.name} P:{target_path}{guard} WP:{current_point + 1}/{total_waypoints} "
+                                    f"CTE:{nav_info['cte_right_m']:+.2f}m ERR:{angle_err:+.1f}deg "
+                                    f"HDG:{heading_info['source']} BOOST:{nav_info['throttle_blend']:.2f} "
+                                    f"pwm={steer},{drive} [{fix_str}]"
+                                )
+                                last_dbg = now
+                                current_time = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                                try:
+                                    log_file.write(
+                                        f"{current_time},{current_mode},{target_path},{current_point + 1},{t_dist:.1f},"
+                                        f"{angle_err:.1f},{c_lat:.7f},{c_lon:.7f},{fix_status},{spd_mps:.2f},{steer},{drive},"
+                                        f"{nav_info['cte_right_m']:.3f},{AUTO_STRATEGY.name},{nav_info['throttle_blend']:.3f},"
+                                        f"{heading_info['source']},{int(nav_info['boundary_guard'])}\n"
+                                    )
+                                except Exception:
+                                    pass
+
+        # Leaving AUTO (finish, failsafe, override, E-stop, mode change): reset heading/strategy state
+        if was_auto and current_mode != "AUTO":
+            nav_info = None
+            if HEADING_SELECTOR is not None:
+                HEADING_SELECTOR.reset()
+            AUTO_STRATEGY.suspend()
+        was_auto = (current_mode == "AUTO")
+        # Outside AUTO, watch the actual forward command so the next AUTO entry can reuse a fresh GPS course
+        if HEADING_SELECTOR is not None and current_mode != "AUTO":
+            thr_sign = 0 if _last_drive is None else (1 if _last_drive > STOP else (-1 if _last_drive < STOP else 0))
+            HEADING_SELECTOR.observe_manual(NAV_GPS.get_snapshot(), thr_sign, now_mono)
 
         # 5200 고출력 연속 주행 시간 감시 (10분 초과 시 4800 자동 하향)
         dt_hp = clamp(now - prev_loop_t, 0.0, 0.2)
