@@ -3,13 +3,13 @@
 import math
 
 
-DEFAULT_AUTO_STRATEGY = "adaptive_throttle"
+DEFAULT_AUTO_STRATEGY = "02_adaptive_throttle"
 
 
 class ConstantCruiseStrategy:
     """Original main behavior: proportional heading steering and constant cruise."""
 
-    name = "constant_cruise"
+    name = "01_constant_cruise"
     uses_gps_course = False
     uses_predictive_guidance = False
     default_options = {}
@@ -83,7 +83,7 @@ class ConstantCruiseStrategy:
 class AdaptiveThrottleStrategy(ConstantCruiseStrategy):
     """Branch behavior: full ESC only when both tracking errors are small."""
 
-    name = "adaptive_throttle"
+    name = "02_adaptive_throttle"
     default_options = {"full_throttle_cte_m": 0.30, "full_throttle_heading_deg": 11.0}
     option_limits = {"full_throttle_cte_m": (0.0, None), "full_throttle_heading_deg": (0.0, 180.0)}
 
@@ -111,7 +111,7 @@ class GpsCourseProgressiveStrategy(ConstantCruiseStrategy):
     limited in time so GPS reacquisition cannot produce a full-power step.
     """
 
-    name = "gps_course_progressive"
+    name = "03_gps_course_progressive"
     uses_gps_course = True
     default_options = {
         "full_throttle_cte_m": 0.30,
@@ -202,7 +202,7 @@ class PredictiveRecoveryStrategy(GpsCourseProgressiveStrategy):
     dynamics, and its envelope is not a surveyed obstacle boundary.
     """
 
-    name = "predictive_recovery"
+    name = "04_predictive_recovery"
     uses_predictive_guidance = True
     default_options = dict(
         GpsCourseProgressiveStrategy.default_options,
@@ -349,11 +349,45 @@ class PredictiveRecoveryStrategy(GpsCourseProgressiveStrategy):
         )
 
 
-# Register new control strategies here; the main loop does not need strategy branches.
+# Numbers are permanent creation-order identifiers. Append 05, 06, ... for new
+# strategies; never renumber existing modes when adding or retiring one.
 AUTO_STRATEGIES = {
     cls.name: cls for cls in (ConstantCruiseStrategy, AdaptiveThrottleStrategy, GpsCourseProgressiveStrategy,
                             PredictiveRecoveryStrategy)
 }
+
+AUTO_STRATEGY_ALIASES = {
+    "constant_cruise": ConstantCruiseStrategy.name,
+    "adaptive_throttle": AdaptiveThrottleStrategy.name,
+    "gps_course_progressive": GpsCourseProgressiveStrategy.name,
+    "predictive_recovery": PredictiveRecoveryStrategy.name,
+}
+
+
+def canonical_auto_strategy_name(name):
+    """Accept historical names while reporting one stable numbered identifier."""
+    if isinstance(name, str):
+        canonical = AUTO_STRATEGY_ALIASES.get(name, name)
+        if canonical in AUTO_STRATEGIES:
+            return canonical
+    raise ValueError(f"Unknown autonomous strategy {name!r}; choose {', '.join(AUTO_STRATEGIES)}")
+
+
+def normalize_autonomous_config(config):
+    """Rename selectors and option blocks without mutating settings or choosing between duplicates."""
+    if not isinstance(config, dict):
+        raise ValueError("autonomous must be a JSON object")
+    normalized = {"strategy": canonical_auto_strategy_name(config.get("strategy", DEFAULT_AUTO_STRATEGY))}
+    for name, options in config.items():
+        if name == "strategy":
+            continue
+        if name not in AUTO_STRATEGIES and name not in AUTO_STRATEGY_ALIASES:
+            raise ValueError(f"Unknown autonomous setting {name!r}")
+        canonical = canonical_auto_strategy_name(name)
+        if canonical in normalized:
+            raise ValueError(f"Duplicate autonomous options for {canonical}; use one numbered or legacy block")
+        normalized[canonical] = options
+    return normalized
 
 
 def default_autonomous_config():
@@ -366,14 +400,8 @@ def default_autonomous_config():
 
 def create_auto_strategy(config, nav_params):
     """Validate configuration before hardware initialization; omitted settings use defaults."""
-    if not isinstance(config, dict):
-        raise ValueError("autonomous must be a JSON object")
-    unknown = config.keys() - ({"strategy"} | AUTO_STRATEGIES.keys())
-    if unknown:
-        raise ValueError(f"Unknown autonomous setting(s): {', '.join(sorted(unknown))}")
-    name = config.get("strategy", DEFAULT_AUTO_STRATEGY)
-    if not isinstance(name, str) or name not in AUTO_STRATEGIES:
-        raise ValueError(f"Unknown autonomous strategy {name!r}; choose {', '.join(AUTO_STRATEGIES)}")
+    config = normalize_autonomous_config(config)
+    name = config["strategy"]
     for configured_name, options in config.items():
         if configured_name != "strategy":
             strategy_type = AUTO_STRATEGIES[configured_name]

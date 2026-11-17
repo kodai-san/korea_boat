@@ -39,10 +39,10 @@ class PredictiveStrategyTests(unittest.TestCase):
 
     def test_new_strategy_is_opt_in_and_owns_independent_options(self):
         defaults = default_autonomous_config()
-        self.assertEqual(defaults["strategy"], "adaptive_throttle")
+        self.assertEqual(defaults["strategy"], "02_adaptive_throttle")
         self.assertTrue(self.create().uses_predictive_guidance)
         self.assertFalse(create_auto_strategy({}, NAV_PARAMS).uses_predictive_guidance)
-        defaults["predictive_recovery"]["lookahead_min_m"] = 10
+        defaults["04_predictive_recovery"]["lookahead_min_m"] = 10
         self.assertEqual(self.create().options["lookahead_min_m"], 2.4)
 
     def test_mirrored_convergence_gets_more_power_than_current_error_alone(self):

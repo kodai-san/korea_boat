@@ -35,12 +35,12 @@
     "full_reverse_ratio_threshold": 0.75
   },
   "autonomous": {
-    "strategy": "adaptive_throttle",
-    "adaptive_throttle": {
+    "strategy": "02_adaptive_throttle",
+    "02_adaptive_throttle": {
       "full_throttle_cte_m": 0.30,
       "full_throttle_heading_deg": 11.0
     },
-    "gps_course_progressive": {
+    "03_gps_course_progressive": {
       "full_throttle_cte_m": 0.30,
       "cruise_cte_m": 1.5,
       "full_throttle_heading_deg": 11.0,
@@ -52,7 +52,7 @@
       "forward_acquire_sec": 0.6,
       "forward_memory_sec": 4.0
     },
-    "predictive_recovery": {
+    "04_predictive_recovery": {
       "full_throttle_cte_m": 0.30,
       "cruise_cte_m": 1.5,
       "full_throttle_heading_deg": 11.0,

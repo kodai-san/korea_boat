@@ -4,6 +4,7 @@ import contextlib
 import copy
 import csv
 import io
+import json
 import math
 import os
 from pathlib import Path
@@ -29,14 +30,14 @@ class AutoStrategyTests(unittest.TestCase):
 
     def test_missing_config_preserves_current_adaptive_behavior(self):
         strategy = strategies.create_auto_strategy({}, boat.NAV_PARAMS)
-        self.assertEqual(strategy.name, "adaptive_throttle")
+        self.assertEqual(strategy.name, "02_adaptive_throttle")
         self.assertEqual(self.update(strategy)["throttle_blend"], 1.0)
 
     def test_default_configs_are_independent(self):
         first = strategies.default_autonomous_config()
-        first["adaptive_throttle"]["full_throttle_cte_m"] = 99
+        first["02_adaptive_throttle"]["full_throttle_cte_m"] = 99
         second = strategies.default_autonomous_config()
-        self.assertEqual(second["adaptive_throttle"]["full_throttle_cte_m"], 0.30)
+        self.assertEqual(second["02_adaptive_throttle"]["full_throttle_cte_m"], 0.30)
         self.assertEqual(second["strategy"], strategies.DEFAULT_AUTO_STRATEGY)
 
     def test_adaptive_requires_both_limits_inclusive_in_both_directions(self):
@@ -99,9 +100,9 @@ class AutoStrategyTests(unittest.TestCase):
 
     def test_calibration_load_save_preserves_strategy_and_tuning(self):
         config = calibrate_tool.default_calibration()
-        self.assertEqual(config["autonomous"]["strategy"], "adaptive_throttle")
-        config["autonomous"]["strategy"] = "constant_cruise"
-        config["autonomous"]["adaptive_throttle"]["full_throttle_cte_m"] = .12
+        self.assertEqual(config["autonomous"]["strategy"], "02_adaptive_throttle")
+        config["autonomous"]["strategy"] = "01_constant_cruise"
+        config["autonomous"]["02_adaptive_throttle"]["full_throttle_cte_m"] = .12
         with tempfile.TemporaryDirectory() as folder, contextlib.redirect_stdout(io.StringIO()):
             path = Path(folder) / "calibration.json"
             calibrate_tool.save_config(config, path)
@@ -109,6 +110,43 @@ class AutoStrategyTests(unittest.TestCase):
             calibrate_tool.save_config(loaded, path)
             result = boat.load_calibration(path)
         self.assertEqual(result["autonomous"], config["autonomous"])
+
+    def test_old_and_numbered_selectors_and_blocks_can_be_mixed(self):
+        for old, numbered in strategies.AUTO_STRATEGY_ALIASES.items():
+            for selector in (old, numbered):
+                for block in (old, numbered):
+                    with self.subTest(selector=selector, block=block):
+                        config = {"strategy": selector, block: {}}
+                        original = copy.deepcopy(config)
+                        self.assertEqual(strategies.create_auto_strategy(config, boat.NAV_PARAMS).name, numbered)
+                        self.assertEqual(config, original)
+
+    def test_calibration_migrates_old_tuning_before_merging_defaults(self):
+        legacy = {"autonomous": {"strategy": "predictive_recovery", "predictive_recovery": {
+            "lookahead_time_sec": 2.3, "throttle_rise_per_sec": .25}}}
+        with tempfile.TemporaryDirectory() as folder, contextlib.redirect_stdout(io.StringIO()):
+            path = Path(folder) / "calibration.json"
+            path.write_text(json.dumps(legacy))
+            loaded = calibrate_tool.load_config(path)
+            self.assertEqual(loaded["autonomous"]["strategy"], "04_predictive_recovery")
+            self.assertNotIn("predictive_recovery", loaded["autonomous"])
+            strategy = strategies.create_auto_strategy(loaded["autonomous"], boat.NAV_PARAMS)
+            self.assertEqual(strategy.options["lookahead_time_sec"], 2.3)
+            self.assertEqual(strategy.options["throttle_rise_per_sec"], .25)
+            original = copy.deepcopy(loaded)
+            calibrate_tool.save_config(loaded, path)
+            self.assertEqual(loaded, original)
+            self.assertEqual(boat.load_calibration(path)["autonomous"], loaded["autonomous"])
+
+    def test_duplicate_alias_blocks_fail_instead_of_discarding_tuning(self):
+        config = {"strategy": "adaptive_throttle", "adaptive_throttle": {}, "02_adaptive_throttle": {}}
+        with self.assertRaisesRegex(ValueError, "Duplicate"):
+            strategies.create_auto_strategy(config, boat.NAV_PARAMS)
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "calibration.json"
+            path.write_text(json.dumps({"autonomous": config}))
+            with self.assertRaisesRegex(ValueError, "Duplicate"):
+                calibrate_tool.load_config(path)
 
 
 class NavigatorStrategyTests(unittest.TestCase):
@@ -216,14 +254,15 @@ class AutoControllerIntegrationTests(unittest.TestCase):
                 self.assertEqual(rows[-1]["mode"], "AUTO")
                 self.assertEqual(int(rows[-1]["esc_us"]), pwm)
                 self.assertEqual(float(rows[-1]["throttle_blend"]), blend)
-                self.assertEqual({r["auto_strategy"] for r in rows}, {name})
+                self.assertEqual({r["auto_strategy"] for r in rows}, {strategies.canonical_auto_strategy_name(name)})
                 pca.set_pwm_us.assert_any_call(cal["hardware"]["esc_channel"], pwm)
 
     def test_legacy_json_and_cli_override_select_expected_behavior(self):
-        for args, omit in (((), True), (("--auto-strategy", "adaptive_throttle"), False)):
+        for args, omit in (((), True), (("--auto-strategy", "adaptive_throttle"), False),
+                           (("--auto-strategy", "02_adaptive_throttle"), False)):
             with self.subTest(args=args, legacy_json=omit):
                 rows, _, _ = self.run_auto("constant_cruise", args=args, omit_config=omit)
-                self.assertEqual(rows[-1]["auto_strategy"], "adaptive_throttle")
+                self.assertEqual(rows[-1]["auto_strategy"], "02_adaptive_throttle")
                 self.assertEqual(int(rows[-1]["esc_us"]), 1990)
 
     def test_strategy_cannot_override_finish_gps_stop_or_manual_return(self):

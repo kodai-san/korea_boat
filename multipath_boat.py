@@ -49,7 +49,7 @@ import sys
 import threading
 import time
 
-from auto_strategies import AUTO_STRATEGIES, create_auto_strategy
+from auto_strategies import AUTO_STRATEGIES, canonical_auto_strategy_name, create_auto_strategy
 from gps_heading import MotionHeadingSelector
 from path_guidance import interpolate_lookahead
 from spresense_stream import (
@@ -1368,8 +1368,9 @@ def main(session_stamp=None):
                         help="USB serial number identifying the Spresense, including generic CP210x bridges")
     parser.add_argument("--no-spresense", action="store_true", help="Disable the ArbaLabs GPS USB stream")
     parser.add_argument("--throttle-ratio", type=float, default=None, help="Override AUTO cruise throttle (adaptive strategy can still use full power)")
-    parser.add_argument("--auto-strategy", choices=sorted(AUTO_STRATEGIES), default=None,
-                        help="Override autonomous.strategy from the calibration JSON for this run")
+    parser.add_argument("--auto-strategy", type=canonical_auto_strategy_name,
+                        choices=sorted(AUTO_STRATEGIES), default=None,
+                        help="Override autonomous.strategy for this run (legacy unnumbered names also accepted)")
     args = parser.parse_args()
 
     cal = load_calibration(args.config)

@@ -29,10 +29,10 @@ class ProgressiveStrategyTests(unittest.TestCase):
 
     def test_new_mode_is_opt_in_and_has_independent_defaults(self):
         defaults = default_autonomous_config()
-        self.assertEqual(defaults["strategy"], "adaptive_throttle")
+        self.assertEqual(defaults["strategy"], "02_adaptive_throttle")
         self.assertTrue(self.create().uses_gps_course)
         self.assertFalse(create_auto_strategy({}, NAV_PARAMS).uses_gps_course)
-        defaults["gps_course_progressive"]["course_max_age_sec"] = 99
+        defaults["03_gps_course_progressive"]["course_max_age_sec"] = 99
         self.assertEqual(self.create().options["course_max_age_sec"], .6)
 
     def test_both_tracking_errors_limit_power_symmetrically(self):

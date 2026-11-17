@@ -4,8 +4,8 @@ Select the AUTO controller in `calibration.json`:
 
 ```json
 "autonomous": {
-  "strategy": "adaptive_throttle",
-  "adaptive_throttle": {
+  "strategy": "02_adaptive_throttle",
+  "02_adaptive_throttle": {
     "full_throttle_cte_m": 0.30,
     "full_throttle_heading_deg": 11.0
   }
@@ -15,16 +15,27 @@ Select the AUTO controller in `calibration.json`:
 This is a section of the existing JSON file. Keep the hardware, receiver, PWM,
 and mode-switch sections alongside it.
 
-| Strategy | Behavior |
-| --- | --- |
-| `constant_cruise` | Original main behavior: proportional heading steering and constant cruise throttle. |
-| `adaptive_throttle` | Existing branch behavior: the same steering, with full throttle when absolute cross-track error is at most 0.30 m and absolute heading error is at most 11 degrees; cruise otherwise. |
-| `gps_course_progressive` | Experimental fresh GPS-course steering, validated forward-motion handover, and progressive power between cruise and full throttle. |
-| `predictive_recovery` | GPS-course handover with predictive recovery power and continuous, speed-dependent lookahead along the selected path. |
+The numbers follow creation order and stay fixed as more strategies are added.
+
+| Number | Strategy | Behavior |
+| --- | --- | --- |
+| 1 | `01_constant_cruise` | Original main behavior: proportional heading steering and constant cruise throttle. |
+| 2 | `02_adaptive_throttle` | Existing branch behavior: the same steering, with full throttle when absolute cross-track error is at most 0.30 m and absolute heading error is at most 11 degrees; cruise otherwise. |
+| 3 | `03_gps_course_progressive` | Experimental fresh GPS-course steering, validated forward-motion handover, and progressive power between cruise and full throttle. |
+| 4 | `04_predictive_recovery` | GPS-course handover with predictive recovery power and continuous, speed-dependent lookahead along the selected path. |
+
+The original names `constant_cruise`, `adaptive_throttle`,
+`gps_course_progressive`, and `predictive_recovery` remain accepted aliases for
+their corresponding numbered strategies in JSON selectors, option-block keys,
+and CLI arguments. Defaults, new logs, and files saved by the calibration tool
+use the numbered names. Existing logs retain their recorded names.
+
+Use one option block per strategy. Supplying both its original and numbered
+option-block names is rejected, even if the settings are identical.
 
 Change only `autonomous.strategy` to switch strategies. The inactive strategy's
 settings can stay in the file. Missing `autonomous` or `strategy` settings select
-`adaptive_throttle`, preserving this branch's previous default. Settings are read
+`02_adaptive_throttle`, preserving this branch's previous default. Settings are read
 at startup; restart the controller after editing the file.
 
 `pwm.auto_throttle_ratio` sets the cruise throttle for all strategies. With the
@@ -38,20 +49,20 @@ hardware initialization, including settings supplied for an inactive strategy.
 To select a strategy for one run without changing the JSON:
 
 ```sh
-python3 multipath_boat.py --auto-strategy constant_cruise
-python3 multipath_boat.py --auto-strategy adaptive_throttle --throttle-ratio 0.60
-python3 multipath_boat.py --auto-strategy gps_course_progressive
-python3 multipath_boat.py --auto-strategy predictive_recovery
+python3 multipath_boat.py --auto-strategy 01_constant_cruise
+python3 multipath_boat.py --auto-strategy 02_adaptive_throttle --throttle-ratio 0.60
+python3 multipath_boat.py --auto-strategy 03_gps_course_progressive
+python3 multipath_boat.py --auto-strategy 04_predictive_recovery
 ```
 
 These commands launch the normal boat controller and initialize its hardware.
 `--config path/to/calibration.json` selects a different configuration file.
 The calibration tool preserves the autonomous section when loading and saving.
 
-## GPS-course progressive experiment
+## 03 — GPS-course progressive experiment
 
 To enable this mode for subsequent runs, set `autonomous.strategy` to
-`"gps_course_progressive"`. The checked-in JSON keeps `adaptive_throttle`
+`"03_gps_course_progressive"`. The checked-in JSON keeps `02_adaptive_throttle`
 selected and includes the new mode's settings for editing. The existing two
 strategies retain their heading and throttle behavior.
 
@@ -96,7 +107,7 @@ trusted heading and boundary recovery request cruise. A GPS hold still commands
 neutral, clears the power ramp and steering history, and requires forward-motion reacquisition when
 control resumes.
 
-The options in `autonomous.gps_course_progressive` are:
+The options in `autonomous["03_gps_course_progressive"]` are:
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
@@ -117,11 +128,11 @@ rate must be positive finite numbers. These defaults are experimental and need
 field validation; earlier steering and intermediate power do not guarantee a
 faster run or better recovery.
 
-## Predictive recovery experiment
+## 04 — Predictive recovery experiment
 
-Select `"predictive_recovery"` in `autonomous.strategy`, or use the CLI command
-above. Its independent settings live in `autonomous.predictive_recovery`.
-The checked-in JSON still selects `adaptive_throttle`; the other three modes
+Select `"04_predictive_recovery"` in `autonomous.strategy`, or use the CLI command
+above. Its independent settings live in `autonomous["04_predictive_recovery"]`.
+The checked-in JSON still selects `02_adaptive_throttle`; the other three modes
 retain their control behavior.
 
 This mode inherits the GPS-course progressive mode's heading acquisition,
@@ -236,7 +247,9 @@ cycles that do not compute predictive navigation.
 
 Implement a strategy in `auto_strategies.py` and register it in `AUTO_STRATEGIES`.
 The registry supplies JSON selection, CLI choices, validation, and calibration
-defaults. Each strategy provides:
+defaults. Give the next strategy the prefix `05_`, then continue in creation
+order. Never renumber existing strategies: their names identify configurations
+and historical runs. Each strategy provides:
 
 - A stable `name`, `default_options`, and option validation. `option_limits`
   supports finite numeric bounds; override `validate_options` for other options.
