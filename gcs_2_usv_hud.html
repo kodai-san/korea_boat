@@ -1,0 +1,4091 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <title>무인 자율운항 보트 관제</title>
+  <link id="leafletCssPrimary" rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" onerror="this.onerror=null;this.href='https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.min.css';" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script>
+    (function loadLeafletWithFallback() {
+      const urls = [
+        "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js",
+        "https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.min.js",
+        "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+      ];
+      let idx = 0;
+      function tryNext() {
+        if (typeof window.L !== "undefined") {
+          if (window.onLeafletLoaded) window.onLeafletLoaded();
+          return;
+        }
+        if (idx >= urls.length) return;
+        const s = document.createElement("script");
+        s.src = urls[idx++];
+        s.async = true;
+        s.onload = function() { if (window.onLeafletLoaded) window.onLeafletLoaded(); };
+        s.onerror = tryNext;
+        document.head.appendChild(s);
+      }
+      if (document.readyState === "loading") {
+        document.addEventListener("DOMContentLoaded", tryNext);
+      } else {
+        tryNext();
+      }
+    })();
+  </script>
+  <style>
+    :root {
+      --bg-canvas: #0d0e10;
+      --bg-panel: #141518;
+      --bg-header: #181a1e;
+      --bg-control: #1e2025;
+      --bg-control-hover: #262930;
+      --line-grid: #262930;
+      --line-subtle: #1e2026;
+      --line-strong: #383c45;
+      --text-primary: #f3f4f6;
+      --text-secondary: #9ca3af;
+      --text-muted: #6b7280;
+      --sig-nominal: #10b981;
+      --sig-caution: #f59e0b;
+      --sig-critical: #ef4444;
+      --path-center: #e5e7eb;
+      --path-left: #9ca3af;
+      --path-right: #f59e0b;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      font-family: "Inter", -apple-system, BlinkMacSystemFont, "Pretendard", "Segoe UI", sans-serif;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    body {
+      background-color: var(--bg-canvas);
+      color: var(--text-primary);
+      height: 100vh;
+      height: 100dvh;
+      overflow: hidden;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .mono {
+      font-family: "JetBrains Mono", "SFMono-Regular", Consolas, Menlo, monospace;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .hidden {
+      display: none !important;
+    }
+
+    .app-wrapper {
+      height: 100vh;
+      height: 100dvh;
+      display: flex;
+      flex-direction: column;
+      background-color: var(--line-grid);
+      gap: 1px;
+    }
+
+    .app-wrapper.blurred {
+      filter: blur(8px) brightness(0.45);
+      pointer-events: none;
+      user-select: none;
+    }
+
+    .system-bar {
+      height: 32px;
+      background-color: var(--bg-canvas);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 14px;
+      flex-shrink: 0;
+      gap: 12px;
+    }
+
+    .system-title {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 700;
+      font-size: 11.5px;
+      letter-spacing: 0.08em;
+      color: var(--text-primary);
+      white-space: nowrap;
+    }
+
+    .bridge-tag {
+      background-color: var(--text-primary);
+      color: var(--bg-canvas);
+      font-weight: 800;
+      font-size: 9.5px;
+      padding: 2px 5px;
+      letter-spacing: 0.08em;
+    }
+
+    .telemetry-pills {
+      display: flex;
+      align-items: center;
+      height: 100%;
+    }
+
+    .tel-pill {
+      height: 18px;
+      padding: 0 10px;
+      border-left: 1px solid var(--line-grid);
+      color: var(--text-muted);
+      font-size: 10.5px;
+      font-weight: 500;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      white-space: nowrap;
+    }
+
+    .tel-pill b {
+      color: var(--text-secondary);
+      font-weight: 600;
+    }
+
+    .sim-badge {
+      padding: 2px 8px;
+      margin-right: 6px;
+      border: 1px solid var(--line-strong);
+      background-color: var(--bg-panel);
+      color: var(--text-secondary);
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      cursor: pointer;
+    }
+
+    .header-bar {
+      background-color: var(--bg-panel);
+      padding: 8px 14px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      flex-shrink: 0;
+      z-index: 1000;
+    }
+
+    .mode-indicator {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 175px;
+    }
+
+    .mode-dot {
+      width: 4px;
+      height: 28px;
+      background-color: var(--text-primary);
+      flex-shrink: 0;
+    }
+    .mode-dot.auto { background-color: var(--sig-nominal); }
+    .mode-dot.estop { background-color: var(--sig-critical); }
+    .mode-dot.balloon { background-color: var(--sig-caution); }
+
+    .mode-text-wrap h1 {
+      font-size: 15px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      color: var(--text-primary);
+      line-height: 1.1;
+    }
+
+    .mode-text-wrap p {
+      font-size: 10px;
+      color: var(--text-muted);
+      letter-spacing: 0.05em;
+      margin-top: 2px;
+    }
+
+    .failsafe-matrix {
+      display: flex;
+      align-items: center;
+      border: 1px solid var(--line-grid);
+      background-color: var(--bg-canvas);
+    }
+
+    .fs-chip {
+      padding: 6px 10px;
+      border-right: 1px solid var(--line-grid);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.05em;
+      color: var(--text-secondary);
+      white-space: nowrap;
+    }
+    .fs-chip:last-child { border-right: none; }
+
+    .fs-lamp {
+      width: 6px;
+      height: 6px;
+      background-color: var(--sig-nominal);
+      flex-shrink: 0;
+    }
+    .fs-lamp.warn { background-color: var(--sig-caution); }
+    .fs-lamp.err { background-color: var(--sig-critical); }
+
+    .control-buttons {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .btn {
+      background-color: var(--bg-control);
+      color: var(--text-primary);
+      border: 1px solid var(--line-strong);
+      border-radius: 2px;
+      padding: 5px 12px;
+      font-weight: 700;
+      font-size: 11.5px;
+      letter-spacing: 0.05em;
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-width: 90px;
+      height: 38px;
+      user-select: none;
+      transition: background-color 0.1s ease, border-color 0.1s ease;
+    }
+    .btn:hover { background-color: var(--bg-control-hover); }
+    .btn:active { transform: translateY(1px); }
+
+    .btn-subtext {
+      font-size: 9px;
+      font-weight: 500;
+      color: var(--text-muted);
+      margin-top: 2px;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      white-space: nowrap;
+    }
+
+    .gps-ready-dot {
+      width: 5px;
+      height: 5px;
+      background-color: var(--sig-nominal);
+      display: inline-block;
+    }
+
+    .btn-mode-toggle.in-auto {
+      background-color: var(--text-primary);
+      color: var(--bg-canvas);
+      border-color: var(--text-primary);
+    }
+    .btn-mode-toggle.in-auto .btn-subtext { color: #374151; }
+
+    .btn-balloon-toggle.in-balloon {
+      background-color: var(--text-primary);
+      color: var(--bg-canvas);
+      border-color: var(--text-primary);
+    }
+    .btn-balloon-toggle.in-balloon .btn-subtext { color: #374151; }
+
+    .btn-estop {
+      background-color: #221416;
+      color: #fca5a5;
+      border-color: #7f1d1d;
+    }
+    .btn-estop:hover { background-color: #2f191c; }
+    .btn-estop.active {
+      background-color: var(--sig-critical);
+      color: #ffffff;
+      border-color: var(--sig-critical);
+    }
+
+    .bridge-workspace {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 1px;
+      background-color: var(--line-grid);
+      min-height: 0;
+    }
+
+    .upper-deck {
+      flex: 1;
+      display: grid;
+      grid-template-columns: 1.85fr 1fr;
+      grid-template-rows: minmax(0, 1fr);
+      gap: 1px;
+      background-color: var(--line-grid);
+      min-height: 0;
+    }
+
+    .viewport-deck {
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      background-color: var(--bg-panel);
+      min-height: 0;
+      height: 100%;
+      overflow: hidden;
+    }
+
+    .map-panel.pip-dock,
+    .cam-live-panel.pip-dock {
+      position: absolute !important;
+      left: 10px;
+      bottom: 10px;
+      width: clamp(220px, 24vw, 316px);
+      aspect-ratio: 16 / 9;
+      height: auto !important;
+      flex: none !important;
+      z-index: 520;
+      border: 1px solid var(--line-strong);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.72);
+    }
+    .map-panel.pip-dock #map { min-height: 0 !important; }
+    .map-panel.pip-dock .panel-header,
+    .cam-live-panel.pip-dock .panel-header {
+      height: 24px;
+      padding: 0 8px;
+      font-size: 9.5px;
+    }
+    .map-panel.pip-dock .map-legend,
+    .map-panel.pip-dock .map-btn-group,
+    .cam-live-panel.pip-dock .cam-osd-bar {
+      display: none !important;
+    }
+
+    .map-panel, .cam-live-panel, .mid-card, .info-card, .log-panel {
+      background-color: var(--bg-panel);
+      position: relative;
+      overflow: hidden;
+    }
+
+    .panel-header {
+      height: 32px;
+      padding: 0 12px;
+      background-color: var(--bg-header);
+      border-bottom: 1px solid var(--line-grid);
+      font-size: 10.5px;
+      font-weight: 700;
+      letter-spacing: 0.07em;
+      color: var(--text-secondary);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-shrink: 0;
+      gap: 8px;
+    }
+
+    .map-panel { flex: 1; display: flex; flex-direction: column; min-height: 0; height: 100%; }
+    #map {
+      flex: 1;
+      width: 100%;
+      height: 100%;
+      min-height: 220px;
+      position: relative;
+      z-index: 1;
+      background-color: #0f1012;
+      background-image:
+        linear-gradient(to right, rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+        linear-gradient(to bottom, rgba(255, 255, 255, 0.035) 1px, transparent 1px);
+      background-size: 36px 36px;
+    }
+    #map.leaflet-container { position: relative; overflow: hidden; outline: none; background-color: #0f1012; }
+    .map-center-btn.active { background-color: var(--text-primary); color: var(--bg-canvas); border-color: var(--text-primary); }
+
+    .map-legend {
+      position: absolute;
+      top: 40px;
+      right: 10px;
+      z-index: 500;
+      background-color: rgba(13, 14, 16, 0.92);
+      border: 1px solid var(--line-grid);
+      padding: 6px 10px;
+      font-size: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .legend-item { display: flex; align-items: center; gap: 6px; color: var(--text-secondary); font-weight: 600; }
+    .legend-line { width: 12px; height: 2px; }
+
+    .map-btn-group { position: absolute; bottom: 10px; right: 10px; z-index: 500; display: flex; gap: 4px; }
+    .map-center-btn {
+      background-color: rgba(20, 21, 24, 0.94);
+      color: var(--text-primary);
+      border: 1px solid var(--line-strong);
+      border-radius: 2px;
+      padding: 4px 9px;
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      cursor: pointer;
+    }
+    .map-center-btn:hover { background-color: var(--bg-control-hover); }
+
+    .cam-live-panel { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+    .cam-header-actions { display: flex; align-items: center; gap: 4px; }
+
+    .cam-mini-btn {
+      background-color: var(--bg-control);
+      color: var(--text-secondary);
+      border: 1px solid var(--line-strong);
+      border-radius: 2px;
+      padding: 3px 8px;
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      cursor: pointer;
+    }
+    .cam-mini-btn:hover { color: var(--text-primary); background-color: var(--bg-control-hover); }
+    .cam-mini-btn.active { background-color: var(--text-primary); color: var(--bg-canvas); border-color: var(--text-primary); }
+
+    .color-dot-preview {
+      width: 10px;
+      height: 10px;
+      border: 1px solid rgba(255, 255, 255, 0.45);
+      display: inline-block;
+      background-color: #ff2a85;
+    }
+
+    .cam-stage {
+      flex: 1;
+      position: relative;
+      background-color: #0b0c0e;
+      overflow: hidden;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .cam-stage.eyedropper-active {
+      cursor: crosshair !important;
+      outline: 1px dashed var(--text-primary);
+      outline-offset: -6px;
+    }
+
+    .cam-stream-img {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      display: block;
+    }
+    .cam-hud-canvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+
+    .cam-osd-bar {
+      position: absolute;
+      bottom: 8px;
+      left: 10px;
+      right: 10px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      pointer-events: none;
+      font-size: 10.5px;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+    .cam-osd-pill {
+      background-color: rgba(13, 14, 16, 0.88);
+      border: 1px solid var(--line-grid);
+      padding: 3px 8px;
+    }
+
+    .info-panel {
+      display: flex;
+      flex-direction: column;
+      gap: 1px;
+      background-color: var(--line-grid);
+      height: 100%;
+      min-height: 0;
+    }
+
+    #autoPanel {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      grid-auto-rows: 1fr;
+      gap: 1px;
+      background-color: var(--line-grid);
+    }
+    #autoPanel .span-two { grid-column: span 2; }
+
+    .info-card, .mid-card {
+      flex: 1;
+      padding: 10px 14px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      min-height: 0;
+    }
+
+    .card-label {
+      font-size: 10px;
+      font-weight: 700;
+      color: var(--text-muted);
+      letter-spacing: 0.08em;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+
+    .cockpit-dial-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-top: auto;
+      margin-bottom: auto;
+    }
+
+    .big-number {
+      font-size: clamp(24px, 2.1vw, 34px);
+      font-weight: 600;
+      letter-spacing: -0.02em;
+      line-height: 1;
+      color: var(--text-primary);
+    }
+
+    .unit-text {
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--text-muted);
+      margin-left: 4px;
+    }
+
+    .speed-dial-svg { width: 84px; height: 48px; flex-shrink: 0; }
+
+    .telegraph-strip {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      border: 1px solid var(--line-grid);
+      background-color: var(--bg-canvas);
+      margin-top: 6px;
+      font-size: 9.5px;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      text-align: center;
+    }
+    .tg-cell {
+      padding: 4px 0;
+      border-right: 1px solid var(--line-grid);
+      color: var(--text-muted);
+    }
+    .tg-cell:last-child { border-right: none; }
+    .tg-cell.active-rev { background-color: var(--sig-critical); color: #ffffff; }
+    .tg-cell.active-stop { background-color: #272a30; color: var(--text-primary); }
+    .tg-cell.active-fwd { background-color: var(--text-primary); color: var(--bg-canvas); }
+
+    .metrics-group {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-evenly;
+      gap: 8px;
+      margin-top: 4px;
+    }
+    .metric-row { display: flex; flex-direction: column; gap: 4px; }
+    .metric-header { display: flex; justify-content: space-between; font-size: 11px; font-weight: 600; color: var(--text-secondary); }
+    .metric-header span:last-child { color: var(--text-primary); }
+
+    .progress-track {
+      width: 100%;
+      height: 6px;
+      background-color: #22252b;
+      position: relative;
+      overflow: hidden;
+    }
+    .progress-center-mark { position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background-color: #71717a; z-index: 2; }
+    .progress-fill { height: 100%; background-color: #d4d4d8; transition: width 0.12s ease; }
+    .progress-fill.green { background-color: var(--sig-nominal); }
+    .progress-fill.pink { background-color: #e5e7eb; }
+
+    .path-badge-box {
+      flex: 1;
+      margin-top: 6px;
+      border-left: 2px solid var(--text-primary);
+      padding-left: 10px;
+      display: flex;
+      align-items: center;
+      font-size: 20px;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+
+    .wp-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: auto; margin-bottom: auto; }
+    .wp-bars { display: flex; gap: 3px; align-items: flex-end; height: 20px; }
+    .wp-bar { width: 4px; background-color: #272a30; }
+    .wp-bar.active { background-color: var(--text-primary); }
+
+    .gps-status-pill {
+      flex: 1;
+      margin-top: 6px;
+      padding: 6px 10px;
+      border: 1px solid var(--line-grid);
+      background-color: var(--bg-canvas);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 13px;
+      font-weight: 700;
+    }
+    .gps-fix { border-left: 3px solid var(--sig-nominal); color: var(--text-primary); }
+    .gps-flt { border-left: 3px solid var(--text-secondary); color: var(--text-primary); }
+    .gps-dgn { border-left: 3px solid var(--sig-caution); color: var(--sig-caution); }
+    .gps-bad { border-left: 3px solid var(--sig-critical); color: var(--sig-critical); }
+
+    .balloon-charge-pill { border-left: 3px solid var(--sig-nominal); color: var(--text-primary); }
+    .balloon-track-pill { border-left: 3px solid var(--text-primary); color: var(--text-primary); }
+    .balloon-search-pill { border-left: 3px solid var(--sig-caution); color: var(--sig-caution); }
+
+    .bottom-deck {
+      height: clamp(162px, 21.5vh, 192px);
+      display: grid;
+      grid-template-columns: 1.3fr 1.05fr 0.9fr 1.15fr;
+      gap: 1px;
+      background-color: var(--line-grid);
+      flex-shrink: 0;
+    }
+
+    .hud-gain-badge {
+      cursor: pointer;
+      padding: 2px 6px;
+      border: 1px solid var(--line-strong);
+      background-color: var(--bg-control);
+      color: var(--text-secondary);
+      font-size: 9.5px;
+      font-weight: 600;
+    }
+    .hud-gain-badge:hover { color: var(--text-primary); background-color: var(--bg-control-hover); }
+
+    .gyro-rudder-horizontal {
+      flex: 1;
+      display: grid;
+      grid-template-columns: 92px 1fr 128px;
+      gap: 12px;
+      align-items: center;
+      min-height: 0;
+    }
+
+    .compass-box {
+      width: 90px;
+      height: 90px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .hud-stats {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      border-top: 1px solid var(--line-subtle);
+      border-left: 1px solid var(--line-subtle);
+    }
+    .hud-stat-item {
+      padding: 6px 8px;
+      border-right: 1px solid var(--line-subtle);
+      border-bottom: 1px solid var(--line-subtle);
+    }
+    .hud-stat-label { font-size: 9px; font-weight: 600; color: var(--text-muted); letter-spacing: 0.05em; margin-bottom: 2px; }
+    .hud-stat-val { font-size: 14px; font-weight: 600; color: var(--text-primary); }
+
+    .rudder-mini-panel {
+      border-left: 1px solid var(--line-subtle);
+      padding-left: 12px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      height: 100%;
+    }
+    .rudder-header-row { display: flex; justify-content: space-between; font-size: 9px; font-weight: 600; color: var(--text-muted); }
+
+    .err-tape-track {
+      height: 5px;
+      background-color: #22252b;
+      position: relative;
+      overflow: hidden;
+    }
+    .err-tape-center { position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background-color: #9ca3af; z-index: 2; }
+    .err-tape-indicator {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      width: 8px;
+      background-color: var(--text-primary);
+      transform: translateX(-50%);
+      left: 50%;
+    }
+
+    .path-dist-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      border: 1px solid var(--line-grid);
+      background-color: var(--bg-canvas);
+      margin-top: 4px;
+    }
+    .path-dist-item {
+      padding: 6px 4px;
+      border-right: 1px solid var(--line-grid);
+      border-bottom: 2px solid transparent;
+      text-align: center;
+      cursor: pointer;
+    }
+    .path-dist-item:last-child { border-right: none; }
+    .path-dist-item.active-path {
+      background-color: #1c1e24;
+      border-bottom-color: var(--text-primary);
+    }
+    .path-dist-name { font-size: 9px; font-weight: 600; color: var(--text-muted); letter-spacing: 0.05em; margin-bottom: 2px; }
+    .path-dist-item.active-path .path-dist-name { color: var(--text-primary); }
+    .path-dist-val { font-size: 13px; font-weight: 600; color: var(--text-primary); }
+
+    .race-metrics-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      border-top: 1px solid var(--line-subtle);
+      padding-top: 6px;
+      margin-top: 6px;
+      gap: 6px;
+    }
+    .race-box { text-align: left; }
+    .race-box span { display: block; font-size: 9px; font-weight: 600; color: var(--text-muted); letter-spacing: 0.04em; margin-bottom: 2px; }
+    .race-box b { font-size: 12px; font-weight: 600; color: var(--text-primary); }
+
+    .fov-radar-wrap { flex: 1; display: flex; align-items: center; gap: 10px; min-height: 0; margin-top: 4px; }
+    .fov-canvas-box {
+      width: 110px;
+      height: 100%;
+      background-color: var(--bg-canvas);
+      border: 1px solid var(--line-subtle);
+      flex-shrink: 0;
+    }
+    #fovRadarCanvas { width: 100%; height: 100%; display: block; }
+
+    .chart-container {
+      flex: 1;
+      width: 100%;
+      min-height: 70px;
+      position: relative;
+      margin-top: 6px;
+      background-color: var(--bg-canvas);
+      border: 1px solid var(--line-subtle);
+      overflow: hidden;
+    }
+    #telemetryChart { width: 100%; height: 100%; display: block; }
+
+    .legend-dot { display: inline-block; width: 8px; height: 2px; vertical-align: middle; margin-right: 4px; }
+
+    .log-panel { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+    .log-body {
+      flex: 1;
+      padding: 6px 12px;
+      overflow-y: auto;
+      font-size: 10.5px;
+      line-height: 1.55;
+      color: var(--text-secondary);
+      background-color: var(--bg-canvas);
+    }
+    .log-entry { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .log-entry .log-time { color: var(--text-muted); margin-right: 6px; }
+    .log-entry .log-tag-auto { color: var(--text-primary); font-weight: 600; margin-right: 6px; }
+    .log-entry .log-tag-ntrip { color: var(--text-secondary); font-weight: 600; margin-right: 6px; }
+    .log-entry .log-tag-warn { color: var(--sig-caution); font-weight: 600; margin-right: 6px; }
+
+    .inline-select {
+      background-color: var(--bg-control);
+      color: var(--text-primary);
+      border: 1px solid var(--line-strong);
+      border-radius: 2px;
+      padding: 2px 6px;
+      font-size: 10px;
+      font-weight: 600;
+    }
+
+    .estop-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 9999;
+      background-color: rgba(10, 11, 13, 0.85);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    .estop-modal {
+      background-color: var(--bg-panel);
+      border: 1px solid var(--sig-critical);
+      border-top: 4px solid var(--sig-critical);
+      padding: 28px 26px;
+      max-width: 460px;
+      width: 100%;
+      text-align: center;
+      cursor: pointer;
+    }
+    .estop-badge {
+      display: inline-block;
+      color: var(--sig-critical);
+      font-size: 10.5px;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      margin-bottom: 8px;
+    }
+    .estop-title { font-size: 24px; font-weight: 700; color: var(--text-primary); margin-bottom: 8px; }
+    .estop-desc { font-size: 12px; color: var(--text-secondary); margin-bottom: 20px; }
+    .estop-unlock-box { background-color: var(--sig-critical); color: #ffffff; font-size: 12.5px; font-weight: 700; letter-spacing: 0.04em; padding: 12px 16px; }
+    .estop-unlock-box.step-one { background-color: var(--sig-caution); color: #0d0e10; }
+
+    .finish-banner {
+      position: fixed;
+      top: 48px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 9200;
+      background-color: var(--bg-header);
+      border: 1px solid var(--line-strong);
+      border-left: 4px solid var(--sig-nominal);
+      padding: 12px 18px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      color: var(--text-primary);
+      max-width: 600px;
+      width: calc(100% - 32px);
+    }
+    .finish-banner-title { font-size: 13.5px; font-weight: 700; letter-spacing: 0.04em; color: var(--text-primary); margin-bottom: 2px; }
+    .finish-banner-desc { font-size: 11.5px; color: var(--text-secondary); }
+
+    .pid-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 9500;
+      background-color: rgba(10, 11, 13, 0.82);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+    }
+    .pid-modal {
+      background-color: var(--bg-panel);
+      border: 1px solid var(--line-strong);
+      max-width: 840px;
+      width: 100%;
+      max-height: 92vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .pid-modal-header {
+      padding: 12px 16px;
+      background-color: var(--bg-header);
+      border-bottom: 1px solid var(--line-grid);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .pid-modal-title { font-size: 13.5px; font-weight: 700; letter-spacing: 0.05em; color: var(--text-primary); display: flex; align-items: center; gap: 10px; }
+    .pid-close-btn {
+      background-color: var(--bg-control);
+      color: var(--text-secondary);
+      border: 1px solid var(--line-strong);
+      border-radius: 2px;
+      padding: 5px 12px;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .pid-close-btn:hover { color: var(--text-primary); background-color: var(--bg-control-hover); }
+
+    .cfg-section-tabs {
+      display: flex;
+      background-color: var(--bg-canvas);
+      border-bottom: 1px solid var(--line-grid);
+    }
+    .cfg-sec-tab-btn {
+      background-color: transparent;
+      color: var(--text-muted);
+      border: none;
+      border-right: 1px solid var(--line-grid);
+      border-bottom: 2px solid transparent;
+      padding: 9px 16px;
+      font-size: 11.5px;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      cursor: pointer;
+    }
+    .cfg-sec-tab-btn.active {
+      background-color: var(--bg-panel);
+      color: var(--text-primary);
+      border-bottom-color: var(--text-primary);
+    }
+
+    .pid-modal-body { padding: 14px 16px; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
+    .pid-mode-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .pid-mode-tab {
+      background-color: var(--bg-canvas);
+      border: 1px solid var(--line-grid);
+      padding: 10px 12px;
+      cursor: pointer;
+      text-align: left;
+      color: var(--text-primary);
+    }
+    .pid-mode-tab.active-p, .pid-mode-tab.active-pid {
+      background-color: var(--bg-control);
+      border-color: var(--text-primary);
+    }
+    .pid-tab-head { display: flex; align-items: center; justify-content: space-between; font-size: 12.5px; font-weight: 700; margin-bottom: 4px; }
+    .pid-tab-desc { font-size: 11px; color: var(--text-secondary); line-height: 1.4; }
+
+    .pid-preset-bar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; background-color: var(--bg-canvas); border: 1px solid var(--line-grid); padding: 8px 10px; }
+    .pid-preset-btn { background-color: var(--bg-control); color: var(--text-secondary); border: 1px solid var(--line-strong); border-radius: 2px; padding: 4px 9px; font-size: 10.5px; font-weight: 600; cursor: pointer; }
+    .pid-preset-btn:hover { color: var(--text-primary); background-color: var(--bg-control-hover); }
+
+    .pid-live-strip { display: grid; grid-template-columns: repeat(5, 1fr); background-color: var(--bg-canvas); border: 1px solid var(--line-grid); }
+    .pid-live-cell { text-align: center; padding: 8px 6px; border-right: 1px solid var(--line-grid); }
+    .pid-live-cell:last-child { border-right: none; }
+    .pid-live-cell span { display: block; font-size: 9.5px; color: var(--text-muted); margin-bottom: 2px; }
+    .pid-live-cell b { font-size: 13.5px; font-weight: 600; color: var(--text-primary); }
+
+    .pid-param-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .pid-param-card { background-color: var(--bg-canvas); border: 1px solid var(--line-grid); padding: 10px 12px; display: flex; flex-direction: column; gap: 7px; }
+    .pid-param-card.disabled-card { opacity: 0.4; }
+    .pid-param-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .pid-param-name { font-size: 11.5px; font-weight: 700; letter-spacing: 0.04em; color: var(--text-primary); }
+    .pid-param-role { font-size: 9.5px; font-weight: 600; color: var(--text-muted); }
+    .pid-control-row { display: flex; align-items: center; gap: 6px; }
+    .pid-slider { flex: 1; accent-color: var(--text-primary); cursor: pointer; }
+    .pid-step-btn { background-color: var(--bg-control); color: var(--text-primary); border: 1px solid var(--line-strong); width: 24px; height: 24px; font-weight: 700; cursor: pointer; }
+    .pid-num-input { width: 58px; background-color: var(--bg-panel); color: var(--text-primary); border: 1px solid var(--line-strong); padding: 3px; font-size: 12px; font-weight: 600; text-align: center; }
+    .pid-guide-text { font-size: 10.5px; color: var(--text-muted); line-height: 1.4; padding-top: 2px; }
+
+    .pid-modal-footer { padding: 10px 16px; background-color: var(--bg-header); border-top: 1px solid var(--line-grid); display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+    .pid-apply-btn { background-color: var(--text-primary); color: var(--bg-canvas); border: 1px solid var(--text-primary); border-radius: 2px; padding: 7px 18px; font-size: 11.5px; font-weight: 700; letter-spacing: 0.04em; cursor: pointer; }
+    .pid-apply-btn:hover { background-color: #d1d5db; }
+
+    .speed-preset-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; }
+    .speed-preset-card { background-color: var(--bg-panel); border: 1px solid var(--line-grid); padding: 8px 6px; text-align: center; cursor: pointer; color: var(--text-secondary); }
+    .speed-preset-card.active { background-color: var(--bg-control); border-color: var(--text-primary); color: var(--text-primary); }
+    .speed-preset-card.caution-preset { border-color: #78350f; }
+    .speed-preset-card.caution-preset.active { background-color: #27170a; border-color: var(--sig-caution); color: var(--text-primary); }
+
+    .warn-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 9800;
+      background-color: rgba(10, 11, 13, 0.86);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    .warn-modal {
+      background-color: var(--bg-panel);
+      border: 1px solid var(--sig-caution);
+      border-top: 4px solid var(--sig-caution);
+      padding: 22px 22px 18px;
+      max-width: 440px;
+      width: 100%;
+    }
+    .warn-badge {
+      display: inline-block;
+      color: var(--sig-caution);
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      margin-bottom: 6px;
+    }
+    .warn-title { font-size: 17px; font-weight: 700; color: var(--text-primary); margin-bottom: 8px; }
+    .warn-desc { font-size: 12px; color: var(--text-secondary); line-height: 1.55; margin-bottom: 16px; }
+    .warn-actions { display: flex; justify-content: flex-end; gap: 8px; }
+    .warn-confirm-btn {
+      background-color: var(--sig-caution);
+      color: #0d0e10;
+      border: 1px solid var(--sig-caution);
+      border-radius: 2px;
+      padding: 6px 14px;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      cursor: pointer;
+    }
+    .warn-confirm-btn:hover { background-color: #fbbf24; }
+
+    .color-preset-chip { display: inline-flex; align-items: center; gap: 5px; background-color: var(--bg-control); color: var(--text-secondary); border: 1px solid var(--line-strong); border-radius: 2px; padding: 4px 8px; font-size: 10px; font-weight: 600; cursor: pointer; }
+    .color-preset-chip:hover { color: var(--text-primary); background-color: var(--bg-control-hover); }
+    .web-dpad-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 4px;
+      margin-top: 6px;
+    }
+    .web-dpad-btn {
+      background-color: var(--bg-control);
+      color: var(--text-primary);
+      border: 1px solid var(--line-strong);
+      border-radius: 2px;
+      padding: 6px 4px;
+      font-size: 10.5px;
+      font-weight: 700;
+      cursor: pointer;
+      user-select: none;
+      -webkit-user-select: none;
+      touch-action: none;
+    }
+    .web-dpad-btn:hover { background-color: var(--bg-control-hover); }
+    .web-dpad-btn:active, .web-dpad-btn.holding { background-color: var(--text-primary); color: var(--bg-canvas); border-color: var(--text-primary); }
+    .web-dpad-btn.stop-btn { background-color: #221416; color: #fca5a5; border-color: #7f1d1d; padding: 2px 7px; font-size: 9.5px; }
+    .web-dpad-btn.stop-btn:active, .web-dpad-btn.stop-btn.holding { background-color: var(--sig-critical); color: #ffffff; }
+
+    @media (max-width: 1180px) {
+      body, .app-wrapper { height: auto; min-height: 100vh; overflow-y: auto; overflow-x: hidden; }
+      .header-bar { position: sticky; top: 0; flex-wrap: wrap; }
+      .upper-deck { grid-template-columns: 1fr; }
+      .map-panel, .cam-live-panel { aspect-ratio: 16 / 9; height: auto; min-height: 240px; flex: none; }
+      .bottom-deck { height: auto; grid-template-columns: 1fr 1fr; }
+      .log-panel { height: 150px; }
+    }
+
+    @media (max-width: 768px) {
+      .control-buttons { width: 100%; display: grid; grid-template-columns: repeat(5, 1fr); gap: 4px; }
+      .btn { min-width: unset; width: 100%; padding: 4px; font-size: 10.5px; }
+      .bottom-deck, .pid-mode-tabs, .pid-param-grid, .speed-preset-grid { grid-template-columns: 1fr; }
+      .gyro-rudder-horizontal { grid-template-columns: 88px 1fr; }
+      .rudder-mini-panel { grid-column: span 2; border-left: none; border-top: 1px solid var(--line-subtle); padding-left: 0; padding-top: 8px; }
+    }
+  </style>
+</head>
+<body>
+
+  <div id="estopOverlay" class="estop-overlay hidden">
+    <div class="estop-modal" onclick="handleEstopOverlayClick()">
+      <div class="estop-badge mono">EMERGENCY HALT</div>
+      <div class="estop-title">E-STOP ACTIVE</div>
+      <p class="estop-desc">ALL PROPULSION &amp; STEERING OUTPUTS NEUTRALIZED</p>
+      <div id="estopUnlockBox" class="estop-unlock-box mono">DOUBLE TAP TO UNLOCK (0 / 2)</div>
+    </div>
+  </div>
+
+  <div id="missionFinishBanner" class="finish-banner hidden">
+    <div>
+      <div class="finish-banner-title">TARGET APPROACH COMPLETE</div>
+      <div id="missionFinishText" class="finish-banner-desc mono">TARGET REACHED / SWITCHED TO MANUAL</div>
+    </div>
+    <button type="button" class="pid-close-btn" onclick="dismissFinishBanner()">OK</button>
+  </div>
+
+  <div id="maxGoWarnOverlay" class="warn-overlay hidden" onclick="cancelHighThrust5200()">
+    <div class="warn-modal" onclick="event.stopPropagation()">
+      <div class="warn-badge mono">THERMAL &amp; ESC OVERLOAD CAUTION</div>
+      <div class="warn-title">고출력 모드 (PWM 5200) 실행 경고</div>
+      <p class="warn-desc">
+        기본 출력(4800) 대비 약 <b>212%</b>의 최대 전류가 추진 모터와 변속기(ESC)에 인가됩니다.<br />
+        과열 및 소손 방지를 위해 <b>10분 이상 연속 주행하지 마십시오.</b><br />
+        <span class="mono" style="font-size:11px; color:var(--sig-caution);">* 10분 연속 고출력 주행 시 안전 출력(4800)으로 자동 감속됩니다.</span>
+      </p>
+      <div class="warn-actions">
+        <button type="button" class="pid-close-btn" onclick="cancelHighThrust5200()">취소 (기존 출력 유지)</button>
+        <button type="button" class="warn-confirm-btn" onclick="confirmHighThrust5200()">확인 후 5200 적용</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="pidConfigOverlay" class="pid-overlay hidden" onclick="handlePidOverlayBackdrop(event)">
+    <div class="pid-modal" onclick="event.stopPropagation()">
+      <div class="pid-modal-header">
+        <div class="pid-modal-title">
+          <span>SYSTEM &amp; CONTROL SETUP</span>
+          <span id="pidModalActiveBadge" class="mono" style="font-size:10.5px; padding:2px 7px; border:1px solid var(--line-strong); color:var(--text-secondary);">MAX_GO: 4800 | P</span>
+        </div>
+        <button type="button" class="pid-close-btn" onclick="closePidModal()">CLOSE</button>
+      </div>
+
+      <div class="cfg-section-tabs">
+        <button type="button" id="cfgTabBtnDriveVision" class="cfg-sec-tab-btn active" onclick="switchConfigSectionTab('DRIVE_VISION')">THRUST &amp; EO TARGET</button>
+        <button type="button" id="cfgTabBtnPid" class="cfg-sec-tab-btn" onclick="switchConfigSectionTab('PID')">STEER PID</button>
+        <button type="button" id="cfgTabBtnRemote" class="cfg-sec-tab-btn" onclick="switchConfigSectionTab('REMOTE')">REMOTE &amp; STREAM</button>
+      </div>
+
+      <div id="cfgSectionDriveVision" class="pid-modal-body">
+        <div class="pid-param-card">
+          <div class="pid-param-top">
+            <span class="pid-param-name">MAX THRUST PRESET (MAX_GO)</span>
+            <span class="pid-param-role mono">STEER FIXED / DRIVE ONLY</span>
+          </div>
+          <div class="speed-preset-grid mono">
+            <button type="button" id="spdPreset4700" class="speed-preset-card" onclick="selectMaxGoPreset(4700)">
+              <div style="font-size:9.5px; color:var(--text-muted);">SLOW (72%)</div>
+              <div style="font-size:15px; font-weight:700; color:var(--text-primary); margin:2px 0;">4700</div>
+              <div style="font-size:9px; color:var(--text-muted);"></div>
+            </button>
+            <button type="button" id="spdPreset4800" class="speed-preset-card active" onclick="selectMaxGoPreset(4800)">
+              <div style="font-size:9.5px; color:var(--sig-nominal); font-weight:700;">DEFAULT (100%)</div>
+              <div style="font-size:15px; font-weight:700; color:var(--text-primary); margin:2px 0;">4800</div>
+              <div style="font-size:9px; color:var(--text-muted);"></div>
+            </button>
+            <button type="button" id="spdPreset5000" class="speed-preset-card" onclick="selectMaxGoPreset(5000)">
+              <div style="font-size:9.5px; color:var(--text-muted);">CRUISE (156%)</div>
+              <div style="font-size:15px; font-weight:700; color:var(--text-primary); margin:2px 0;">5000</div>
+              <div style="font-size:9px; color:var(--text-muted);"></div>
+            </button>
+            <button type="button" id="spdPreset5100" class="speed-preset-card" onclick="selectMaxGoPreset(5100)">
+              <div style="font-size:9.5px; color:var(--text-muted);">FAST (184%)</div>
+              <div style="font-size:15px; font-weight:700; color:var(--text-primary); margin:2px 0;">5100</div>
+              <div style="font-size:9px; color:var(--text-muted);"></div>
+            </button>
+            <button type="button" id="spdPreset5200" class="speed-preset-card caution-preset" onclick="selectMaxGoPreset(5200)">
+              <div style="font-size:9.5px; color:var(--sig-caution); font-weight:700;">OVERDRIVE (212%)</div>
+              <div style="font-size:15px; font-weight:700; color:var(--sig-caution); margin:2px 0;">5200</div>
+              <div style="font-size:9px; color:var(--sig-caution);">MAX 10 MIN</div>
+            </button>
+          </div>
+          <div class="pid-guide-text">조향 중립(4500)과 정지 출력(4443)은 고정되며, 수동(RC·웹)·자율·비전 전 모드의 전진 최대 출력(MAX_GO)에 즉시 반영됩니다.</div>
+        </div>
+
+        <div class="pid-mode-tabs">
+          <button type="button" id="tabBalloonStop" class="pid-mode-tab active-pid" onclick="selectBalloonActionMode('APPROACH_STOP')">
+            <div class="pid-tab-head">
+              <span>APPROACH &amp; STOP</span>
+              <span class="mono" style="font-size:10px; color:var(--text-muted);">PINK SPHERE</span>
+            </div>
+            <p class="pid-tab-desc">목표 도달 시 정지 후 수동 모드 전환</p>
+          </button>
+          <button type="button" id="tabBalloonPop" class="pid-mode-tab" onclick="selectBalloonActionMode('RAM_POP')">
+            <div class="pid-tab-head">
+              <span>RAM &amp; POP</span>
+              <span class="mono" style="font-size:10px; color:var(--text-muted);">SMALL BALLOON</span>
+            </div>
+            <p class="pid-tab-desc">최대 추력으로 목표물 관통</p>
+          </button>
+        </div>
+
+        <div class="pid-preset-bar">
+          <span style="font-size:10.5px; font-weight:700; color:var(--text-muted);">PRESETS:</span>
+          <button type="button" class="pid-preset-btn" onclick="applyBalloonPreset('APPROACH_STOP', 3.5, 3.5, 30.0)">SPHERE 3.5m (STOP 3.5m)</button>
+          <button type="button" class="pid-preset-btn" onclick="applyBalloonPreset('APPROACH_STOP', 4.5, 4.5, 28.0)">SPHERE 4.5m (STOP 4.5m)</button>
+          <button type="button" class="pid-preset-btn" onclick="applyBalloonPreset('APPROACH_STOP', 3.5, 2.2, 42.0)">SPHERE CLOSE (STOP 2.2m)</button>
+          <button type="button" class="pid-preset-btn" onclick="applyBalloonPreset('RAM_POP', 0.3, 1.0, 60.0)">BALLOON 0.3m (RAM)</button>
+        </div>
+
+        <div class="pid-param-card">
+          <div class="pid-param-top">
+            <span class="pid-param-name" style="display:flex; align-items:center; gap:8px;">
+              <span id="modalColorPreviewDot" class="color-dot-preview"></span>
+              <span>TARGET COLOR LOCK</span>
+            </span>
+            <span id="modalHsvSummaryBadge" class="pid-param-role mono">H:166 +-10 / S&gt;=105 / V&gt;=80</span>
+          </div>
+          <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
+            <label class="color-preset-chip">
+              <span>PICKER</span>
+              <input id="targetColorPickerInput" type="color" value="#ff2a85" onchange="onColorPickerChanged(this.value)" style="width:20px; height:16px; border:none; background:transparent; cursor:pointer; padding:0;" />
+            </label>
+            <button type="button" class="color-preset-chip" onclick="selectTargetColorPreset('#ff2a85', 166, 9, 110, 80)"><span class="color-dot-preview" style="background:#ff2a85;"></span>HOT PINK</button>
+            <button type="button" class="color-preset-chip" onclick="selectTargetColorPreset('#ff1e38', 178, 7, 130, 85)"><span class="color-dot-preview" style="background:#ff1e38;"></span>RED</button>
+            <button type="button" class="color-preset-chip" onclick="selectTargetColorPreset('#ff7b00', 11, 7, 135, 95)"><span class="color-dot-preview" style="background:#ff7b00;"></span>ORANGE</button>
+            <button type="button" class="color-preset-chip" onclick="selectTargetColorPreset('#ffe600', 27, 8, 120, 95)"><span class="color-dot-preview" style="background:#ffe600;"></span>YELLOW</button>
+            <button type="button" class="color-preset-chip" onclick="selectTargetColorPreset('#00e676', 68, 12, 100, 75)"><span class="color-dot-preview" style="background:#00e676;"></span>GREEN</button>
+            <button type="button" class="color-preset-chip" onclick="selectTargetColorPreset('#00a8ff', 105, 12, 110, 80)"><span class="color-dot-preview" style="background:#00a8ff;"></span>BLUE</button>
+          </div>
+          <div class="pid-param-grid" style="margin-top:2px;">
+            <div class="pid-control-row mono">
+              <span style="font-size:10px; color:var(--text-muted); width:64px;">HUE(0-179)</span>
+              <input id="colorSliderHue" type="range" class="pid-slider" min="0" max="179" step="1" value="166" oninput="syncColorControl('Hue', this.value)" />
+              <input id="colorInputHue" type="number" class="pid-num-input" min="0" max="179" step="1" value="166" onchange="syncColorControl('Hue', this.value)" />
+            </div>
+            <div class="pid-control-row mono">
+              <span style="font-size:10px; color:var(--text-muted); width:64px;">TOL(+-H)</span>
+              <input id="colorSliderTol" type="range" class="pid-slider" min="3" max="35" step="1" value="10" oninput="syncColorControl('Tol', this.value)" />
+              <input id="colorInputTol" type="number" class="pid-num-input" min="3" max="35" step="1" value="10" onchange="syncColorControl('Tol', this.value)" />
+            </div>
+            <div class="pid-control-row mono">
+              <span style="font-size:10px; color:var(--text-muted); width:64px;">SAT MIN</span>
+              <input id="colorSliderSat" type="range" class="pid-slider" min="30" max="240" step="5" value="105" oninput="syncColorControl('Sat', this.value)" />
+              <input id="colorInputSat" type="number" class="pid-num-input" min="30" max="240" step="5" value="105" onchange="syncColorControl('Sat', this.value)" />
+            </div>
+            <div class="pid-control-row mono">
+              <span style="font-size:10px; color:var(--text-muted); width:64px;">VAL MIN</span>
+              <input id="colorSliderVal" type="range" class="pid-slider" min="30" max="240" step="5" value="80" oninput="syncColorControl('Val', this.value)" />
+              <input id="colorInputVal" type="number" class="pid-num-input" min="30" max="240" step="5" value="80" onchange="syncColorControl('Val', this.value)" />
+            </div>
+          </div>
+          <div class="pid-guide-text">HUE : 추적할 중심 색상 번호 / TOL : HUE에서 좌우로 허용할 오차 폭 / SAT MIN : 최소 채도 하한선 / VAL MIN : 최소 밝기 하한선</div>
+        </div>
+
+        <div class="pid-param-grid">
+          <div class="pid-param-card">
+            <div class="pid-param-top">
+              <span class="pid-param-name">TARGET DIAMETER (m)</span>
+              <span class="pid-param-role mono">DEFAULT 3.5m</span>
+            </div>
+            <div class="pid-control-row mono">
+              <button type="button" class="pid-step-btn" onclick="stepPidInput('visionInputDiam', -0.1, 0.2, 8.0)">-</button>
+              <input id="visionSliderDiam" type="range" class="pid-slider" min="0.2" max="8.0" step="0.1" value="3.5" oninput="syncVisionInput('Diam', this.value)" />
+              <button type="button" class="pid-step-btn" onclick="stepPidInput('visionInputDiam', 0.1, 0.2, 8.0)">+</button>
+              <input id="visionInputDiam" type="number" class="pid-num-input" min="0.2" max="8.0" step="0.1" value="3.5" onchange="syncVisionSlider('Diam', this.value, 0.2, 8.0)" />
+            </div>
+            <div class="pid-guide-text">실제 표적의 지름</div>
+          </div>
+          <div id="visionCardStopDist" class="pid-param-card">
+            <div class="pid-param-top">
+              <span class="pid-param-name">STOP DIST (m) &amp; AREA (%)</span>
+              <span class="pid-param-role mono">AUTO STOP</span>
+            </div>
+            <div class="pid-control-row mono">
+              <span style="font-size:10px; color:var(--text-muted); width:54px;">DIST(m)</span>
+              <button type="button" class="pid-step-btn" onclick="stepPidInput('visionInputStopDist', -0.5, 0.8, 15.0)">-</button>
+              <input id="visionSliderStopDist" type="range" class="pid-slider" min="0.8" max="15.0" step="0.5" value="3.5" oninput="syncVisionInput('StopDist', this.value)" />
+              <button type="button" class="pid-step-btn" onclick="stepPidInput('visionInputStopDist', 0.5, 0.8, 15.0)">+</button>
+              <input id="visionInputStopDist" type="number" class="pid-num-input" min="0.8" max="15.0" step="0.5" value="3.5" onchange="syncVisionSlider('StopDist', this.value, 0.8, 15.0)" />
+            </div>
+            <div class="pid-control-row mono">
+              <span style="font-size:10px; color:var(--text-muted); width:54px;">AREA(%)</span>
+              <button type="button" class="pid-step-btn" onclick="stepPidInput('visionInputStopArea', -2.0, 5.0, 80.0)">-</button>
+              <input id="visionSliderStopArea" type="range" class="pid-slider" min="5.0" max="80.0" step="1.0" value="30.0" oninput="syncVisionInput('StopArea', this.value)" />
+              <button type="button" class="pid-step-btn" onclick="stepPidInput('visionInputStopArea', 2.0, 5.0, 80.0)">+</button>
+              <input id="visionInputStopArea" type="number" class="pid-num-input" min="5.0" max="80.0" step="1.0" value="30.0" onchange="syncVisionSlider('StopArea', this.value, 5.0, 80.0)" />
+            </div>
+            <div class="pid-guide-text">계산된 거리가 DIST(m) 이하로 가까워지거나,<br>화면 대비 표적 면적이 AREA(%) 이상 커지면 도착 판정</div>
+          </div>
+        </div>
+      </div>
+
+      <div id="cfgSectionPid" class="pid-modal-body hidden">
+        <div class="pid-mode-tabs">
+          <button type="button" id="tabBtnModeP" class="pid-mode-tab active-p" onclick="selectModalCtrlMode('P')">
+            <div class="pid-tab-head">
+              <span>P CONTROL</span>
+              <span class="mono" style="font-size:10px; color:var(--text-muted);">BASIC</span>
+            </div>
+            <p class="pid-tab-desc">목표 방위각과 현재 선수각의 각도 오차에만 비례하여 조향</p>
+          </button>
+          <button type="button" id="tabBtnModePID" class="pid-mode-tab" onclick="selectModalCtrlMode('PID')">
+            <div class="pid-tab-head">
+              <span>PID CONTROL</span>
+              <span class="mono" style="font-size:10px; color:var(--text-muted);">DAMPED</span>
+            </div>
+            <p class="pid-tab-desc">비례 제어에 회전 관성 제어와 쏠림 보정을 결합하여 조향</p>
+          </button>
+        </div>
+
+        <div class="pid-preset-bar">
+          <span style="font-size:10.5px; font-weight:700; color:var(--text-muted);">PRESETS:</span>
+          <button type="button" class="pid-preset-btn" onclick="applyPidPreset('P', 15.0, 0.0, 0.0, 15.0)">P DEFAULT (평수면 - 기본)</button>
+          <button type="button" class="pid-preset-btn" onclick="applyPidPreset('PID', 15.0, 0.0, 3.5, 15.0)">STABLE PD (좌우 흔들림 억제)</button>
+          <button type="button" class="pid-preset-btn" onclick="applyPidPreset('PID', 15.0, 0.4, 3.5, 15.0)">DRIFT PID (조류 및 횡풍 보정)</button>
+          <button type="button" class="pid-preset-btn" onclick="applyPidPreset('PID', 12.5, 0.3, 4.5, 12.0)">SMOOTH PID (고속 조향)</button>
+        </div>
+
+        <div class="pid-live-strip mono">
+          <div class="pid-live-cell"><span>ERR</span><b id="modalLiveErr">0.0°</b></div>
+          <div class="pid-live-cell"><span>P 보정</span><b id="modalLiveP">0.0</b></div>
+          <div class="pid-live-cell"><span>I 보정</span><b id="modalLiveI">0.0</b></div>
+          <div class="pid-live-cell"><span>D 보정</span><b id="modalLiveD">0.0</b></div>
+          <div class="pid-live-cell"><span>SERVO PWM</span><b id="modalLivePwm">4500</b></div>
+        </div>
+
+        <div class="pid-param-grid">
+          <div class="pid-param-card">
+            <div class="pid-param-top"><span class="pid-param-name">Kp (기본 반응 강도)</span><span class="pid-param-role mono">GAIN</span></div>
+            <div class="pid-control-row mono">
+              <button type="button" class="pid-step-btn" onclick="stepPidInput('pidInputKp', -0.5, 1.0, 45.0)">-</button>
+              <input id="pidSliderKp" type="range" class="pid-slider" min="1.0" max="45.0" step="0.5" value="15.0" oninput="syncPidInputFromSlider('Kp', this.value)" />
+              <button type="button" class="pid-step-btn" onclick="stepPidInput('pidInputKp', 0.5, 1.0, 45.0)">+</button>
+              <input id="pidInputKp" type="number" class="pid-num-input" min="1.0" max="45.0" step="0.5" value="15.0" onchange="syncPidSliderFromInput('Kp', this.value, 1.0, 45.0)" />
+            </div>
+            <div class="pid-guide-text">경로 복귀가 느리면 값을 올리고 좌우로 진동하면 값을 내려야 함</div>
+          </div>
+
+          <div id="pidCardKd" class="pid-param-card disabled-card">
+            <div class="pid-param-top"><span class="pid-param-name">Kd (회전 브레이크 감도)</span><span class="pid-param-role mono">DAMPING</span></div>
+            <div class="pid-control-row mono">
+              <button type="button" class="pid-step-btn" onclick="stepPidInput('pidInputKd', -0.5, 0.0, 25.0)">-</button>
+              <input id="pidSliderKd" type="range" class="pid-slider" min="0.0" max="25.0" step="0.5" value="3.0" oninput="syncPidInputFromSlider('Kd', this.value)" />
+              <button type="button" class="pid-step-btn" onclick="stepPidInput('pidInputKd', 0.5, 0.0, 25.0)">+</button>
+              <input id="pidInputKd" type="number" class="pid-num-input" min="0.0" max="25.0" step="0.5" value="3.0" onchange="syncPidSliderFromInput('Kd', this.value, 0.0, 25.0)" />
+            </div>
+            <div class="pid-guide-text">선수 회전 속도가 빠를 때 미리 반대로 감쇠력을 주는 강도 (권장 : 2.5 ~ 4.5)</div>
+          </div>
+
+          <div id="pidCardKi" class="pid-param-card disabled-card">
+            <div class="pid-param-top"><span class="pid-param-name">Ki (누적 오차 보정)</span><span class="pid-param-role mono">DRIFT FIX</span></div>
+            <div class="pid-control-row mono">
+              <button type="button" class="pid-step-btn" onclick="stepPidInput('pidInputKi', -0.05, 0.0, 5.0)">-</button>
+              <input id="pidSliderKi" type="range" class="pid-slider" min="0.0" max="5.0" step="0.05" value="0.0" oninput="syncPidInputFromSlider('Ki', this.value)" />
+              <button type="button" class="pid-step-btn" onclick="stepPidInput('pidInputKi', 0.05, 0.0, 5.0)">+</button>
+              <input id="pidInputKi" type="number" class="pid-num-input" min="0.0" max="5.0" step="0.05" value="0.0" onchange="syncPidSliderFromInput('Ki', this.value, 0.0, 5.0)" />
+            </div>
+            <div class="pid-guide-text">바람, 조류, 하드웨어 편차 등으로 인해 배가 한 쪽으로 꾸준히 밀릴 때 0.2 ~ 0.6 사이로 설정</div>
+          </div>
+
+          <div id="pidCardIMax" class="pid-param-card disabled-card">
+            <div class="pid-param-top"><span class="pid-param-name">I-MAX (ANTI-WINDUP)</span><span class="pid-param-role mono">LIMIT</span></div>
+            <div class="pid-control-row mono">
+              <button type="button" class="pid-step-btn" onclick="stepPidInput('pidInputIMax', -1.0, 2.0, 40.0)">-</button>
+              <input id="pidSliderIMax" type="range" class="pid-slider" min="2.0" max="40.0" step="1.0" value="15.0" oninput="syncPidInputFromSlider('IMax', this.value)" />
+              <button type="button" class="pid-step-btn" onclick="stepPidInput('pidInputIMax', 1.0, 2.0, 40.0)">+</button>
+              <input id="pidInputIMax" type="number" class="pid-num-input" min="2.0" max="40.0" step="1.0" value="15.0" onchange="syncPidSliderFromInput('IMax', this.value, 2.0, 40.0)" />
+            </div>
+            <div class="pid-guide-text">적분값이 과하게 쌓여 조향타가 한쪽으로 고정되는 현상을 막기 위한 최대 한도</div>
+          </div>
+        </div>
+      </div>
+
+      <div id="cfgSectionRemote" class="pid-modal-body hidden">
+        <div class="pid-live-strip mono">
+          <div class="pid-live-cell"><span>NET RTT</span><b id="modalLiveRtt">-- ms</b></div>
+          <div class="pid-live-cell"><span>STREAM</span><b id="modalLiveStream">LTE 12FPS</b></div>
+          <div class="pid-live-cell"><span>LINK GUARD</span><b id="modalLiveWatchdog">ON (3.5s)</b></div>
+          <div class="pid-live-cell"><span>RC POLICY</span><b id="modalLiveRcPolicy">SHARED</b></div>
+          <div class="pid-live-cell"><span>CAM FLIP</span><b id="modalLiveCamFlip">0°</b></div>
+        </div>
+
+        <div class="pid-param-card">
+          <div class="pid-param-top">
+            <span class="pid-param-name">CAMERA STREAM PROFILE (저지연 영상 전송)</span>
+            <span class="pid-param-role mono">ALL MODES LIVE</span>
+          </div>
+          <div class="pid-mode-tabs">
+            <button type="button" id="tabStreamLte" class="pid-mode-tab active-pid" onclick="selectModalStreamMode(true)">
+              <div class="pid-tab-head">
+                <span>LTE LOW-LATENCY</span>
+                <span class="mono" style="font-size:10px; color:var(--sig-nominal);">12 FPS · 권장</span>
+              </div>
+              <p class="pid-tab-desc">원격 LTE 운항 시 영상 데이터양을 줄여 조종 및 비상정지 반응 지연을 최소화 (내부 비전 연산은 30FPS 유지)</p>
+            </button>
+            <button type="button" id="tabStreamHq" class="pid-mode-tab" onclick="selectModalStreamMode(false)">
+              <div class="pid-tab-head">
+                <span>HIGH QUALITY</span>
+                <span class="mono" style="font-size:10px; color:var(--text-muted);">25 FPS · 고화질</span>
+              </div>
+              <p class="pid-tab-desc">근거리 통신이 원활할 때 고프레임·고화질 실시간 전방 영상 전송</p>
+            </button>
+          </div>
+        </div>
+
+        <div class="pid-param-grid">
+          <div class="pid-param-card">
+            <div class="pid-param-top">
+              <span class="pid-param-name">LINK LOSS AUTO-HOLD (통신 끊김 정지)</span>
+              <span class="pid-param-role mono">FAILSAFE</span>
+            </div>
+            <div style="display:flex; gap:6px; margin-bottom:6px;" class="mono">
+              <button type="button" id="btnModalWatchdogOn" class="pid-preset-btn" style="flex:1; padding:6px;" onclick="selectModalWatchdog(true)">ON (회복까지 제자리 정지)</button>
+              <button type="button" id="btnModalWatchdogOff" class="pid-preset-btn" style="flex:1; padding:6px;" onclick="selectModalWatchdog(false)">OFF (감시 해제)</button>
+            </div>
+            <div class="pid-control-row mono">
+              <span style="font-size:10px; color:var(--text-muted); width:58px;">WAIT(s)</span>
+              <button type="button" class="pid-step-btn" onclick="stepPidInput('remoteInputTimeout', -0.5, 2.0, 10.0)">-</button>
+              <input id="remoteSliderTimeout" type="range" class="pid-slider" min="2.0" max="10.0" step="0.5" value="3.5" oninput="syncRemoteTimeout(this.value)" />
+              <button type="button" class="pid-step-btn" onclick="stepPidInput('remoteInputTimeout', 0.5, 2.0, 10.0)">+</button>
+              <input id="remoteInputTimeout" type="number" class="pid-num-input" min="2.0" max="10.0" step="0.5" value="3.5" onchange="syncRemoteTimeout(this.value, true)" />
+            </div>
+            <div class="pid-guide-text">중계 서버 통신이 WAIT(초) 이상 끊기면 연결이 회복될 때까지 제자리 정지(4443) 유지</div>
+          </div>
+
+          <div class="pid-param-card">
+            <div class="pid-param-top">
+              <span class="pid-param-name">RC OVERRIDE &amp; CAM FLIP (조종기·카메라)</span>
+              <span class="pid-param-role mono">REMOTE</span>
+            </div>
+            <div style="display:flex; gap:6px; margin-bottom:6px;" class="mono">
+              <button type="button" id="btnModalRcShared" class="pid-preset-btn" style="flex:1; padding:6px;" onclick="selectModalRcIgnore(false)">RC + 웹 병행 (기본)</button>
+              <button type="button" id="btnModalRcWebOnly" class="pid-preset-btn" style="flex:1; padding:6px;" onclick="selectModalRcIgnore(true)">웹 단독 (RC 간섭 차단)</button>
+            </div>
+            <div style="display:flex; gap:6px;" class="mono">
+              <button type="button" id="btnModalFlip0" class="pid-preset-btn" style="flex:1; padding:6px;" onclick="selectModalCamFlip(0)">카메라 정방향 (0°)</button>
+              <button type="button" id="btnModalFlip180" class="pid-preset-btn" style="flex:1; padding:6px;" onclick="selectModalCamFlip(180)">카메라 상하반전 (180°)</button>
+            </div>
+            <div class="pid-guide-text">장거리 운항 시 '웹 단독'을 선택하면 조종기 전파 이탈 경계의 노이즈로 인한 오작동을 차단</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="pid-modal-footer">
+        <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+          <button type="button" class="pid-preset-btn" onclick="selectMaxGoPreset(4800)">최대 전진 추력 초기화 (4800)</button>
+          <button type="button" class="pid-preset-btn" onclick="resetPidIntegralNow()">적분 보정값 초기화 (0)</button>
+          <span id="pidApplyFeedback" class="mono" style="font-size:11px; color:var(--sig-nominal);"></span>
+        </div>
+        <div style="display:flex; align-items:center; gap:8px;">
+          <button type="button" class="pid-close-btn" onclick="closePidModal()">CANCEL</button>
+          <button type="button" class="pid-apply-btn" onclick="applyPidSettingsToBoat()">APPLY &amp; SAVE</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="appWrapper" class="app-wrapper">
+    <div class="system-bar">
+      <div class="system-title">
+        <span class="bridge-tag">IBS CONNING</span>
+        <span>USV BRIDGE CONSOLE</span>
+        <span id="clockText" class="mono" style="color:var(--text-secondary); font-weight:600; font-size:11px;">00:00:00</span>
+      </div>
+      <div class="telemetry-pills mono">
+        <span id="simToggleBtn" class="sim-badge" onclick="toggleSimPause()">SIMULATION</span>
+        <div class="tel-pill">RTT <b id="telLinkRtt">-- ms</b></div>
+        <div class="tel-pill">LOOP <b id="telLoopHz">50.0 Hz</b></div>
+        <div class="tel-pill">RC <b id="telRcHz">48 Hz</b></div>
+        <div class="tel-pill">NTRIP <b id="telNtripBytes">18.4 KB</b></div>
+        <div class="tel-pill">SAT <b id="telSatCount">19</b> / HDOP <b id="telHdop">0.56</b></div>
+        <div class="tel-pill">CORE <b id="telJetson">CPU 31% | 47.5°C</b></div>
+      </div>
+    </div>
+
+    <div class="header-bar">
+      <div class="mode-indicator">
+        <div id="modeDot" class="mode-dot"></div>
+        <div class="mode-text-wrap">
+          <h1 id="modeTitle">MANUAL</h1>
+          <p id="modeSubtitle" class="mono">DIRECT RC</p>
+        </div>
+      </div>
+
+      <div class="failsafe-matrix mono">
+        <div class="fs-chip"><span id="lampLink" class="fs-lamp"></span><span id="lampLinkText">LINK</span></div>
+        <div class="fs-chip"><span id="lampRc" class="fs-lamp"></span>RC</div>
+        <div class="fs-chip"><span id="lampGps" class="fs-lamp"></span>GNSS</div>
+        <div class="fs-chip"><span id="lampGlitch" class="fs-lamp"></span>GLITCH</div>
+        <div class="fs-chip"><span id="lampStall" class="fs-lamp"></span>STALL</div>
+        <div class="fs-chip"><span id="lampSerial" class="fs-lamp"></span>I2C/USB</div>
+        <div class="fs-chip"><span id="lampCsv" class="fs-lamp"></span>TRACK</div>
+        <div class="fs-chip"><span id="lampCam" class="fs-lamp"></span>CAM</div>
+      </div>
+
+      <div class="control-buttons">
+        <button id="btnWpReset" type="button" class="btn" onclick="resetWaypoint()">
+          <span>WP RESET</span>
+          <span class="btn-subtext mono">WP 1</span>
+        </button>
+        <button id="btnPidConfig" type="button" class="btn" onclick="openPidModal()">
+          <span>SETUP</span>
+          <span id="btnPidSubText" class="btn-subtext mono">P | 4800</span>
+        </button>
+        <button id="btnModeSwitch" type="button" class="btn btn-mode-toggle" onclick="switchMode()">
+          <span id="btnModeMainText">AUTO</span>
+          <span id="btnModeSubText" class="btn-subtext mono">
+            <span id="gpsReadyDot" class="gps-ready-dot"></span>
+            <span id="gpsReadyLabel">GPS READY</span>
+          </span>
+        </button>
+        <button id="btnBalloonSwitch" type="button" class="btn btn-balloon-toggle" onclick="switchBalloonMode()">
+          <span id="btnBalloonMainText">VISION</span>
+          <span id="btnBalloonSubText" class="btn-subtext mono">
+            <span id="camReadyDot" class="gps-ready-dot"></span>
+            <span id="camReadyLabel">CAM READY</span>
+          </span>
+        </button>
+        <button id="btnEstop" type="button" class="btn btn-estop" onclick="triggerEstop()">
+          <span>E-STOP</span>
+          <span class="btn-subtext mono" style="color:inherit; opacity:0.75;">HALT</span>
+        </button>
+      </div>
+    </div>
+
+    <div class="bridge-workspace">
+      <div class="upper-deck">
+        <div class="viewport-deck">
+          <div id="mapPanel" class="map-panel">
+            <div class="panel-header">
+              <span id="mapPanelTitleText">ECDIS CHART · 65 WPs</span>
+              <div style="display:flex; align-items:center; gap:6px;">
+                <span id="coordText" class="mono" style="color:var(--text-primary); font-weight:600;">35.073109, 129.082918</span>
+                <button id="btnExpandMapPip" type="button" class="cam-mini-btn hidden" onclick="setPrimaryViewport('MAP')">확대</button>
+              </div>
+            </div>
+            <div id="map"></div>
+            <div class="map-legend mono">
+              <div class="legend-item"><span class="legend-line" style="background:var(--path-center);"></span>CENTER</div>
+              <div class="legend-item"><span class="legend-line" style="background:var(--path-left);"></span>PORT</div>
+              <div class="legend-item"><span class="legend-line" style="background:var(--path-right);"></span>STBD</div>
+              <div class="legend-item"><span class="legend-line" style="background:var(--sig-nominal);"></span>HDG</div>
+            </div>
+            <div class="map-btn-group">
+              <button id="btnLayerSat" type="button" class="map-center-btn active" onclick="switchMapLayer('SAT')">SAT</button>
+              <button id="btnLayerOsm" type="button" class="map-center-btn" onclick="switchMapLayer('OSM')">MAP</button>
+              <button id="btnLayerGrid" type="button" class="map-center-btn" onclick="switchMapLayer('GRID')">GRID</button>
+              <button type="button" class="map-center-btn" onclick="fitFullCourse()">FIT COURSE</button>
+              <button type="button" class="map-center-btn" onclick="centerOnBoat()">SHIP CENTER</button>
+              <button id="btnToggleCamPipVis" type="button" class="map-center-btn active" onclick="toggleCamPipHidden()">CAM PIP</button>
+            </div>
+          </div>
+
+          <div id="globalCamPanel" class="cam-live-panel pip-dock">
+            <div class="panel-header">
+              <span style="display:flex; align-items:center; gap:6px; min-width:0;">
+                <span id="camHeaderColorDot" class="color-dot-preview hidden"></span>
+                <span id="camHeaderTitleText">BOW LIVE CAM</span>
+                <span id="camHeaderHsvText" class="mono hidden" style="font-size:10px; color:var(--text-muted);">H:166 +-10 / S&gt;=105</span>
+              </span>
+              <div class="cam-header-actions">
+                <span id="camVisionOnlyActions" style="display:none; align-items:center; gap:4px;">
+                  <button id="btnEyedropperPick" type="button" class="cam-mini-btn" onclick="toggleEyedropperMode()">PICK COLOR</button>
+                  <button type="button" class="cam-mini-btn" onclick="openColorSetupModal()">COLOR</button>
+                  <button id="btnCamMaskToggle" type="button" class="cam-mini-btn" onclick="toggleCamMask()">MASK</button>
+                </span>
+                <button id="btnSwapCamViewport" type="button" class="cam-mini-btn" onclick="toggleCamPrimaryViewport()">확대</button>
+              </div>
+            </div>
+            <div id="camStageBox" class="cam-stage" onclick="handleCameraStageClick(event)">
+              <img id="globalCamLiveImg" class="cam-stream-img hidden" alt="EO Wide Stream" />
+              <canvas id="globalCamHudCanvas" class="cam-hud-canvas"></canvas>
+              <div class="cam-osd-bar mono">
+                <span id="globalCamStatusPill" class="cam-osd-pill">EO TARGET LOCKED</span>
+                <span id="globalCamMetricPill" class="cam-osd-pill">RNG --m | BRG 0.0° | 30 FPS</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div id="manualPanel" class="info-panel">
+          <div class="info-card">
+            <div class="card-label">
+              <span>SOG &amp; TELEGRAPH</span>
+              <span id="manGpsMiniText" class="mono" style="color:var(--sig-nominal);">RTK FIX (4)</span>
+            </div>
+            <div class="cockpit-dial-row">
+              <div>
+                <span id="manSpeedVal" class="big-number mono">0.8</span>
+                <span class="unit-text">m/s</span>
+                <div id="manSpeedKnots" class="mono" style="font-size:11px; color:var(--text-secondary); margin-top:3px;">1.56 kt</div>
+              </div>
+              <svg class="speed-dial-svg" viewBox="0 0 100 60">
+                <path d="M 10 52 A 40 40 0 0 1 90 52" fill="none" stroke="#262930" stroke-width="6" />
+                <path id="manSpeedArc" d="M 10 52 A 40 40 0 0 1 90 52" fill="none" stroke="#f3f4f6" stroke-width="6" stroke-dasharray="126" stroke-dashoffset="85" />
+                <text x="50" y="48" fill="#6b7280" font-size="8.5" font-weight="600" text-anchor="middle" class="mono">SOG</text>
+              </svg>
+            </div>
+            <div class="telegraph-strip mono">
+              <div id="tgRev" class="tg-cell">ASTERN</div>
+              <div id="tgStop" class="tg-cell">STOP</div>
+              <div id="tgSlow" class="tg-cell">SLOW</div>
+              <div id="tgHalf" class="tg-cell active-fwd">HALF</div>
+              <div id="tgFull" class="tg-cell">FULL</div>
+            </div>
+          </div>
+
+          <div class="info-card">
+            <div class="card-label"><span>RC INPUT</span><span class="mono">750~2050 us</span></div>
+            <div class="metrics-group">
+              <div class="metric-row">
+                <div class="metric-header"><span>STEER (ST)</span><span id="rcStText" class="mono">1360 us</span></div>
+                <div class="progress-track"><div class="progress-center-mark"></div><div id="rcStBar" class="progress-fill" style="width:50%;"></div></div>
+              </div>
+              <div class="metric-row">
+                <div class="metric-header"><span>THROTTLE (TH)</span><span id="rcThText" class="mono">1420 us</span></div>
+                <div class="progress-track"><div class="progress-center-mark"></div><div id="rcThBar" class="progress-fill green" style="width:62%;"></div></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="info-card">
+            <div class="card-label"><span>PWM OUTPUT</span><span class="mono">PCA9685</span></div>
+            <div class="metrics-group">
+              <div class="metric-row">
+                <div class="metric-header"><span>SERVO CH0</span><span id="pwmSteerText" class="mono">4500</span></div>
+                <div class="progress-track"><div class="progress-center-mark"></div><div id="pwmSteerBar" class="progress-fill" style="width:60%;"></div></div>
+              </div>
+              <div class="metric-row">
+                <div class="metric-header"><span>DRIVE CH6</span><span id="pwmDriveText" class="mono">4520</span></div>
+                <div class="progress-track"><div class="progress-center-mark"></div><div id="pwmDriveBar" class="progress-fill green" style="width:65%;"></div></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="info-card">
+            <div class="card-label">
+              <span>WEB REMOTE DRIVE (WASD · 방향키)</span>
+              <div style="display:flex; align-items:center; gap:6px;">
+                <span class="mono"><span id="manNextWpPreview">WP 1</span> · <span id="manNextDistPreview">1.4m</span></span>
+                <button type="button" id="dpadBtnStop" class="web-dpad-btn stop-btn mono" onmousedown="emergencyStopManualHold(event)" ontouchstart="emergencyStopManualHold(event)">STOP (SPC)</button>
+              </div>
+            </div>
+            <div class="web-dpad-grid mono">
+              <button type="button" id="dpadBtnFL" class="web-dpad-btn" onmousedown="startPointerHold('FL', event)" ontouchstart="startPointerHold('FL', event)">↖ 좌전진 (Q)</button>
+              <button type="button" id="dpadBtnF" class="web-dpad-btn" onmousedown="startPointerHold('F', event)" ontouchstart="startPointerHold('F', event)">↑ 전진 (W)</button>
+              <button type="button" id="dpadBtnFR" class="web-dpad-btn" onmousedown="startPointerHold('FR', event)" ontouchstart="startPointerHold('FR', event)">↗ 우전진 (E)</button>
+              <button type="button" id="dpadBtnL" class="web-dpad-btn" onmousedown="startPointerHold('L', event)" ontouchstart="startPointerHold('L', event)">← 좌회전 (A)</button>
+              <button type="button" id="dpadBtnB" class="web-dpad-btn" onmousedown="startPointerHold('B', event)" ontouchstart="startPointerHold('B', event)">↓ 후진 (S)</button>
+              <button type="button" id="dpadBtnR" class="web-dpad-btn" onmousedown="startPointerHold('R', event)" ontouchstart="startPointerHold('R', event)">→ 우회전 (D)</button>
+            </div>
+          </div>
+        </div>
+
+        <div id="autoPanel" class="info-panel hidden">
+          <div class="info-card span-two">
+            <div class="card-label">
+              <span>SOG &amp; REMAINING</span>
+              <span id="autoHeadingText" class="mono" style="color:var(--text-primary);">241°</span>
+            </div>
+            <div class="cockpit-dial-row">
+              <div>
+                <span id="autoSpeedVal" class="big-number mono">1.5</span>
+                <span class="unit-text">m/s</span>
+                <div id="autoRemainTotalText" class="mono" style="font-size:11px; color:var(--text-secondary); margin-top:3px;">REM 90.8m / 2.9 kt</div>
+              </div>
+              <svg class="speed-dial-svg" viewBox="0 0 100 60">
+                <path d="M 10 52 A 40 40 0 0 1 90 52" fill="none" stroke="#262930" stroke-width="6" />
+                <path id="autoSpeedArc" d="M 10 52 A 40 40 0 0 1 90 52" fill="none" stroke="#10b981" stroke-width="6" stroke-dasharray="126" stroke-dashoffset="50" />
+                <text x="50" y="48" fill="#6b7280" font-size="8.5" font-weight="600" text-anchor="middle" class="mono">AUTO</text>
+              </svg>
+            </div>
+          </div>
+
+          <div class="info-card">
+            <div class="card-label"><span>ACTIVE PATH</span><span class="mono">XTE</span></div>
+            <div id="autoPathBadge" class="path-badge-box">Center</div>
+          </div>
+
+          <div class="info-card">
+            <div class="card-label"><span>WP DIST</span><span class="mono">R: 1.5m</span></div>
+            <div class="cockpit-dial-row">
+              <div><span id="autoDistVal" class="big-number mono" style="font-size:26px;">1.4</span><span class="unit-text">m</span></div>
+            </div>
+          </div>
+
+          <div class="info-card span-two">
+            <div class="card-label"><span>WAYPOINT</span><span id="wpPercentText" class="mono">2%</span></div>
+            <div class="wp-row">
+              <div>
+                <span class="big-number mono" style="font-size:26px;">WP <span id="autoWpCur">1</span></span>
+                <span class="unit-text mono">/ <span id="autoWpTotal">65</span></span>
+              </div>
+              <div class="wp-bars" id="wpBarsContainer">
+                <div class="wp-bar active" style="height:8px;"></div>
+                <div class="wp-bar" style="height:10px;"></div>
+                <div class="wp-bar" style="height:12px;"></div>
+                <div class="wp-bar" style="height:15px;"></div>
+                <div class="wp-bar" style="height:18px;"></div>
+                <div class="wp-bar" style="height:20px;"></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="info-card">
+            <div class="card-label"><span>GNSS STATUS</span><span class="mono">2~5</span></div>
+            <div id="autoGpsBadge" class="gps-status-pill gps-fix"><span>RTK FIX</span><span class="mono" style="font-size:11px; color:var(--text-secondary);">&lt;0.02m</span></div>
+          </div>
+
+          <div class="info-card">
+            <div class="card-label"><span>PWM OUTPUT</span><span class="mono">CH0/6</span></div>
+            <div style="display:flex; flex-direction:column; gap:4px; margin-top:auto;" class="mono">
+              <div style="display:flex; justify-content:space-between; font-size:11px;"><span style="color:var(--text-muted);">CH0</span><b id="autoSteerPwmText">4500 (MID)</b></div>
+              <div style="display:flex; justify-content:space-between; font-size:11px;"><span style="color:var(--text-muted);">CH6</span><b id="autoDrivePwmText">4780 (95%)</b></div>
+            </div>
+          </div>
+        </div>
+
+        <div id="balloonPanel" class="info-panel hidden">
+          <div class="info-card">
+            <div class="card-label"><span>SOG</span><span id="balloonFpsText" class="mono" style="color:var(--text-secondary);">CAM 30.0 FPS</span></div>
+            <div class="cockpit-dial-row">
+              <div><span id="balloonSpeedVal" class="big-number mono">1.6</span><span class="unit-text">m/s</span></div>
+              <span id="balloonCamResText" class="mono" style="font-size:10.5px; color:var(--text-muted);">16:9 (640x360)</span>
+            </div>
+          </div>
+
+          <div class="info-card">
+            <div class="card-label"><span>EO STATE</span><span id="balloonDetectLabel" class="mono" style="color:var(--text-secondary);">TARGET LOCKED</span></div>
+            <div id="balloonStateBadge" class="gps-status-pill balloon-charge-pill"><span>TARGET LOCK</span><span class="mono" style="font-size:11px; color:var(--text-secondary);">STOP AT 3.5m</span></div>
+          </div>
+
+          <div class="info-card">
+            <div class="card-label"><span>TARGET DATA</span><span class="mono">HFOV 62.2°</span></div>
+            <div class="race-metrics-grid mono" style="grid-template-columns: repeat(2, 1fr); border-top:none; padding-top:0; margin-top:auto; gap:8px;">
+              <div class="race-box"><span>RANGE</span><b id="balloonDistVal">3.80 m</b></div>
+              <div class="race-box"><span>BEARING</span><b id="balloonErrVal">+0.0°</b></div>
+              <div class="race-box"><span>AREA</span><b id="balloonAreaVal">4.8 %</b></div>
+              <div class="race-box"><span>COORD</span><b id="balloonNormXVal">+0.00, +0.00</b></div>
+            </div>
+          </div>
+
+          <div class="info-card">
+            <div class="card-label"><span>PWM OUTPUT</span><span class="mono">PCA9685</span></div>
+            <div class="metrics-group">
+              <div class="metric-row">
+                <div class="metric-header"><span>SERVO CH0</span><span id="balloonSteerPwmText" class="mono">4500 (MID)</span></div>
+                <div class="progress-track"><div class="progress-center-mark"></div><div id="balloonSteerBar" class="progress-fill" style="width:60%;"></div></div>
+              </div>
+              <div class="metric-row">
+                <div class="metric-header"><span>DRIVE CH6</span><span id="balloonDrivePwmText" class="mono">4800 (100%)</span></div>
+                <div class="progress-track"><div class="progress-center-mark"></div><div id="balloonDriveBar" class="progress-fill pink" style="width:100%;"></div></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="bottom-deck">
+        <div class="mid-card">
+          <div class="card-label">
+            <span>GYRO &amp; RUDDER</span>
+            <span id="hudSteerGainBadge" class="mono hud-gain-badge" onclick="openPidModal()">P / Kp 15.0</span>
+          </div>
+          <div class="gyro-rudder-horizontal">
+            <div class="compass-box">
+              <svg width="88" height="88" viewBox="0 0 120 120">
+                <circle cx="60" cy="60" r="56" fill="#0d0e10" stroke="#32363e" stroke-width="1.5" />
+                <circle cx="60" cy="60" r="49" fill="none" stroke="#525866" stroke-width="2" stroke-dasharray="1.5, 7" />
+                <line x1="60" y1="6" x2="60" y2="114" stroke="#1e2026" stroke-width="1" />
+                <line x1="6" y1="60" x2="114" y2="60" stroke="#1e2026" stroke-width="1" />
+                <polygon points="60,2 56,8 64,8" fill="#f3f4f6" />
+                <text x="60" y="18" fill="#f3f4f6" font-size="9.5" font-weight="700" text-anchor="middle">N</text>
+                <text x="104" y="63" fill="#6b7280" font-size="8.5" font-weight="600" text-anchor="middle">E</text>
+                <text x="60" y="109" fill="#6b7280" font-size="8.5" font-weight="600" text-anchor="middle">S</text>
+                <text x="16" y="63" fill="#6b7280" font-size="8.5" font-weight="600" text-anchor="middle">W</text>
+                <g id="compassTargetArrow" transform="rotate(241 60 60)">
+                  <line x1="60" y1="60" x2="60" y2="12" stroke="#f59e0b" stroke-width="1.8" stroke-dasharray="3,2" />
+                  <polygon points="60,7 55,13 65,13" fill="#f59e0b" />
+                </g>
+                <g id="compassBoatArrow" transform="rotate(241 60 60)">
+                  <line x1="60" y1="14" x2="60" y2="88" stroke="#f3f4f6" stroke-width="1.6" />
+                  <polygon points="60,11 64,22 60,19 56,22" fill="#f3f4f6" />
+                  <path d="M60,38 L66,56 L64,76 L56,76 L54,56 Z" fill="rgba(243,244,246,0.12)" stroke="#f3f4f6" stroke-width="1.2" />
+                </g>
+                <circle cx="60" cy="60" r="2.2" fill="#f3f4f6" />
+              </svg>
+            </div>
+
+            <div class="hud-stats mono">
+              <div class="hud-stat-item"><div class="hud-stat-label">HDG</div><div id="hudHeadingVal" class="hud-stat-val">240.6°</div></div>
+              <div class="hud-stat-item"><div class="hud-stat-label">CTS</div><div id="hudTargetVal" class="hud-stat-val" style="color:var(--sig-caution);">240.6°</div></div>
+              <div class="hud-stat-item"><div class="hud-stat-label">ERR</div><div id="hudErrVal" class="hud-stat-val">0.0°</div></div>
+              <div class="hud-stat-item"><div class="hud-stat-label">THR</div><div id="hudThrottlePct" class="hud-stat-val">100%</div></div>
+            </div>
+
+            <div class="rudder-mini-panel mono">
+              <div class="rudder-header-row">
+                <span>PORT</span>
+                <span id="rudderAngleText" style="color:var(--text-primary);">MID 0.0°</span>
+                <span>STBD</span>
+              </div>
+              <svg width="100%" height="48" viewBox="0 0 220 56" style="display:block;">
+                <path d="M 32 18 A 78 78 0 0 0 110 50" fill="none" stroke="#ef4444" stroke-width="3.5" stroke-opacity="0.7" />
+                <path d="M 110 50 A 78 78 0 0 0 188 18" fill="none" stroke="#10b981" stroke-width="3.5" stroke-opacity="0.7" />
+                <line x1="110" y1="45" x2="110" y2="54" stroke="#9ca3af" stroke-width="1.5" />
+                <g id="rudderNeedleGroup" transform="rotate(0 110 18)">
+                  <polygon points="110,48 107,18 113,18" fill="#f3f4f6" />
+                  <circle cx="110" cy="18" r="3.5" fill="#9ca3af" />
+                </g>
+              </svg>
+              <div class="err-tape-track">
+                <div class="err-tape-center"></div>
+                <div id="errTapeIndicator" class="err-tape-indicator"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div id="multiPathCard" class="mid-card">
+          <div class="card-label">
+            <span>FAIRWAY XTE &amp; VOYAGE</span>
+            <button id="btnPathAutoMode" type="button" class="cam-mini-btn active mono" onclick="togglePathAutoMode()">AUTO 전환 ON</button>
+          </div>
+          <div class="path-dist-grid mono">
+            <div id="distBoxLeft" class="path-dist-item" onclick="setDemoPath('Left')">
+              <div class="path-dist-name">PORT</div>
+              <div id="distValLeft" class="path-dist-val">1.50 m</div>
+            </div>
+            <div id="distBoxCenter" class="path-dist-item active-path" onclick="setDemoPath('Center')">
+              <div class="path-dist-name">CENTER</div>
+              <div id="distValCenter" class="path-dist-val">0.12 m</div>
+            </div>
+            <div id="distBoxRight" class="path-dist-item" onclick="setDemoPath('Right')">
+              <div class="path-dist-name">STBD</div>
+              <div id="distValRight" class="path-dist-val">1.51 m</div>
+            </div>
+          </div>
+          <div class="race-metrics-grid mono">
+            <div class="race-box"><span>TIME</span><b id="raceLapTime">00:00.0</b></div>
+            <div class="race-box"><span>MAX SOG</span><b id="raceMaxSpd">1.6 m/s</b></div>
+            <div class="race-box"><span>DIST</span><b id="raceMovedDist">0.0 m</b></div>
+            <div class="race-box"><span>ETA</span><b id="raceEta">01:02</b></div>
+          </div>
+        </div>
+
+        <div id="visionFovCard" class="mid-card hidden">
+          <div class="card-label"><span>EO SECTOR RADAR</span><span class="mono">FOV 62.2°</span></div>
+          <div class="fov-radar-wrap">
+            <div class="fov-canvas-box"><canvas id="fovRadarCanvas"></canvas></div>
+            <div class="hud-stats mono" style="flex:1;">
+              <div class="hud-stat-item"><div class="hud-stat-label">BRG</div><div id="fovAzimuthVal" class="hud-stat-val">+4.3°</div></div>
+              <div class="hud-stat-item"><div class="hud-stat-label">RNG</div><div id="fovRangeVal" class="hud-stat-val">2.40 m</div></div>
+              <div class="hud-stat-item"><div class="hud-stat-label">RAD</div><div id="fovRadiusVal" class="hud-stat-val">26 px</div></div>
+              <div class="hud-stat-item"><div class="hud-stat-label">FPS</div><div id="fovFpsVal" class="hud-stat-val">30.0 Hz</div></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="mid-card">
+          <div class="card-label">
+            <span>SOG &amp; ERR TREND</span>
+            <span class="mono" style="font-size:9.5px; color:var(--text-secondary);">
+              <span class="legend-dot" style="background:#f3f4f6;"></span>SOG &nbsp;
+              <span class="legend-dot" style="background:#f59e0b;"></span>ERR
+            </span>
+          </div>
+          <div class="chart-container"><canvas id="telemetryChart"></canvas></div>
+        </div>
+
+        <div class="log-panel">
+          <div class="panel-header">
+            <span>VDR EVENT LOG</span>
+            <div style="display:flex; align-items:center; gap:6px;">
+              <label id="visionFilterControl" class="hidden mono" style="font-size:9.5px;">
+                HSV
+                <select id="hsvPresetSelect" class="inline-select" onchange="changeHsvPreset(this.value)">
+                  <option value="default">DEFAULT</option>
+                  <option value="bright">BRIGHT</option>
+                  <option value="cloudy">CLOUDY</option>
+                </select>
+              </label>
+              <label id="pathSelectControl" class="mono" style="font-size:9.5px;">
+                PATH
+                <select id="demoPathSelect" class="inline-select" onchange="setDemoPath(this.value)">
+                  <option value="AUTO">AUTO (자동전환)</option>
+                  <option value="Center">CENTER (고정)</option>
+                  <option value="Left">PORT (고정)</option>
+                  <option value="Right">STBD (고정)</option>
+                </select>
+              </label>
+              <span id="logCountText" class="mono" style="font-size:9.5px; color:var(--sig-nominal);">REC</span>
+            </div>
+          </div>
+          <div id="logBody" class="log-body mono"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // 해수천 3중 경로 좌표 (65 WPs)
+    const centerCoords = [[35.07310917, 129.0829184], [35.07310281, 129.0829046], [35.07309644, 129.0828908], [35.07309008, 129.082877], [35.07308371, 129.0828631], [35.07307735, 129.0828493], [35.07307098, 129.0828355], [35.07306462, 129.0828217], [35.07305825, 129.0828079], [35.07305189, 129.0827941], [35.07304552, 129.0827803], [35.07303916, 129.0827664], [35.07303279, 129.0827526], [35.07302643, 129.0827388], [35.07302006, 129.082725], [35.0730137, 129.0827112], [35.07300734, 129.0826974], [35.07300097, 129.0826836], [35.07299461, 129.0826697], [35.07298824, 129.0826559], [35.07298188, 129.0826421], [35.07297551, 129.0826283], [35.07296915, 129.0826145], [35.07296278, 129.0826007], [35.07295642, 129.0825869], [35.07295005, 129.082573], [35.07294369, 129.0825592], [35.07293732, 129.0825454], [35.07293096, 129.0825316], [35.07292459, 129.0825178], [35.07291823, 129.082504], [35.07291186, 129.0824902], [35.0729055, 129.0824764], [35.07289914, 129.0824625], [35.07289277, 129.0824487], [35.07288641, 129.0824349], [35.07288004, 129.0824211], [35.07287368, 129.0824073], [35.07286731, 129.0823935], [35.07286095, 129.0823797], [35.07285458, 129.0823658], [35.07284822, 129.082352], [35.07284185, 129.0823382], [35.07283549, 129.0823244], [35.07282912, 129.0823106], [35.07282276, 129.0822968], [35.07281639, 129.082283], [35.07281003, 129.0822691], [35.07280366, 129.0822553], [35.0727973, 129.0822415], [35.07279094, 129.0822277], [35.07278457, 129.0822139], [35.07277821, 129.0822001], [35.07277184, 129.0821863], [35.07276548, 129.0821724], [35.07275911, 129.0821586], [35.07275275, 129.0821448], [35.07274638, 129.082131], [35.07274002, 129.0821172], [35.07273365, 129.0821034], [35.07272729, 129.0820896], [35.07272092, 129.0820757], [35.07271456, 129.0820619], [35.07270819, 129.0820481], [35.07270183, 129.0820343]];
+    const leftCoords = [[35.07309698, 129.0829256], [35.07309062, 129.0829118], [35.07308425, 129.082898], [35.07307789, 129.0828842], [35.07307153, 129.0828704], [35.07306517, 129.0828566], [35.0730588, 129.0828427], [35.07305244, 129.0828289], [35.07304608, 129.0828151], [35.07303972, 129.0828013], [35.07303335, 129.0827875], [35.07302699, 129.0827737], [35.07302063, 129.0827599], [35.07301427, 129.0827461], [35.0730079, 129.0827323], [35.07300154, 129.0827185], [35.07299518, 129.0827046], [35.07298881, 129.0826908], [35.07298245, 129.082677], [35.07297609, 129.0826632], [35.07296973, 129.0826494], [35.07296336, 129.0826356], [35.072957, 129.0826218], [35.07295064, 129.082608], [35.07294428, 129.0825942], [35.07293791, 129.0825804], [35.07293155, 129.0825666], [35.07292519, 129.0825527], [35.07291883, 129.0825389], [35.07291246, 129.0825251], [35.0729061, 129.0825113], [35.07289974, 129.0824975], [35.07289338, 129.0824837], [35.07288701, 129.0824699], [35.07288065, 129.0824561], [35.07287429, 129.0824423], [35.07286792, 129.0824285], [35.07286156, 129.0824147], [35.0728552, 129.0824008], [35.07284884, 129.082387], [35.07284247, 129.0823732], [35.07283611, 129.0823594], [35.07282975, 129.0823456], [35.07282339, 129.0823318], [35.07281702, 129.082318], [35.07281066, 129.0823042], [35.0728043, 129.0822904], [35.07279794, 129.0822766], [35.07279157, 129.0822628], [35.07278521, 129.0822489], [35.07277885, 129.0822351], [35.07277248, 129.0822213], [35.07276612, 129.0822075], [35.07275976, 129.0821937], [35.0727534, 129.0821799], [35.07274703, 129.0821661], [35.07274067, 129.0821523], [35.07273431, 129.0821385], [35.07272795, 129.0821247], [35.07272158, 129.0821108], [35.07271522, 129.082097], [35.07270886, 129.0820832], [35.0727025, 129.0820694], [35.07269613, 129.0820556], [35.07268977, 129.0820418]];
+    const rightCoords = [[35.07312136, 129.0829112], [35.073115, 129.0828974], [35.07310863, 129.0828836], [35.07310227, 129.0828698], [35.07309589, 129.0828558], [35.07308953, 129.082842], [35.07308316, 129.0828283], [35.0730768, 129.0828145], [35.07307042, 129.0828007], [35.07306406, 129.0827869], [35.07305769, 129.0827731], [35.07305133, 129.0827591], [35.07304495, 129.0827453], [35.07303859, 129.0827315], [35.07303222, 129.0827177], [35.07302586, 129.0827039], [35.0730195, 129.0826902], [35.07301313, 129.0826764], [35.07300677, 129.0826624], [35.07300039, 129.0826486], [35.07299403, 129.0826348], [35.07298766, 129.082621], [35.0729813, 129.0826072], [35.07297492, 129.0825934], [35.07296856, 129.0825796], [35.07296219, 129.0825656], [35.07295583, 129.0825518], [35.07294945, 129.0825381], [35.07294309, 129.0825243], [35.07293672, 129.0825105], [35.07293036, 129.0824967], [35.07292398, 129.0824829], [35.07291762, 129.0824691], [35.07291127, 129.0824551], [35.07290489, 129.0824413], [35.07289853, 129.0824275], [35.07289216, 129.0824137], [35.0728858, 129.0823999], [35.07287942, 129.0823862], [35.07287306, 129.0823724], [35.07286669, 129.0823584], [35.07286033, 129.0823446], [35.07285395, 129.0823308], [35.07284759, 129.082317], [35.07284122, 129.0823032], [35.07283486, 129.0822894], [35.07282848, 129.0822756], [35.07282212, 129.0822616], [35.07281575, 129.0822478], [35.07280939, 129.0822341], [35.07280303, 129.0822203], [35.07279666, 129.0822065], [35.0727903, 129.0821927], [35.07278392, 129.0821789], [35.07277756, 129.0821649], [35.07277119, 129.0821511], [35.07276483, 129.0821373], [35.07275845, 129.0821235], [35.07275209, 129.0821097], [35.07274572, 129.082096], [35.07273936, 129.0820822], [35.07273298, 129.0820682], [35.07272662, 129.0820544], [35.07272025, 129.0820406], [35.07271389, 129.0820268]];
+    const totalWaypoints = centerCoords.length;
+    const totalCourseLengthM = 92.3;
+
+    // 방위각 및 거리 계산
+    function calcBearing(lat1, lon1, lat2, lon2) {
+      const p1 = lat1 * Math.PI / 180.0, p2 = lat2 * Math.PI / 180.0;
+      const dl = (lon2 - lon1) * Math.PI / 180.0;
+      const x = Math.sin(dl) * Math.cos(p2);
+      const y = Math.cos(p1) * Math.sin(p2) - Math.sin(p1) * Math.cos(p2) * Math.cos(dl);
+      return ((Math.atan2(x, y) * 180.0 / Math.PI) + 360.0) % 360.0;
+    }
+
+    function calcDistanceM(lat1, lon1, lat2, lon2) {
+      const R = 6371000.0;
+      const p1 = lat1 * Math.PI / 180.0, p2 = lat2 * Math.PI / 180.0;
+      const dp = (lat2 - lat1) * Math.PI / 180.0, dl = (lon2 - lon1) * Math.PI / 180.0;
+      const a = Math.sin(dp / 2) ** 2 + Math.cos(p1) * Math.cos(p2) * Math.sin(dl / 2) ** 2;
+      return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    }
+
+    const state = {
+      mode: "MANUAL",
+      estop: false,
+      estopClickCount: 0,
+      simRunning: true,
+      speed: 0.8,
+      maxSpeed: 1.6,
+      movedDist: 0.0,
+      lapElapsedSec: 0.0,
+      highPowerElapsedSec: 0.0,
+      lapStartTime: Date.now(),
+      stPulse: 1360,
+      thPulse: 1420,
+      steerPwm: 4500,
+      drivePwm: 4520,
+      targetPath: "Center",
+      pathAutoSwitch: true,
+      wpIndex: 1,
+      wpTotal: totalWaypoints,
+      wpDist: 1.44,
+      distLeft: 1.50,
+      distCenter: 0.08,
+      distRight: 1.51,
+      fixStatus: 4,
+      satellites: 19,
+      hdop: 0.56,
+      ntripKb: 18.4,
+      lat: centerCoords[0][0],
+      lon: centerCoords[0][1],
+      heading: 240.6,
+      targetAngle: 240.6,
+      angleErr: 0.0,
+      simProgress: 0.0,
+      cameraOk: true,
+      balloonDetected: true,
+      balloonState: "IDLE",
+      balloonX: 0.14,
+      balloonY: 0.05,
+      balloonRadius: 26.0,
+      balloonAreaPct: 2.8,
+      balloonDistM: 6.4,
+      balloonAngleErr: 4.3,
+      balloonFps: 30.0,
+      hsvPreset: "default",
+      camFlip: 0,
+      camShowMask: false,
+      steerCtrlMode: "P",
+      pidKp: 15.0,
+      pidKi: 0.0,
+      pidKd: 3.0,
+      pidIMax: 15.0,
+      pidPTerm: 0.0,
+      pidITerm: 0.0,
+      pidDTerm: 0.0,
+      simIntegral: 0.0,
+      simPrevErr: 0.0,
+      maxGo: 4800,
+      balloonActionMode: "APPROACH_STOP",
+      rcIgnore: false,
+      linkWatchdog: true,
+      linkTimeoutSec: 3.5,
+      linkPaused: false,
+      camLteMode: true,
+      camFlip: 0,
+      camPrimaryInNav: false,
+      camPipHidden: false,
+      linkRttMs: 0,
+      balloonRealDiamM: 3.5,
+      balloonStopDistM: 3.5,
+      balloonStopAreaPct: 30.0,
+      balloonFinishSeq: 0,
+      balloonFinishMsg: "",
+      customColorEnable: true,
+      targetHue: 166,
+      targetHueTol: 10,
+      targetSatMin: 105,
+      targetValMin: 80,
+      targetColorHex: "#ff2a85"
+    };
+
+    let eyedropperActive = false;
+    let modalDraftMode = "P";
+    let modalDraftMaxGo = 4800;
+    let modalDraftBalloonMode = "APPROACH_STOP";
+    let modalDraftCamLte = true;
+    let modalDraftWatchdog = true;
+    let modalDraftLinkTimeout = 3.5;
+    let modalDraftRcIgnore = false;
+    let modalDraftCamFlip = 0;
+    let lastShownFinishSeq = 0;
+    let estopResetTimer = null;
+    const speedHistory = new Array(40).fill(0.8);
+    const errHistory = new Array(40).fill(0.0);
+
+    function addLog(tag, msg, type = "auto") {
+      const logBody = document.getElementById("logBody");
+      if (!logBody) return;
+      const now = new Date();
+      const tStr = now.toTimeString().split(" ")[0] + "." + String(now.getMilliseconds()).padStart(3, "0");
+      const div = document.createElement("div");
+      div.className = "log-entry";
+      const tagClass = type === "warn" ? "log-tag-warn" : type === "ntrip" ? "log-tag-ntrip" : "log-tag-auto";
+      div.innerHTML = `<span class="log-time">${tStr}</span><span class="${tagClass}">[${tag}]</span>${msg}`;
+      logBody.appendChild(div);
+      while (logBody.children.length > 30) logBody.removeChild(logBody.firstChild);
+      logBody.scrollTop = logBody.scrollHeight;
+    }
+
+    let map, polyCenter, polyLeft, polyRight, boatMarker, wpMarker, trailLine, targetVectorLine;
+    let activeTileLayer = null;
+    let currentMapLayerMode = "SAT";
+    let forceOfflineGrid = false;
+    let offlineFollowBoat = false;
+    let offlineMapCanvas = null;
+    let mapResizeObserver = null;
+    let mapPanelObserverNeeded = true;
+    const trailCoords = [];
+
+    const TILE_PROVIDERS = {
+      SAT: {
+        url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        options: { maxNativeZoom: 17, maxZoom: 22, attribution: "Esri" }
+      },
+      OSM: {
+        url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",
+        options: { maxNativeZoom: 18, maxZoom: 22, attribution: "Esri Street" }
+      }
+    };
+
+    function syncMapLayerButtons() {
+      document.getElementById("btnLayerSat")?.classList.toggle("active", !forceOfflineGrid && currentMapLayerMode === "SAT");
+      document.getElementById("btnLayerOsm")?.classList.toggle("active", !forceOfflineGrid && currentMapLayerMode === "OSM");
+      document.getElementById("btnLayerGrid")?.classList.toggle("active", forceOfflineGrid);
+    }
+
+    function destroyLeafletMapIfAny() {
+      if (map) {
+        try { map.remove(); } catch (e) {}
+      }
+      map = null;
+      activeTileLayer = null;
+      polyCenter = polyLeft = polyRight = boatMarker = wpMarker = trailLine = targetVectorLine = null;
+    }
+
+    function applyTileLayer(modeKey, allowAutoFallback = true) {
+      if (!map || typeof L === "undefined") return;
+      const cfg = TILE_PROVIDERS[modeKey] || TILE_PROVIDERS.SAT;
+      if (activeTileLayer) {
+        try { map.removeLayer(activeTileLayer); } catch (e) {}
+      }
+      let okCount = 0;
+      let errCount = 0;
+      const layer = L.tileLayer(cfg.url, cfg.options);
+      layer.on("tileload", () => { okCount += 1; });
+      layer.on("tileerror", () => {
+        errCount += 1;
+        if (allowAutoFallback && okCount === 0 && errCount >= 6) {
+          if (modeKey === "SAT") {
+            currentMapLayerMode = "OSM";
+            syncMapLayerButtons();
+            applyTileLayer("OSM", true);
+          } else {
+            forceOfflineGrid = true;
+            syncMapLayerButtons();
+            destroyLeafletMapIfAny();
+            drawOfflineFallbackMap();
+          }
+        }
+      });
+      layer.addTo(map);
+      activeTileLayer = layer;
+    }
+
+    function switchMapLayer(modeKey) {
+      if (modeKey === "GRID") {
+        forceOfflineGrid = true;
+        syncMapLayerButtons();
+        destroyLeafletMapIfAny();
+        drawOfflineFallbackMap();
+        return;
+      }
+      forceOfflineGrid = false;
+      currentMapLayerMode = modeKey === "OSM" ? "OSM" : "SAT";
+      syncMapLayerButtons();
+      if (!map) {
+        initMap();
+      } else {
+        applyTileLayer(currentMapLayerMode, false);
+        map.invalidateSize();
+      }
+    }
+
+    function drawOfflineFallbackMap() {
+      const mapEl = document.getElementById("map");
+      if (!mapEl) return;
+      if (!offlineMapCanvas || offlineMapCanvas.parentElement !== mapEl) {
+        mapEl.innerHTML = "";
+        offlineMapCanvas = document.createElement("canvas");
+        offlineMapCanvas.style.width = "100%";
+        offlineMapCanvas.style.height = "100%";
+        offlineMapCanvas.style.display = "block";
+        mapEl.appendChild(offlineMapCanvas);
+      }
+      const rect = mapEl.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) return;
+      offlineMapCanvas.width = rect.width;
+      offlineMapCanvas.height = rect.height;
+      const ctx = offlineMapCanvas.getContext("2d");
+      const w = offlineMapCanvas.width, h = offlineMapCanvas.height;
+
+      ctx.fillStyle = "#0f1012";
+      ctx.fillRect(0, 0, w, h);
+
+      ctx.strokeStyle = "#1c1e24";
+      ctx.lineWidth = 1;
+      for (let x = 32; x < w; x += 36) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke(); }
+      for (let y = 32; y < h; y += 36) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke(); }
+
+      const allPts = [...centerCoords, ...leftCoords, ...rightCoords];
+      if (offlineFollowBoat && state.lat && state.lon) allPts.push([state.lat, state.lon]);
+      let minLat = 90, maxLat = -90, minLon = 180, maxLon = -180;
+      allPts.forEach(([lat, lon]) => {
+        if (lat < minLat) minLat = lat;
+        if (lat > maxLat) maxLat = lat;
+        if (lon < minLon) minLon = lon;
+        if (lon > maxLon) maxLon = lon;
+      });
+      const latMid = (minLat + maxLat) / 2.0;
+      const cosLat = Math.cos((latMid * Math.PI) / 180.0);
+      const latSpan = Math.max(0.00008, maxLat - minLat);
+      const lonSpan = Math.max(0.00008, maxLon - minLon);
+      const pad = 32;
+      const scale = Math.min((w - pad * 2) / (lonSpan * cosLat), (h - pad * 2) / latSpan);
+      const cxLon = (minLon + maxLon) / 2.0;
+      const toXY = (lat, lon) => [
+        w / 2.0 + (lon - cxLon) * cosLat * scale,
+        h / 2.0 - (lat - latMid) * scale
+      ];
+
+      const drawPath = (coords, color, width) => {
+        ctx.strokeStyle = color;
+        ctx.lineWidth = width;
+        ctx.beginPath();
+        coords.forEach(([lat, lon], idx) => {
+          const [x, y] = toXY(lat, lon);
+          if (idx === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+      };
+
+      drawPath(leftCoords, "#6b7280", state.targetPath === "Left" ? 2.5 : 1.2);
+      drawPath(rightCoords, "#b45309", state.targetPath === "Right" ? 2.5 : 1.2);
+      drawPath(centerCoords, "#e5e7eb", state.targetPath === "Center" ? 2.6 : 1.4);
+      if (trailCoords.length > 1) drawPath(trailCoords, "#10b981", 1.8);
+
+      const activeArr = state.targetPath === "Left" ? leftCoords : state.targetPath === "Right" ? rightCoords : centerCoords;
+      const wpCoord = activeArr[Math.min(state.wpIndex - 1, totalWaypoints - 1)];
+      const [rawBx, rawBy] = toXY(state.lat, state.lon);
+      const bx = Math.max(14, Math.min(w - 14, rawBx));
+      const by = Math.max(14, Math.min(h - 14, rawBy));
+      if (wpCoord) {
+        const [wx, wy] = toXY(wpCoord[0], wpCoord[1]);
+        ctx.strokeStyle = "#10b981";
+        ctx.setLineDash([4, 4]);
+        ctx.beginPath(); ctx.moveTo(bx, by); ctx.lineTo(wx, wy); ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = "#f59e0b";
+        ctx.beginPath(); ctx.arc(wx, wy, 4, 0, Math.PI * 2); ctx.fill();
+      }
+
+      ctx.save();
+      ctx.translate(bx, by);
+      ctx.rotate((state.heading * Math.PI) / 180.0);
+      ctx.fillStyle = "#f3f4f6";
+      ctx.beginPath();
+      ctx.moveTo(0, -9); ctx.lineTo(6, 7); ctx.lineTo(0, 4); ctx.lineTo(-6, 7);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    }
+
+    function initMap() {
+      const mapEl = document.getElementById("map");
+      if (!mapEl) return;
+
+      if (mapPanelObserverNeeded && typeof ResizeObserver !== "undefined") {
+        mapPanelObserverNeeded = false;
+        const panelEl = document.getElementById("mapPanel") || mapEl;
+        mapResizeObserver = new ResizeObserver(() => {
+          if (map) map.invalidateSize();
+          else drawOfflineFallbackMap();
+        });
+        mapResizeObserver.observe(panelEl);
+      }
+
+      if (forceOfflineGrid || typeof L === "undefined") {
+        syncMapLayerButtons();
+        drawOfflineFallbackMap();
+        return;
+      }
+      if (map) {
+        map.invalidateSize();
+        return;
+      }
+      try {
+        if (offlineMapCanvas) {
+          offlineMapCanvas.remove();
+          offlineMapCanvas = null;
+        }
+        mapEl.innerHTML = "";
+
+        map = L.map("map", { zoomControl: true, maxZoom: 22 }).setView([state.lat, state.lon], 18);
+        applyTileLayer(currentMapLayerMode, true);
+        syncMapLayerButtons();
+
+        polyLeft = L.polyline(leftCoords, { color: "#9ca3af", weight: 2.0, opacity: 0.75 }).addTo(map);
+        polyRight = L.polyline(rightCoords, { color: "#f59e0b", weight: 2.0, opacity: 0.75 }).addTo(map);
+        polyCenter = L.polyline(centerCoords, { color: "#f3f4f6", weight: 3.2, opacity: 0.95 }).addTo(map);
+        map.fitBounds(polyCenter.getBounds(), { padding: [24, 24], maxZoom: 19 });
+
+        wpMarker = L.circleMarker(centerCoords[0], {
+          radius: 5,
+          color: "#f59e0b",
+          fillColor: "#f59e0b",
+          fillOpacity: 1.0,
+          weight: 1.5
+        }).addTo(map);
+
+        targetVectorLine = L.polyline([centerCoords[0], centerCoords[1]], {
+          color: "#10b981",
+          weight: 1.8,
+          dashArray: "4, 4"
+        }).addTo(map);
+
+        const boatIcon = L.divIcon({
+          className: "boat-custom-icon",
+          html: `<div id="boatArrow" style="width:24px;height:24px;display:flex;align-items:center;justify-content:center;transform:rotate(${state.heading}deg);">
+                   <svg width="22" height="22" viewBox="0 0 24 24" fill="#f3f4f6" stroke="#0d0e10" stroke-width="1.5">
+                     <polygon points="12 2 19 21 12 17 5 21 12 2"></polygon>
+                   </svg>
+                 </div>`,
+          iconSize: [24, 24],
+          iconAnchor: [12, 12]
+        });
+
+        boatMarker = L.marker([state.lat, state.lon], { icon: boatIcon }).addTo(map);
+        trailLine = L.polyline([], { color: "#10b981", weight: 2.0, opacity: 0.85 }).addTo(map);
+
+        requestAnimationFrame(() => {
+          if (map) {
+            map.invalidateSize();
+            map.fitBounds(polyCenter.getBounds(), { padding: [24, 24], maxZoom: 19 });
+          }
+        });
+        setTimeout(() => { if (map) map.invalidateSize(); }, 250);
+      } catch (e) {
+        destroyLeafletMapIfAny();
+        drawOfflineFallbackMap();
+      }
+    }
+
+    function centerOnBoat() {
+      offlineFollowBoat = true;
+      if (map) map.setView([state.lat, state.lon], Math.max(map.getZoom(), 18));
+      else drawOfflineFallbackMap();
+    }
+    function fitFullCourse() {
+      offlineFollowBoat = false;
+      if (map && polyCenter) map.fitBounds(polyCenter.getBounds(), { padding: [24, 24], maxZoom: 19 });
+      else drawOfflineFallbackMap();
+    }
+
+    const heldManualKeys = new Set();
+    let activePointerDir = null;
+    let manualHoldTimer = null;
+    let manualHoldActive = false;
+
+    function resolveManualHoldDirection() {
+      if (activePointerDir) return activePointerDir;
+      const up = heldManualKeys.has("w") || heldManualKeys.has("arrowup");
+      const down = heldManualKeys.has("s") || heldManualKeys.has("arrowdown") || heldManualKeys.has("x");
+      const left = heldManualKeys.has("a") || heldManualKeys.has("arrowleft");
+      const right = heldManualKeys.has("d") || heldManualKeys.has("arrowright");
+      if (heldManualKeys.has("q") || (up && left)) return "FL";
+      if (heldManualKeys.has("e") || (up && right)) return "FR";
+      if (up) return "F";
+      if (down && left) return "BL";
+      if (down && right) return "BR";
+      if (down) return "B";
+      if (left) return "L";
+      if (right) return "R";
+      return null;
+    }
+
+    function dirToPwmPair(dirCode) {
+      const topPwm = state.maxGo || 4800;
+      const fwd = (ratio) => Math.round(4443 + (topPwm - 4443) * ratio);
+      switch (dirCode) {
+        case "F":  return { steer: 4500, drive: topPwm, btnId: "dpadBtnF" };
+        case "FL": return { steer: 5200, drive: fwd(0.90), btnId: "dpadBtnFL" };
+        case "FR": return { steer: 3400, drive: fwd(0.90), btnId: "dpadBtnFR" };
+        case "L":  return { steer: 5500, drive: fwd(0.72), btnId: "dpadBtnL" };
+        case "R":  return { steer: 3000, drive: fwd(0.72), btnId: "dpadBtnR" };
+        case "B":  return { steer: 4500, drive: 4120, btnId: "dpadBtnB" };
+        case "BL": return { steer: 5200, drive: 4140, btnId: "dpadBtnB" };
+        case "BR": return { steer: 3400, drive: 4140, btnId: "dpadBtnB" };
+        default:   return null;
+      }
+    }
+
+    function highlightActiveDpad(btnId) {
+      ["dpadBtnFL", "dpadBtnF", "dpadBtnFR", "dpadBtnL", "dpadBtnB", "dpadBtnR"].forEach((id) => {
+        document.getElementById(id)?.classList.toggle("holding", id === btnId);
+      });
+    }
+
+    function sendWebManualDrive(steerVal, driveVal, durSec = 0.45) {
+      if (state.estop) return;
+      state.mode = "MANUAL";
+      state.steerPwm = steerVal;
+      state.drivePwm = driveVal;
+      if (window.location.protocol !== "file:") {
+        sendBoatCommand("web_manual_drive", { steer: steerVal, drive: driveVal, duration: durSec });
+      }
+      if (!isLiveConnected) {
+        state.speed = driveVal > 4443 ? 1.3 : driveVal < 4443 ? 0.6 : 0.0;
+      }
+      updateUI();
+    }
+
+    function stopWebManualHold(sendStopToServer = true) {
+      if (manualHoldTimer) {
+        clearInterval(manualHoldTimer);
+        manualHoldTimer = null;
+      }
+      const wasActive = manualHoldActive;
+      manualHoldActive = false;
+      highlightActiveDpad(null);
+      if (wasActive || sendStopToServer) {
+        state.steerPwm = 4500;
+        state.drivePwm = 4443;
+        if (!isLiveConnected) state.speed = 0.0;
+        if (sendStopToServer && window.location.protocol !== "file:") {
+          sendBoatCommand("web_manual_stop");
+          setTimeout(pollBoatServer, 45);
+        }
+        updateUI();
+      }
+    }
+
+    function syncManualHoldLoop() {
+      if (state.estop) {
+        heldManualKeys.clear();
+        activePointerDir = null;
+        stopWebManualHold(false);
+        return;
+      }
+      const dir = resolveManualHoldDirection();
+      if (!dir) {
+        if (manualHoldActive) stopWebManualHold(true);
+        return;
+      }
+      const pair = dirToPwmPair(dir);
+      if (!pair) return;
+      manualHoldActive = true;
+      highlightActiveDpad(pair.btnId);
+      sendWebManualDrive(pair.steer, pair.drive, 0.45);
+      if (!manualHoldTimer) {
+        manualHoldTimer = setInterval(() => {
+          const curDir = resolveManualHoldDirection();
+          if (!curDir || state.estop) {
+            stopWebManualHold(true);
+            return;
+          }
+          const curPair = dirToPwmPair(curDir);
+          if (curPair) {
+            highlightActiveDpad(curPair.btnId);
+            sendWebManualDrive(curPair.steer, curPair.drive, 0.45);
+          }
+        }, 115);
+      }
+    }
+
+    function startPointerHold(dirCode, evt) {
+      if (evt) evt.preventDefault();
+      activePointerDir = dirCode;
+      syncManualHoldLoop();
+    }
+
+    function stopPointerHold() {
+      if (activePointerDir !== null) {
+        activePointerDir = null;
+        syncManualHoldLoop();
+      }
+    }
+
+    function emergencyStopManualHold(evt) {
+      if (evt) evt.preventDefault();
+      heldManualKeys.clear();
+      activePointerDir = null;
+      stopWebManualHold(true);
+    }
+
+    function setPrimaryViewport(target) {
+      state.camPrimaryInNav = (target === "CAM");
+      if (state.camPrimaryInNav) state.camPipHidden = false;
+      updateUI();
+      setTimeout(() => { if (map) map.invalidateSize(); }, 70);
+    }
+
+    function toggleCamPrimaryViewport() {
+      if (state.mode === "BALLOON") return;
+      state.camPrimaryInNav = !state.camPrimaryInNav;
+      if (state.camPrimaryInNav) state.camPipHidden = false;
+      updateUI();
+      setTimeout(() => { if (map) map.invalidateSize(); }, 70);
+    }
+
+    function toggleCamPipHidden() {
+      if (state.camPrimaryInNav) {
+        state.camPrimaryInNav = false;
+        state.camPipHidden = false;
+      } else {
+        state.camPipHidden = !state.camPipHidden;
+      }
+      updateUI();
+      setTimeout(() => { if (map) map.invalidateSize(); }, 70);
+    }
+
+    window.addEventListener("mouseup", stopPointerHold);
+    window.addEventListener("touchend", stopPointerHold);
+    window.addEventListener("touchcancel", stopPointerHold);
+    window.addEventListener("blur", () => {
+      if (heldManualKeys.size > 0 || activePointerDir !== null || manualHoldActive) {
+        heldManualKeys.clear();
+        activePointerDir = null;
+        stopWebManualHold(true);
+      }
+    });
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden && (heldManualKeys.size > 0 || activePointerDir !== null || manualHoldActive)) {
+        heldManualKeys.clear();
+        activePointerDir = null;
+        stopWebManualHold(true);
+      }
+    });
+
+    const MANUAL_DRIVE_KEYS = new Set(["w", "a", "s", "d", "q", "e", "x", "arrowup", "arrowdown", "arrowleft", "arrowright"]);
+
+    window.addEventListener("keydown", (e) => {
+      if (e.target && (e.target.tagName === "INPUT" || e.target.tagName === "SELECT" || e.target.tagName === "TEXTAREA")) return;
+      if (!document.getElementById("pidConfigOverlay")?.classList.contains("hidden")) return;
+      if (!document.getElementById("maxGoWarnOverlay")?.classList.contains("hidden")) return;
+      const k = e.key.toLowerCase();
+      if (e.key === " ") {
+        e.preventDefault();
+        emergencyStopManualHold();
+        return;
+      }
+      if (MANUAL_DRIVE_KEYS.has(k)) {
+        e.preventDefault();
+        if (e.repeat) return;
+        heldManualKeys.add(k);
+        syncManualHoldLoop();
+      }
+    });
+
+    window.addEventListener("keyup", (e) => {
+      const k = e.key.toLowerCase();
+      if (heldManualKeys.has(k)) {
+        e.preventDefault();
+        heldManualKeys.delete(k);
+        syncManualHoldLoop();
+      }
+    });
+
+    function resetWaypoint() {
+      state.simProgress = 0.0;
+      state.wpIndex = 1;
+      state.movedDist = 0.0;
+      state.lapStartTime = Date.now();
+      trailCoords.length = 0;
+      if (isLiveConnected) sendBoatCommand("reset_wp");
+      addLog("SYS", "WP 1 RESET", "auto");
+      updateUI();
+    }
+
+    function drawTelemetryChart() {
+      const canvas = document.getElementById("telemetryChart");
+      if (!canvas) return;
+      const rect = canvas.parentElement.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) return;
+      canvas.width = rect.width;
+      canvas.height = rect.height;
+
+      const ctx = canvas.getContext("2d");
+      const w = canvas.width, h = canvas.height;
+      ctx.clearRect(0, 0, w, h);
+
+      ctx.strokeStyle = "#1c1e24";
+      ctx.lineWidth = 1;
+      for (let i = 1; i <= 3; i++) {
+        const y = (h / 4) * i;
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+      }
+
+      ctx.strokeStyle = "#f59e0b";
+      ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      errHistory.forEach((val, idx) => {
+        const x = (idx / (errHistory.length - 1)) * w;
+        const norm = Math.max(-30, Math.min(30, val));
+        const y = h / 2 - (norm / 30.0) * (h * 0.4);
+        if (idx === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+
+      ctx.strokeStyle = "#f3f4f6";
+      ctx.lineWidth = 1.8;
+      ctx.beginPath();
+      speedHistory.forEach((val, idx) => {
+        const x = (idx / (speedHistory.length - 1)) * w;
+        const norm = Math.max(0, Math.min(2.5, val));
+        const y = h - (norm / 2.5) * (h * 0.82) - 4;
+        if (idx === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+    }
+
+    function updateUI() {
+      const appWrapper = document.getElementById("appWrapper");
+      const estopOverlay = document.getElementById("estopOverlay");
+      const estopUnlockBox = document.getElementById("estopUnlockBox");
+      const modeDot = document.getElementById("modeDot");
+      const modeTitle = document.getElementById("modeTitle");
+      const modeSubtitle = document.getElementById("modeSubtitle");
+      const btnModeSwitch = document.getElementById("btnModeSwitch");
+      const btnModeMainText = document.getElementById("btnModeMainText");
+      const btnModeSubText = document.getElementById("btnModeSubText");
+      const btnEstop = document.getElementById("btnEstop");
+      const manualPanel = document.getElementById("manualPanel");
+      const autoPanel = document.getElementById("autoPanel");
+
+      if (state.estop) {
+        appWrapper.classList.add("blurred");
+        estopOverlay.classList.remove("hidden");
+        modeDot.className = "mode-dot estop";
+        modeTitle.textContent = "E-STOP";
+        modeSubtitle.textContent = "HALTED";
+        btnEstop.classList.add("active");
+        estopUnlockBox.className = state.estopClickCount === 0 ? "estop-unlock-box mono" : "estop-unlock-box step-one mono";
+        estopUnlockBox.textContent = state.estopClickCount === 0 ? "DOUBLE TAP TO UNLOCK (0 / 2)" : "TAP ONCE MORE TO UNLOCK (1 / 2)";
+      } else {
+        appWrapper.classList.remove("blurred");
+        estopOverlay.classList.add("hidden");
+        btnEstop.classList.remove("active");
+
+        if (state.linkPaused) {
+          modeDot.className = "mode-dot balloon";
+          modeTitle.textContent = "LINK HOLD";
+          modeSubtitle.textContent = "WAITING RECONNECT";
+        } else if (state.mode === "MANUAL") {
+          modeDot.className = "mode-dot";
+          modeTitle.textContent = "MANUAL";
+          modeSubtitle.textContent = manualHoldActive ? "WEB HOLD DRIVE" : (state.rcIgnore ? "WEB ONLY (RC LOCK)" : "RC + WEB READY");
+          btnModeSwitch.className = "btn btn-mode-toggle";
+          btnModeMainText.textContent = "AUTO";
+          btnModeSubText.classList.remove("hidden");
+        } else if (state.mode === "AUTO") {
+          modeDot.className = "mode-dot auto";
+          modeTitle.textContent = "AUTO";
+          modeSubtitle.textContent = "TRACK PILOT";
+          btnModeSwitch.className = "btn btn-mode-toggle in-auto";
+          btnModeMainText.textContent = "MANUAL";
+          btnModeSubText.classList.add("hidden");
+        }
+      }
+
+      if (state.mode === "MANUAL") {
+        manualPanel.classList.remove("hidden");
+        autoPanel.classList.add("hidden");
+      } else if (state.mode === "AUTO") {
+        manualPanel.classList.add("hidden");
+        autoPanel.classList.remove("hidden");
+      }
+
+      const gpsReadyDot = document.getElementById("gpsReadyDot");
+      const gpsReadyLabel = document.getElementById("gpsReadyLabel");
+      const lampGps = document.getElementById("lampGps");
+      if (state.fixStatus >= 2 && state.fixStatus <= 5) {
+        gpsReadyDot.style.backgroundColor = "var(--sig-nominal)";
+        gpsReadyLabel.textContent = "GPS READY";
+        lampGps.className = state.fixStatus === 2 ? "fs-lamp warn" : "fs-lamp";
+      } else {
+        gpsReadyDot.style.backgroundColor = "var(--sig-critical)";
+        gpsReadyLabel.textContent = "GPS BAD";
+        lampGps.className = "fs-lamp err";
+      }
+
+      document.getElementById("telNtripBytes").textContent = `${state.ntripKb.toFixed(1)} KB`;
+      document.getElementById("telSatCount").textContent = `${state.satellites}`;
+      document.getElementById("telHdop").textContent = state.hdop.toFixed(2);
+
+      document.getElementById("hudHeadingVal").textContent = `${state.heading.toFixed(1)}°`;
+      document.getElementById("hudTargetVal").textContent = `${state.targetAngle.toFixed(1)}°`;
+      document.getElementById("hudErrVal").textContent = `${state.angleErr >= 0 ? "+" : ""}${state.angleErr.toFixed(1)}°`;
+      document.getElementById("compassBoatArrow").setAttribute("transform", `rotate(${state.heading} 60 60)`);
+      document.getElementById("compassTargetArrow").setAttribute("transform", `rotate(${state.targetAngle} 60 60)`);
+
+      let rudderDeg = state.steerPwm >= 4500
+        ? -((state.steerPwm - 4500) / 1000.0) * 35.0
+        : ((4500 - state.steerPwm) / 1500.0) * 35.0;
+      rudderDeg = Math.max(-38, Math.min(38, rudderDeg));
+      const rudderNeedle = document.getElementById("rudderNeedleGroup");
+      if (rudderNeedle) rudderNeedle.setAttribute("transform", `rotate(${-rudderDeg} 110 18)`);
+      const rudderTxt = document.getElementById("rudderAngleText");
+      if (rudderTxt) {
+        if (Math.abs(rudderDeg) < 0.8) rudderTxt.textContent = "MID 0.0°";
+        else if (rudderDeg < 0) rudderTxt.textContent = `P ${Math.abs(rudderDeg).toFixed(1)}°`;
+        else rudderTxt.textContent = `S ${rudderDeg.toFixed(1)}°`;
+      }
+
+      const errPct = Math.max(5, Math.min(95, 50 + (state.angleErr / 45.0) * 50));
+      document.getElementById("errTapeIndicator").style.left = `${errPct}%`;
+
+      const thrPct = Math.max(0, Math.round(((state.drivePwm - 4443) / Math.max(1, (state.maxGo || 4800) - 4443)) * 100));
+      document.getElementById("hudThrottlePct").textContent = `${thrPct}%`;
+
+      document.getElementById("distValLeft").textContent = `${state.distLeft.toFixed(2)} m`;
+      document.getElementById("distValCenter").textContent = `${state.distCenter.toFixed(2)} m`;
+      document.getElementById("distValRight").textContent = `${state.distRight.toFixed(2)} m`;
+
+      document.getElementById("distBoxLeft").classList.toggle("active-path", state.targetPath === "Left");
+      document.getElementById("distBoxCenter").classList.toggle("active-path", state.targetPath === "Center");
+      document.getElementById("distBoxRight").classList.toggle("active-path", state.targetPath === "Right");
+
+      const isAutoPath = state.pathAutoSwitch !== false;
+      const korLane = state.targetPath === "Left" ? "PORT" : state.targetPath === "Right" ? "STBD" : "CENTER";
+      const pathAutoBtn = document.getElementById("btnPathAutoMode");
+      if (pathAutoBtn) {
+        pathAutoBtn.classList.toggle("active", isAutoPath);
+        pathAutoBtn.style.borderColor = isAutoPath ? "" : "var(--sig-caution)";
+        pathAutoBtn.style.color = isAutoPath ? "" : "var(--sig-caution)";
+        pathAutoBtn.textContent = isAutoPath ? `AUTO (${korLane})` : `${korLane} 고정 · AUTO 복귀`;
+      }
+      const pathSelect = document.getElementById("demoPathSelect");
+      const wantSel = isAutoPath ? "AUTO" : state.targetPath;
+      if (pathSelect && pathSelect.value !== wantSel) pathSelect.value = wantSel;
+
+      const elapsedSec = (isLiveConnected && typeof state.lapElapsedSec === "number")
+        ? state.lapElapsedSec
+        : (Date.now() - state.lapStartTime) / 1000.0;
+      const mm = String(Math.floor(elapsedSec / 60)).padStart(2, "0");
+      const ss = (elapsedSec % 60).toFixed(1).padStart(4, "0");
+      document.getElementById("raceLapTime").textContent = `${mm}:${ss}`;
+      document.getElementById("raceMaxSpd").textContent = `${state.maxSpeed.toFixed(1)} m/s`;
+      document.getElementById("raceMovedDist").textContent = `${state.movedDist.toFixed(1)} m`;
+      const remainM = Math.max(0, totalCourseLengthM - state.movedDist);
+      const etaSec = state.speed > 0.2 ? Math.round(remainM / state.speed) : 0;
+      document.getElementById("raceEta").textContent = state.speed > 0.2 ? `${String(Math.floor(etaSec / 60)).padStart(2, "0")}:${String(etaSec % 60).padStart(2, "0")}` : "--:--";
+
+      document.getElementById("manSpeedVal").textContent = state.speed.toFixed(1);
+      const knots = (state.speed * 1.94384).toFixed(2);
+      const knotsEl = document.getElementById("manSpeedKnots");
+      if (knotsEl) knotsEl.textContent = `${knots} kt`;
+
+      const arcOffset = Math.round(126 * (1 - Math.max(0, Math.min(1, state.speed / 2.5))));
+      document.getElementById("manSpeedArc")?.setAttribute("stroke-dashoffset", String(arcOffset));
+      document.getElementById("autoSpeedArc")?.setAttribute("stroke-dashoffset", String(arcOffset));
+
+      ["tgRev", "tgStop", "tgSlow", "tgHalf", "tgFull"].forEach((id) => {
+        const el = document.getElementById(id);
+        if (el) el.className = "tg-cell";
+      });
+      if (state.drivePwm < 4410) document.getElementById("tgRev").className = "tg-cell active-rev";
+      else if (state.drivePwm <= 4475) document.getElementById("tgStop").className = "tg-cell active-stop";
+      else if (thrPct < 45) document.getElementById("tgSlow").className = "tg-cell active-fwd";
+      else if (thrPct < 85) document.getElementById("tgHalf").className = "tg-cell active-fwd";
+      else document.getElementById("tgFull").className = "tg-cell active-fwd";
+
+      document.getElementById("manGpsMiniText").textContent = state.fixStatus === 4 ? "RTK FIX (4)" : state.fixStatus === 5 ? "FLOAT (5)" : state.fixStatus === 2 ? "DGPS (2)" : `GPS (${state.fixStatus})`;
+      document.getElementById("rcStText").textContent = `${state.stPulse} us`;
+      document.getElementById("rcThText").textContent = `${state.thPulse} us`;
+      document.getElementById("pwmSteerText").textContent = `${state.steerPwm}`;
+      document.getElementById("pwmDriveText").textContent = `${state.drivePwm}`;
+      document.getElementById("manNextWpPreview").textContent = `WP ${state.wpIndex} / ${state.wpTotal}`;
+      document.getElementById("manNextDistPreview").textContent = `${state.wpDist.toFixed(1)} m`;
+
+      document.getElementById("rcStBar").style.width = `${Math.max(0, Math.min(100, ((state.stPulse - 835) / (1891 - 835)) * 100))}%`;
+      document.getElementById("rcThBar").style.width = `${Math.max(0, Math.min(100, ((state.thPulse - 1086) / (1621 - 1086)) * 100))}%`;
+      document.getElementById("pwmSteerBar").style.width = `${Math.max(0, Math.min(100, ((state.steerPwm - 3000) / (5500 - 3000)) * 100))}%`;
+      document.getElementById("pwmDriveBar").style.width = `${Math.max(0, Math.min(100, ((state.drivePwm - 4000) / (Math.max(4800, state.maxGo || 4800) - 4000)) * 100))}%`;
+
+      document.getElementById("autoSpeedVal").textContent = state.speed.toFixed(1);
+      document.getElementById("autoHeadingText").textContent = `${Math.round(state.heading)}°`;
+      document.getElementById("autoRemainTotalText").textContent = `REM ${remainM.toFixed(1)}m / ${knots} kt`;
+      document.getElementById("autoPathBadge").textContent = `${state.targetPath === "Left" ? "PORT" : state.targetPath === "Right" ? "STBD" : "CENTER"} · ${state.pathAutoSwitch !== false ? "AUTO" : "LOCK"}`;
+      document.getElementById("autoWpCur").textContent = state.wpIndex;
+      document.getElementById("autoWpTotal").textContent = state.wpTotal;
+      document.getElementById("autoDistVal").textContent = state.wpDist.toFixed(2);
+      document.getElementById("autoSteerPwmText").textContent = `${state.steerPwm} (${state.steerPwm === 4500 ? "MID" : state.steerPwm > 4500 ? "PORT" : "STBD"})`;
+      document.getElementById("autoDrivePwmText").textContent = `${state.drivePwm} (${thrPct}%)`;
+      document.getElementById("wpPercentText").textContent = `${Math.round((state.wpIndex / state.wpTotal) * 100)}%`;
+
+      const bars = document.querySelectorAll("#wpBarsContainer .wp-bar");
+      const activeCount = Math.ceil((state.wpIndex / state.wpTotal) * bars.length);
+      bars.forEach((b, idx) => b.classList.toggle("active", idx < activeCount));
+
+      if (polyCenter && polyLeft && polyRight) {
+        polyCenter.setStyle({ weight: state.targetPath === "Center" ? 3.5 : 1.6, opacity: state.targetPath === "Center" ? 1 : 0.5 });
+        polyLeft.setStyle({ weight: state.targetPath === "Left" ? 3.5 : 1.6, opacity: state.targetPath === "Left" ? 1 : 0.5 });
+        polyRight.setStyle({ weight: state.targetPath === "Right" ? 3.5 : 1.6, opacity: state.targetPath === "Right" ? 1 : 0.5 });
+      }
+
+      const gpsBadge = document.getElementById("autoGpsBadge");
+      if (state.fixStatus === 4) {
+        gpsBadge.className = "gps-status-pill gps-fix";
+        gpsBadge.innerHTML = `<span>RTK FIX</span><span class="mono" style="font-size:11px; color:var(--text-secondary);">&lt;0.02m</span>`;
+      } else if (state.fixStatus === 5) {
+        gpsBadge.className = "gps-status-pill gps-flt";
+        gpsBadge.innerHTML = `<span>FLOAT</span><span class="mono" style="font-size:11px; color:var(--text-secondary);">&lt;0.25m</span>`;
+      } else if (state.fixStatus === 2) {
+        gpsBadge.className = "gps-status-pill gps-dgn";
+        gpsBadge.innerHTML = `<span>DGPS</span><span class="mono" style="font-size:11px;">~1.0m</span>`;
+      } else {
+        gpsBadge.className = "gps-status-pill gps-bad";
+        gpsBadge.innerHTML = `<span>NO FIX (${state.fixStatus})</span><span class="mono" style="font-size:11px;">MANUAL</span>`;
+      }
+
+      document.getElementById("coordText").textContent = `${state.lat.toFixed(6)}, ${state.lon.toFixed(6)}`;
+      const activeArr = state.targetPath === "Left" ? leftCoords : state.targetPath === "Right" ? rightCoords : centerCoords;
+      const wpCoord = activeArr[Math.min(state.wpIndex - 1, totalWaypoints - 1)];
+
+      if (boatMarker) {
+        boatMarker.setLatLng([state.lat, state.lon]);
+        const arrowEl = document.getElementById("boatArrow");
+        if (arrowEl) arrowEl.style.transform = `rotate(${state.heading}deg)`;
+      }
+      if (wpMarker && wpCoord) wpMarker.setLatLng(wpCoord);
+      if (targetVectorLine && wpCoord) targetVectorLine.setLatLngs([[state.lat, state.lon], wpCoord]);
+
+      const hudBadge = document.getElementById("hudSteerGainBadge");
+      const btnPidSub = document.getElementById("btnPidSubText");
+      const hpSuffix = (state.maxGo >= 5200 && state.highPowerElapsedSec > 0)
+        ? ` (${Math.floor(state.highPowerElapsedSec / 60)}m)`
+        : "";
+      if (state.steerCtrlMode === "PID") {
+        if (hudBadge) hudBadge.textContent = `PID / ${state.pidKp.toFixed(1)}-${state.pidKi.toFixed(1)}-${state.pidKd.toFixed(1)}`;
+        if (btnPidSub) btnPidSub.textContent = `PID | ${state.maxGo}${hpSuffix}`;
+      } else {
+        if (hudBadge) hudBadge.textContent = `P / Kp ${state.pidKp.toFixed(1)}`;
+        if (btnPidSub) btnPidSub.textContent = `P | ${state.maxGo}${hpSuffix}`;
+      }
+      if (btnPidSub) {
+        btnPidSub.style.color = state.maxGo >= 5200 ? "var(--sig-caution)" : "";
+      }
+
+      document.getElementById("modalLiveErr").textContent = `${state.angleErr >= 0 ? "+" : ""}${state.angleErr.toFixed(1)}°`;
+      document.getElementById("modalLiveP").textContent = state.pidPTerm.toFixed(1);
+      document.getElementById("modalLiveI").textContent = state.pidITerm.toFixed(1);
+      document.getElementById("modalLiveD").textContent = state.pidDTerm.toFixed(1);
+      document.getElementById("modalLivePwm").textContent = `${state.steerPwm}`;
+      const mRtt = document.getElementById("modalLiveRtt");
+      if (mRtt) mRtt.textContent = state.linkRttMs > 0 ? `${state.linkRttMs} ms` : "-- ms";
+      const mStr = document.getElementById("modalLiveStream");
+      if (mStr) mStr.textContent = state.camLteMode ? "LTE 12FPS" : "HQ 25FPS";
+      const mWd = document.getElementById("modalLiveWatchdog");
+      if (mWd) mWd.textContent = state.linkWatchdog ? `ON (${(state.linkTimeoutSec || 3.5).toFixed(1)}s)` : "OFF";
+      const mRc = document.getElementById("modalLiveRcPolicy");
+      if (mRc) mRc.textContent = state.rcIgnore ? "WEB ONLY" : "SHARED";
+      const mFlip = document.getElementById("modalLiveCamFlip");
+      if (mFlip) mFlip.textContent = `${state.camFlip || 0}°`;
+
+      if (!map) drawOfflineFallbackMap();
+      updateBalloonPanelUI();
+      drawTelemetryChart();
+    }
+
+    function updateBalloonPanelUI() {
+      const modeDot = document.getElementById("modeDot");
+      const modeTitle = document.getElementById("modeTitle");
+      const modeSubtitle = document.getElementById("modeSubtitle");
+      const btnModeSwitch = document.getElementById("btnModeSwitch");
+      const btnModeMainText = document.getElementById("btnModeMainText");
+      const btnModeSubText = document.getElementById("btnModeSubText");
+      const btnBalloonSwitch = document.getElementById("btnBalloonSwitch");
+      const btnBalloonMainText = document.getElementById("btnBalloonMainText");
+      const btnWpReset = document.getElementById("btnWpReset");
+
+      const mapPanel = document.getElementById("mapPanel");
+      const globalCamPanel = document.getElementById("globalCamPanel");
+      const multiPathCard = document.getElementById("multiPathCard");
+      const visionFovCard = document.getElementById("visionFovCard");
+      const manualPanel = document.getElementById("manualPanel");
+      const autoPanel = document.getElementById("autoPanel");
+      const balloonPanel = document.getElementById("balloonPanel");
+      const visionFilterControl = document.getElementById("visionFilterControl");
+      const pathSelectControl = document.getElementById("pathSelectControl");
+
+      const isVisionMode = (state.mode === "BALLOON");
+      const camIsMain = isVisionMode || state.camPrimaryInNav;
+
+      if (!state.estop && !state.linkPaused) {
+        if (isVisionMode) {
+          modeDot.className = "mode-dot balloon";
+          modeTitle.textContent = "VISION";
+          modeSubtitle.textContent = "EO TARGET PILOT";
+          btnModeSwitch.className = "btn btn-mode-toggle";
+          btnModeMainText.textContent = "AUTO";
+          btnModeSubText.classList.remove("hidden");
+          btnBalloonSwitch.className = "btn btn-balloon-toggle in-balloon";
+          btnBalloonMainText.textContent = "MANUAL";
+        } else {
+          btnBalloonSwitch.className = "btn btn-balloon-toggle";
+          btnBalloonMainText.textContent = "VISION";
+        }
+      }
+
+      if (camIsMain) {
+        globalCamPanel.classList.remove("hidden", "pip-dock");
+        mapPanel.classList.remove("hidden");
+        mapPanel.classList.toggle("pip-dock", true);
+        mapPanel.classList.toggle("hidden", isVisionMode);
+      } else {
+        mapPanel.classList.remove("hidden", "pip-dock");
+        globalCamPanel.classList.toggle("pip-dock", true);
+        globalCamPanel.classList.toggle("hidden", Boolean(state.camPipHidden));
+      }
+
+      document.getElementById("btnExpandMapPip")?.classList.toggle("hidden", !camIsMain || isVisionMode);
+      document.getElementById("mapPanelTitleText").textContent = (camIsMain && !isVisionMode) ? "MAP" : "ECDIS CHART · 65 WPs";
+      document.getElementById("coordText")?.classList.toggle("hidden", camIsMain && !isVisionMode);
+      document.getElementById("btnToggleCamPipVis")?.classList.toggle("active", !state.camPipHidden);
+
+      const camTitleEl = document.getElementById("camHeaderTitleText");
+      const camDotEl = document.getElementById("camHeaderColorDot");
+      const camHsvEl = document.getElementById("camHeaderHsvText");
+      const camVisionActions = document.getElementById("camVisionOnlyActions");
+      const camSwapBtn = document.getElementById("btnSwapCamViewport");
+
+      if (isVisionMode) {
+        if (camTitleEl) camTitleEl.textContent = "EO TARGET CAM · 16:9";
+        camDotEl?.classList.remove("hidden");
+        camHsvEl?.classList.remove("hidden");
+        if (camVisionActions) camVisionActions.style.display = "inline-flex";
+        camSwapBtn?.classList.add("hidden");
+      } else {
+        if (camTitleEl) camTitleEl.textContent = camIsMain ? "BOW LIVE CAM · 16:9" : "BOW CAM · LIVE";
+        camDotEl?.classList.add("hidden");
+        camHsvEl?.classList.add("hidden");
+        if (camVisionActions) camVisionActions.style.display = "none";
+        if (camSwapBtn) {
+          camSwapBtn.classList.remove("hidden");
+          camSwapBtn.textContent = camIsMain ? "지도 크게" : "확대";
+        }
+      }
+      multiPathCard.classList.toggle("hidden", isVisionMode);
+      visionFovCard.classList.toggle("hidden", !isVisionMode);
+      btnWpReset.classList.toggle("hidden", isVisionMode);
+      visionFilterControl.classList.toggle("hidden", !isVisionMode);
+      pathSelectControl.classList.toggle("hidden", isVisionMode);
+
+      if (isVisionMode) {
+        manualPanel.classList.add("hidden");
+        autoPanel.classList.add("hidden");
+        balloonPanel.classList.remove("hidden");
+      } else {
+        balloonPanel.classList.add("hidden");
+      }
+
+      document.getElementById("camHeaderColorDot").style.backgroundColor = state.targetColorHex || "#ff2a85";
+      document.getElementById("camHeaderHsvText").textContent = `H:${state.targetHue} +-` + `${state.targetHueTol} / S>=${state.targetSatMin}`;
+
+      const globalStatusPill = document.getElementById("globalCamStatusPill");
+      const globalMetricPill = document.getElementById("globalCamMetricPill");
+      if (isVisionMode) {
+        globalStatusPill.textContent = state.balloonDetected ? "EO TARGET LOCKED" : "EO SCANNING";
+        const distTxt = state.balloonDetected ? `${state.balloonDistM.toFixed(2)}m` : "--m";
+        globalMetricPill.textContent = `RNG ${distTxt} | BRG ${state.balloonAngleErr >= 0 ? "+" : ""}${state.balloonAngleErr.toFixed(1)}° | ${(state.balloonFps || 30).toFixed(0)} FPS`;
+      } else {
+        globalStatusPill.textContent = state.cameraOk ? "LIVE STREAM" : "CAMERA STANDBY";
+        globalMetricPill.textContent = `HDG ${state.heading.toFixed(1)}° | SOG ${state.speed.toFixed(1)} m/s | ${state.camLteMode ? "12" : "25"} FPS`;
+      }
+
+      const thrPct = Math.max(0, Math.round(((state.drivePwm - 4443) / Math.max(1, (state.maxGo || 4800) - 4443)) * 100));
+      const pwmStPct = Math.max(0, Math.min(100, ((state.steerPwm - 3000) / (5500 - 3000)) * 100));
+      const pwmDrPct = Math.max(0, Math.min(100, ((state.drivePwm - 4000) / (Math.max(4800, state.maxGo || 4800) - 4000)) * 100));
+
+      document.getElementById("balloonFpsText").textContent = `CAM ${(state.balloonFps || 30.0).toFixed(1)} FPS`;
+      document.getElementById("balloonDistVal").textContent = state.balloonDetected ? `${state.balloonDistM.toFixed(2)} m` : "-- m";
+      document.getElementById("balloonErrVal").textContent = `${state.balloonAngleErr >= 0 ? "+" : ""}${state.balloonAngleErr.toFixed(1)}°`;
+      document.getElementById("balloonAreaVal").textContent = `${state.balloonAreaPct.toFixed(1)} %`;
+      document.getElementById("balloonNormXVal").textContent = `${state.balloonX >= 0 ? "+" : ""}${state.balloonX.toFixed(2)}, ${state.balloonY >= 0 ? "+" : ""}${state.balloonY.toFixed(2)}`;
+      document.getElementById("balloonSpeedVal").textContent = state.speed.toFixed(1);
+      document.getElementById("balloonSteerPwmText").textContent = `${state.steerPwm} (${state.steerPwm === 4500 ? "MID" : state.steerPwm > 4500 ? "PORT" : "STBD"})`;
+      document.getElementById("balloonDrivePwmText").textContent = `${state.drivePwm} (${thrPct}%)`;
+      document.getElementById("balloonSteerBar").style.width = `${pwmStPct}%`;
+      document.getElementById("balloonDriveBar").style.width = `${pwmDrPct}%`;
+
+      document.getElementById("fovAzimuthVal").textContent = `${state.balloonAngleErr >= 0 ? "+" : ""}${state.balloonAngleErr.toFixed(1)}°`;
+      document.getElementById("fovRangeVal").textContent = state.balloonDetected ? `${state.balloonDistM.toFixed(2)} m` : "-- m";
+      document.getElementById("fovRadiusVal").textContent = state.balloonDetected ? `${Math.round(state.balloonRadius)} px` : "0 px";
+      document.getElementById("fovFpsVal").textContent = `${(state.balloonFps || 30.0).toFixed(1)} Hz`;
+
+      const camReadyDot = document.getElementById("camReadyDot");
+      const camReadyLabel = document.getElementById("camReadyLabel");
+      if (isVisionMode && state.balloonDetected) {
+        camReadyDot.style.backgroundColor = "var(--sig-nominal)";
+        camReadyLabel.textContent = `LOCK ${state.balloonDistM.toFixed(1)}m`;
+      } else if (state.cameraOk) {
+        camReadyDot.style.backgroundColor = "var(--sig-nominal)";
+        camReadyLabel.textContent = "CAM LIVE";
+      } else {
+        camReadyDot.style.backgroundColor = "var(--sig-caution)";
+        camReadyLabel.textContent = "WAIT CAM";
+      }
+
+      const detectLabel = document.getElementById("balloonDetectLabel");
+      const stateBadge = document.getElementById("balloonStateBadge");
+      if (state.balloonState === "FINISH") {
+        detectLabel.textContent = "COMPLETE";
+        stateBadge.className = "gps-status-pill gps-fix";
+        stateBadge.innerHTML = `<span>COMPLETE</span><span class="mono" style="font-size:11px; color:var(--text-secondary);">STOP AT ${state.balloonStopDistM.toFixed(1)}m</span>`;
+      } else if (state.balloonState === "CHARGE" || (state.balloonDetected && Math.abs(state.balloonAngleErr) <= 18.0)) {
+        detectLabel.textContent = "TARGET LOCKED";
+        stateBadge.className = "gps-status-pill balloon-charge-pill";
+        const subTxt = state.balloonActionMode === "APPROACH_STOP" ? `STOP AT ${state.balloonStopDistM.toFixed(1)}m` : "FULL CHARGE";
+        stateBadge.innerHTML = `<span>TARGET LOCK</span><span class="mono" style="font-size:11px; color:var(--text-secondary);">${subTxt}</span>`;
+      } else if (state.balloonDetected || state.balloonState === "TRACKING") {
+        detectLabel.textContent = "TRACKING";
+        stateBadge.className = "gps-status-pill balloon-track-pill";
+        stateBadge.innerHTML = `<span>TRACKING</span><span class="mono" style="font-size:11px; color:var(--text-secondary);">ERR ${state.balloonAngleErr.toFixed(1)}°</span>`;
+      } else {
+        detectLabel.textContent = "SCANNING";
+        stateBadge.className = "gps-status-pill balloon-search-pill";
+        stateBadge.innerHTML = `<span>SCANNING</span><span class="mono" style="font-size:11px;">SECTOR SEARCH</span>`;
+      }
+
+      renderCameraOverlayOnCanvas("globalCamHudCanvas", "globalCamLiveImg", isVisionMode);
+      if (isVisionMode) {
+        drawFovRadarCanvas();
+      }
+    }
+
+    function drawFovRadarCanvas() {
+      const canvas = document.getElementById("fovRadarCanvas");
+      if (!canvas) return;
+      const rect = canvas.parentElement.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) return;
+      canvas.width = rect.width;
+      canvas.height = rect.height;
+
+      const ctx = canvas.getContext("2d");
+      const w = canvas.width, h = canvas.height;
+      ctx.clearRect(0, 0, w, h);
+
+      const ox = w / 2, oy = h - 8;
+      const maxR = Math.min(w * 0.46, h - 14);
+      const halfFov = (31.1 * Math.PI) / 180.0;
+
+      ctx.fillStyle = "rgba(243, 244, 246, 0.04)";
+      ctx.beginPath();
+      ctx.moveTo(ox, oy);
+      ctx.arc(ox, oy, maxR, -Math.PI / 2 - halfFov, -Math.PI / 2 + halfFov);
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.strokeStyle = "#32363e";
+      ctx.lineWidth = 1;
+      for (let i = 1; i <= 3; i++) {
+        ctx.beginPath();
+        ctx.arc(ox, oy, (maxR / 3) * i, -Math.PI / 2 - halfFov, -Math.PI / 2 + halfFov);
+        ctx.stroke();
+      }
+
+      if (state.balloonDetected) {
+        const angRad = (state.balloonAngleErr * Math.PI) / 180.0;
+        const maxRadarDist = Math.max(4.0, (state.balloonRealDiamM || 3.5) * 4.0);
+        const normDist = Math.min(1.0, Math.max(0.08, state.balloonDistM / maxRadarDist));
+        const tx = ox + Math.sin(angRad) * (maxR * normDist);
+        const ty = oy - Math.cos(angRad) * (maxR * normDist);
+
+        ctx.strokeStyle = "#71717a";
+        ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(ox, oy); ctx.lineTo(tx, ty); ctx.stroke();
+        ctx.fillStyle = "#f3f4f6";
+        ctx.beginPath(); ctx.arc(tx, ty, 4, 0, Math.PI * 2); ctx.fill();
+      }
+    }
+
+    function renderCameraOverlayOnCanvas(canvasId, imgId, isVisionOverlay = false) {
+      const canvas = document.getElementById(canvasId);
+      if (!canvas) return;
+      const rect = canvas.parentElement.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) return;
+      canvas.width = rect.width;
+      canvas.height = rect.height;
+
+      const ctx = canvas.getContext("2d");
+      const w = canvas.width, h = canvas.height;
+      ctx.clearRect(0, 0, w, h);
+
+      const liveImg = document.getElementById(imgId);
+      const liveVisible = liveImg && !liveImg.classList.contains("hidden");
+
+      const scale = Math.min(w / 640.0, h / 360.0);
+      const vw = 640.0 * scale, vh = 360.0 * scale;
+      const vx = (w - vw) / 2.0, vy = (h - vh) / 2.0;
+
+      if (!liveVisible) {
+        ctx.fillStyle = "#111215";
+        ctx.fillRect(vx, vy, vw, vh);
+        ctx.strokeStyle = "#262930";
+        ctx.strokeRect(vx, vy, vw, vh);
+
+        const horizonY = vy + vh * 0.48;
+        ctx.strokeStyle = "#20232a";
+        ctx.beginPath(); ctx.moveTo(vx, horizonY); ctx.lineTo(vx + vw, horizonY); ctx.stroke();
+
+        if (!isVisionOverlay) {
+          ctx.fillStyle = "rgba(156, 163, 175, 0.72)";
+          ctx.font = "600 10px JetBrains Mono, monospace";
+          ctx.textAlign = "center";
+          ctx.fillText(isLiveConnected ? "CONNECTING LIVE STREAM..." : "LIVE BOW CAMERA PREVIEW", vx + vw / 2.0, vy + vh / 2.0 + 3);
+          ctx.textAlign = "start";
+          return;
+        }
+      }
+
+      if (!isVisionOverlay) {
+        return;
+      }
+
+      const midX = vx + vw / 2.0, midY = vy + vh / 2.0;
+      ctx.strokeStyle = "rgba(243, 244, 246, 0.35)";
+      ctx.fillStyle = "rgba(156, 163, 175, 0.85)";
+      ctx.font = "500 9.5px JetBrains Mono, monospace";
+      for (let deg = -30; deg <= 30; deg += 5) {
+        const tx = midX + (deg / 31.1) * (vw * 0.48);
+        const tickH = deg % 15 === 0 ? 7 : 4;
+        ctx.beginPath(); ctx.moveTo(tx, vy + 6); ctx.lineTo(tx, vy + 6 + tickH); ctx.stroke();
+        if (deg % 15 === 0) ctx.fillText(`${deg > 0 ? "+" : ""}${deg}°`, tx - 10, vy + 23);
+      }
+
+      ctx.strokeStyle = "rgba(243, 244, 246, 0.25)";
+      ctx.beginPath();
+      ctx.moveTo(midX - 26, midY); ctx.lineTo(midX - 6, midY);
+      ctx.moveTo(midX + 6, midY); ctx.lineTo(midX + 26, midY);
+      ctx.moveTo(midX, midY - 20); ctx.lineTo(midX, midY - 6);
+      ctx.moveTo(midX, midY + 6); ctx.lineTo(midX, midY + 20);
+      ctx.stroke();
+
+      if (state.balloonDetected && !liveVisible) {
+        const bx = midX + state.balloonX * (vw * 0.46);
+        const by = midY + state.balloonY * (vh * 0.36);
+        const br = Math.max(14, Math.min(72, (state.balloonRadius || 26) * scale));
+        const baseHex = state.targetColorHex || "#ff2a85";
+
+        ctx.fillStyle = state.camShowMask ? "#ffffff" : baseHex;
+        ctx.beginPath(); ctx.arc(bx, by, br, 0, Math.PI * 2); ctx.fill();
+
+        ctx.strokeStyle = "#f3f4f6";
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(bx - br - 5, by - br - 5, (br + 5) * 2, (br + 5) * 2);
+      }
+    }
+
+    function switchMode() {
+      if (state.estop) return;
+      const nextMode = state.mode === "MANUAL" ? "AUTO" : "MANUAL";
+      if (isLiveConnected) {
+        sendBoatCommand("set_mode", nextMode);
+        setTimeout(pollBoatServer, 40);
+        return;
+      }
+      if (nextMode === "AUTO" && !(state.fixStatus >= 2 && state.fixStatus <= 5)) {
+        addLog("FAILSAFE", `GPS NOT READY (fix=${state.fixStatus})`, "warn");
+        updateUI();
+        return;
+      }
+      state.mode = nextMode;
+      state.speed = state.mode === "AUTO" ? 1.5 : 0.8;
+      state.drivePwm = state.mode === "AUTO" ? 4760 : 4520;
+      addLog("MODE", `SWITCH -> ${state.mode}`, state.mode === "AUTO" ? "auto" : "warn");
+      updateUI();
+      setTimeout(() => { if (map) map.invalidateSize(); }, 80);
+    }
+
+    function switchBalloonMode() {
+      if (state.estop) return;
+      const nextMode = state.mode === "BALLOON" ? "MANUAL" : "BALLOON";
+      if (isLiveConnected) {
+        sendBoatCommand("set_mode", nextMode);
+        setTimeout(pollBoatServer, 40);
+        return;
+      }
+      if (nextMode === "BALLOON" && !state.cameraOk) {
+        addLog("FAILSAFE", "CAM NOT READY", "warn");
+        updateUI();
+        return;
+      }
+      if (state.mode === "BALLOON") {
+        state.mode = "MANUAL";
+        state.balloonState = "IDLE";
+        state.speed = 0.8;
+        state.drivePwm = 4520;
+        addLog("VISION", "SWITCH -> MANUAL", "warn");
+      } else {
+        state.mode = "BALLOON";
+        state.balloonDetected = true;
+        state.balloonState = "CHARGE";
+        state.balloonDistM = Math.max((state.balloonStopDistM || 3.5) + 6.5, 10.0);
+        state.speed = 1.65;
+        state.drivePwm = state.maxGo || 4800;
+        addLog("VISION", "SWITCH -> VISION", "auto");
+      }
+      updateUI();
+      setTimeout(() => { if (map) map.invalidateSize(); }, 80);
+    }
+
+    function changeHsvPreset(presetVal) {
+      state.hsvPreset = presetVal;
+      state.customColorEnable = false;
+      if (isLiveConnected) sendBoatCommand("set_hsv_preset", presetVal);
+      addLog("VISION", `HSV PRESET -> ${presetVal}`, "auto");
+    }
+
+    function toggleCamFlip() {
+      state.camFlip = state.camFlip === 0 ? 180 : 0;
+      if (isLiveConnected) sendBoatCommand("toggle_cam_flip", state.camFlip);
+      addLog("VISION", `CAM FLIP -> ${state.camFlip}`, "auto");
+      updateUI();
+    }
+
+    function toggleCamMask() {
+      state.camShowMask = !state.camShowMask;
+      document.getElementById("btnCamMaskToggle")?.classList.toggle("active", state.camShowMask);
+      if (isLiveConnected) sendBoatCommand("toggle_cam_mask", state.camShowMask);
+      updateUI();
+    }
+
+    function triggerEstop() {
+      if (isLiveConnected) sendBoatCommand("estop_on");
+      state.estop = true;
+      state.estopClickCount = 0;
+      state.mode = "MANUAL";
+      state.speed = 0.0;
+      state.steerPwm = 4500;
+      state.drivePwm = 4443;
+      if (estopResetTimer) clearTimeout(estopResetTimer);
+      addLog("E-STOP", "ALL MOTORS HALTED", "warn");
+      updateUI();
+    }
+
+    function handleEstopOverlayClick() {
+      if (!state.estop) return;
+      state.estopClickCount += 1;
+      if (state.estopClickCount >= 2) {
+        state.estop = false;
+        state.estopClickCount = 0;
+        state.mode = "MANUAL";
+        state.speed = 0.0;
+        if (estopResetTimer) clearTimeout(estopResetTimer);
+        if (isLiveConnected) sendBoatCommand("estop_off");
+        addLog("E-STOP", "UNLOCKED -> MANUAL", "auto");
+      } else {
+        if (estopResetTimer) clearTimeout(estopResetTimer);
+        estopResetTimer = setTimeout(() => { state.estopClickCount = 0; updateUI(); }, 3000);
+      }
+      updateUI();
+    }
+
+    function toggleSimPause() {
+      if (isLiveConnected) return;
+      state.simRunning = !state.simRunning;
+      document.getElementById("simToggleBtn").textContent = state.simRunning ? "SIMULATION" : "SIM PAUSED";
+    }
+
+    function hexToOpenCvHsv(hex) {
+      const clean = (hex || "#ff2a85").replace("#", "");
+      if (clean.length !== 6) return { h: 166, s: 200, v: 255 };
+      const r = parseInt(clean.substring(0, 2), 16) / 255.0;
+      const g = parseInt(clean.substring(2, 4), 16) / 255.0;
+      const b = parseInt(clean.substring(4, 6), 16) / 255.0;
+      const mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn;
+      let hDeg = 0;
+      if (d > 0) {
+        if (mx === r) hDeg = (60 * ((g - b) / d) + 360) % 360;
+        else if (mx === g) hDeg = (60 * ((b - r) / d) + 120) % 360;
+        else hDeg = (60 * ((r - g) / d) + 240) % 360;
+      }
+      return { h: Math.round(hDeg / 2) % 180, s: mx === 0 ? 0 : Math.round((d / mx) * 255), v: Math.round(mx * 255) };
+    }
+
+    function openCvHueToHex(hCv) {
+      const hDeg = ((Number(hCv) || 0) * 2) % 360;
+      const c = 0.9, x = c * (1 - Math.abs(((hDeg / 60) % 2) - 1)), m = 0.08;
+      let r1 = 0, g1 = 0, b1 = 0;
+      if (hDeg < 60) { r1 = c; g1 = x; }
+      else if (hDeg < 120) { r1 = x; g1 = c; }
+      else if (hDeg < 180) { g1 = c; b1 = x; }
+      else if (hDeg < 240) { g1 = x; b1 = c; }
+      else if (hDeg < 300) { r1 = x; b1 = c; }
+      else { r1 = c; b1 = x; }
+      const toHex = (n) => Math.min(255, Math.max(0, Math.round((n + m) * 255))).toString(16).padStart(2, "0");
+      return "#" + toHex(r1) + toHex(g1) + toHex(b1);
+    }
+
+    function refreshModalColorSummary() {
+      const h = parseInt(document.getElementById("colorInputHue")?.value || "166", 10);
+      const tol = parseInt(document.getElementById("colorInputTol")?.value || "10", 10);
+      const sat = parseInt(document.getElementById("colorInputSat")?.value || "105", 10);
+      const val = parseInt(document.getElementById("colorInputVal")?.value || "80", 10);
+      const picker = document.getElementById("targetColorPickerInput");
+      const dot = document.getElementById("modalColorPreviewDot");
+      const badge = document.getElementById("modalHsvSummaryBadge");
+      if (dot && picker) dot.style.backgroundColor = picker.value;
+      if (badge) badge.textContent = `H:${h} +-` + `${tol} / S>=${sat} / V>=${val}`;
+    }
+
+    function onColorPickerChanged(hexVal) {
+      const hsv = hexToOpenCvHsv(hexVal);
+      syncColorControl("Hue", hsv.h, false);
+      const dot = document.getElementById("modalColorPreviewDot");
+      if (dot) dot.style.backgroundColor = hexVal;
+      refreshModalColorSummary();
+    }
+
+    function syncColorControl(kind, rawVal, updateHexFromHue = true) {
+      let num = parseInt(rawVal, 10) || 0;
+      if (kind === "Hue") num = Math.max(0, Math.min(179, num));
+      else if (kind === "Tol") num = Math.max(3, Math.min(35, num));
+      else num = Math.max(30, Math.min(240, num));
+
+      const sEl = document.getElementById("colorSlider" + kind);
+      const iEl = document.getElementById("colorInput" + kind);
+      if (sEl) sEl.value = num;
+      if (iEl) iEl.value = num;
+      if (kind === "Hue" && updateHexFromHue) {
+        const picker = document.getElementById("targetColorPickerInput");
+        if (picker) picker.value = openCvHueToHex(num);
+      }
+      refreshModalColorSummary();
+    }
+
+    function selectTargetColorPreset(hexVal, h, tol, sat, val) {
+      const picker = document.getElementById("targetColorPickerInput");
+      if (picker) picker.value = hexVal;
+      syncColorControl("Hue", h, false);
+      syncColorControl("Tol", tol, false);
+      syncColorControl("Sat", sat, false);
+      syncColorControl("Val", val, false);
+      refreshModalColorSummary();
+      const fb = document.getElementById("pidApplyFeedback");
+      if (fb) fb.textContent = `COLOR SELECTED (${hexVal}) -> CLICK APPLY & SAVE`;
+    }
+
+    function openColorSetupModal() {
+      openPidModal();
+      switchConfigSectionTab("DRIVE_VISION");
+    }
+
+    function toggleEyedropperMode() {
+      eyedropperActive = !eyedropperActive;
+      document.getElementById("btnEyedropperPick")?.classList.toggle("active", eyedropperActive);
+      document.getElementById("camStageBox")?.classList.toggle("eyedropper-active", eyedropperActive);
+      if (eyedropperActive) addLog("VISION", "CLICK TARGET ON VIDEO TO LOCK COLOR", "auto");
+    }
+
+    function handleCameraStageClick(event) {
+      if (!eyedropperActive) return;
+      const stage = document.getElementById("camStageBox");
+      if (!stage) return;
+      const rect = stage.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return;
+
+      const imgEl = document.getElementById("globalCamLiveImg");
+      const iw = (imgEl && imgEl.naturalWidth) ? imgEl.naturalWidth : 640;
+      const ih = (imgEl && imgEl.naturalHeight) ? imgEl.naturalHeight : 360;
+
+      const scale = Math.min(rect.width / iw, rect.height / ih);
+      const rw = iw * scale, rh = ih * scale;
+      const offsetX = (rect.width - rw) / 2.0, offsetY = (rect.height - rh) / 2.0;
+
+      const clickX = event.clientX - rect.left, clickY = event.clientY - rect.top;
+      const u = (clickX - offsetX) / rw, v = (clickY - offsetY) / rh;
+      if (u < 0.0 || u > 1.0 || v < 0.0 || v > 1.0) return;
+
+      if (isLiveConnected) {
+        sendBoatCommand("pick_color_at", { u: Number(u.toFixed(4)), v: Number(v.toFixed(4)) });
+        setTimeout(pollBoatServer, 60);
+      } else {
+        const hudCanvas = document.getElementById("globalCamHudCanvas");
+        if (hudCanvas) {
+          const px = hudCanvas.getContext("2d").getImageData(Math.floor(clickX), Math.floor(clickY), 1, 1).data;
+          const hex = "#" + [px[0], px[1], px[2]].map((x) => x.toString(16).padStart(2, "0")).join("");
+          const hsv = hexToOpenCvHsv(hex);
+          state.targetColorHex = hex;
+          state.targetHue = hsv.h;
+          state.targetSatMin = Math.max(55, hsv.s - 45);
+          state.targetValMin = Math.max(45, hsv.v - 55);
+          addLog("VISION", `COLOR LOCKED (${hex}, H:${state.targetHue})`, "auto");
+        }
+      }
+
+      eyedropperActive = false;
+      document.getElementById("btnEyedropperPick")?.classList.remove("active");
+      stage.classList.remove("eyedropper-active");
+      updateUI();
+    }
+
+    function showFinishBanner(msg) {
+      const banner = document.getElementById("missionFinishBanner");
+      const txt = document.getElementById("missionFinishText");
+      if (txt && msg) txt.textContent = msg;
+      if (banner) banner.classList.remove("hidden");
+    }
+
+    function dismissFinishBanner() {
+      document.getElementById("missionFinishBanner")?.classList.add("hidden");
+    }
+
+    function switchConfigSectionTab(tabName) {
+      const isDrive = tabName === "DRIVE_VISION";
+      const isPid = tabName === "PID";
+      const isRemote = tabName === "REMOTE";
+      document.getElementById("cfgTabBtnDriveVision")?.classList.toggle("active", isDrive);
+      document.getElementById("cfgTabBtnPid")?.classList.toggle("active", isPid);
+      document.getElementById("cfgTabBtnRemote")?.classList.toggle("active", isRemote);
+      document.getElementById("cfgSectionDriveVision")?.classList.toggle("hidden", !isDrive);
+      document.getElementById("cfgSectionPid")?.classList.toggle("hidden", !isPid);
+      document.getElementById("cfgSectionRemote")?.classList.toggle("hidden", !isRemote);
+    }
+
+    function refreshRemoteModalUI() {
+      document.getElementById("tabStreamLte")?.classList.toggle("active-pid", Boolean(modalDraftCamLte));
+      document.getElementById("tabStreamHq")?.classList.toggle("active-p", !modalDraftCamLte);
+
+      const styleBtn = (id, active, caution = false) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        if (active) {
+          el.style.borderColor = caution ? "var(--sig-caution)" : "var(--text-primary)";
+          el.style.color = caution ? "var(--sig-caution)" : "var(--text-primary)";
+          el.style.backgroundColor = caution ? "#2b2111" : "#24272e";
+        } else {
+          el.style.borderColor = "";
+          el.style.color = "";
+          el.style.backgroundColor = "";
+        }
+      };
+      styleBtn("btnModalWatchdogOn", modalDraftWatchdog, false);
+      styleBtn("btnModalWatchdogOff", !modalDraftWatchdog, true);
+      styleBtn("btnModalRcShared", !modalDraftRcIgnore, false);
+      styleBtn("btnModalRcWebOnly", modalDraftRcIgnore, true);
+      styleBtn("btnModalFlip0", modalDraftCamFlip === 0, false);
+      styleBtn("btnModalFlip180", modalDraftCamFlip === 180, false);
+    }
+
+    function pushDraftRemoteConfigImmediate(noteText) {
+      state.camLteMode = modalDraftCamLte;
+      state.linkWatchdog = modalDraftWatchdog;
+      state.linkTimeoutSec = modalDraftLinkTimeout;
+      state.rcIgnore = modalDraftRcIgnore;
+      state.camFlip = modalDraftCamFlip;
+      if (window.location.protocol !== "file:") {
+        sendBoatCommand("set_remote_config", {
+          camLteMode: modalDraftCamLte,
+          linkWatchdog: modalDraftWatchdog,
+          linkTimeoutSec: modalDraftLinkTimeout,
+          rcIgnore: modalDraftRcIgnore,
+          camFlip: modalDraftCamFlip
+        });
+        setTimeout(pollBoatServer, 50);
+      }
+      const fb = document.getElementById("pidApplyFeedback");
+      if (fb && noteText) {
+        fb.style.color = "var(--sig-nominal)";
+        fb.textContent = noteText;
+      }
+      refreshRemoteModalUI();
+      updateUI();
+    }
+
+    function selectModalStreamMode(isLte) {
+      modalDraftCamLte = Boolean(isLte);
+      pushDraftRemoteConfigImmediate(modalDraftCamLte ? "LTE 12FPS APPLIED" : "HQ 25FPS APPLIED");
+    }
+
+    function selectModalWatchdog(isOn) {
+      modalDraftWatchdog = Boolean(isOn);
+      pushDraftRemoteConfigImmediate(modalDraftWatchdog ? "LINK AUTO-HOLD ON" : "LINK AUTO-HOLD OFF");
+    }
+
+    function syncRemoteTimeout(val, sendNow = false) {
+      const num = Math.max(2.0, Math.min(10.0, Math.round((parseFloat(val) || 3.5) * 2) / 2));
+      modalDraftLinkTimeout = num;
+      const sEl = document.getElementById("remoteSliderTimeout");
+      const iEl = document.getElementById("remoteInputTimeout");
+      if (sEl) sEl.value = num;
+      if (iEl) iEl.value = num;
+      if (sendNow) pushDraftRemoteConfigImmediate(`LINK WAIT ${num.toFixed(1)}s APPLIED`);
+    }
+
+    function selectModalRcIgnore(ignoreRc) {
+      modalDraftRcIgnore = Boolean(ignoreRc);
+      pushDraftRemoteConfigImmediate(modalDraftRcIgnore ? "WEB ONLY (RC LOCKED)" : "RC + WEB SHARED");
+    }
+
+    function selectModalCamFlip(deg) {
+      modalDraftCamFlip = deg === 180 ? 180 : 0;
+      pushDraftRemoteConfigImmediate(`CAM FLIP ${modalDraftCamFlip}° APPLIED`);
+    }
+
+    function refreshModalModeUI() {
+      const isPid = modalDraftMode === "PID";
+      document.getElementById("tabBtnModeP").className = isPid ? "pid-mode-tab" : "pid-mode-tab active-p";
+      document.getElementById("tabBtnModePID").className = isPid ? "pid-mode-tab active-pid" : "pid-mode-tab";
+      document.getElementById("pidCardKd")?.classList.toggle("disabled-card", !isPid);
+      document.getElementById("pidCardKi")?.classList.toggle("disabled-card", !isPid);
+      document.getElementById("pidCardIMax")?.classList.toggle("disabled-card", !isPid);
+    }
+
+    function refreshSpeedAndVisionModalUI() {
+      [4700, 4800, 5000, 5100, 5200].forEach((val) => {
+        document.getElementById("spdPreset" + val)?.classList.toggle("active", modalDraftMaxGo === val);
+      });
+      const isStop = modalDraftBalloonMode === "APPROACH_STOP";
+      document.getElementById("tabBalloonStop").className = isStop ? "pid-mode-tab active-pid" : "pid-mode-tab";
+      document.getElementById("tabBalloonPop").className = isStop ? "pid-mode-tab" : "pid-mode-tab active-p";
+      document.getElementById("visionCardStopDist")?.classList.toggle("disabled-card", !isStop);
+      const badge = document.getElementById("pidModalActiveBadge");
+      if (badge) {
+        badge.textContent = `MAX_GO: ${modalDraftMaxGo} | ${isStop ? "STOP" : "RAM"} | ${modalDraftMode}`;
+        badge.style.borderColor = modalDraftMaxGo >= 5200 ? "var(--sig-caution)" : "var(--line-strong)";
+        badge.style.color = modalDraftMaxGo >= 5200 ? "var(--sig-caution)" : "var(--text-secondary)";
+      }
+    }
+
+    let maxGoLockUntilMs = 0;
+
+    function applyMaxGoValueImmediate(val) {
+      modalDraftMaxGo = val;
+      state.maxGo = val;
+      maxGoLockUntilMs = Date.now() + 1800;
+      if (val < 5200) state.highPowerElapsedSec = 0.0;
+      if (window.location.protocol !== "file:") {
+        sendBoatCommand("set_max_go", val);
+        setTimeout(pollBoatServer, 60);
+      }
+      if (!isLiveConnected) {
+        addLog(
+          "DRIVE",
+          val >= 5200 ? `MAX_GO -> 5200 (고출력 모드: 10분 이상 연속 주행 금지)` : `MAX_GO -> ${val}`,
+          val >= 5200 ? "warn" : "auto"
+        );
+      }
+      refreshSpeedAndVisionModalUI();
+      const fb = document.getElementById("pidApplyFeedback");
+      if (fb) {
+        fb.style.color = val >= 5200 ? "var(--sig-caution)" : "var(--sig-nominal)";
+        fb.textContent = val >= 5200 ? "5200 OVERDRIVE ACTIVE (MAX 10 MIN)" : `MAX_GO ${val} APPLIED`;
+      }
+      updateUI();
+    }
+
+    function selectMaxGoPreset(val) {
+      if (val >= 5200 && state.maxGo < 5200) {
+        document.getElementById("maxGoWarnOverlay")?.classList.remove("hidden");
+        return;
+      }
+      applyMaxGoValueImmediate(val);
+    }
+
+    function confirmHighThrust5200() {
+      document.getElementById("maxGoWarnOverlay")?.classList.add("hidden");
+      applyMaxGoValueImmediate(5200);
+    }
+
+    function cancelHighThrust5200() {
+      document.getElementById("maxGoWarnOverlay")?.classList.add("hidden");
+      refreshSpeedAndVisionModalUI();
+    }
+
+    function selectBalloonActionMode(modeStr) {
+      modalDraftBalloonMode = modeStr === "RAM_POP" ? "RAM_POP" : "APPROACH_STOP";
+      refreshSpeedAndVisionModalUI();
+    }
+
+    function syncVisionInput(suffix, val) {
+      const iEl = document.getElementById("visionInput" + suffix);
+      if (iEl) iEl.value = val;
+    }
+
+    function syncVisionSlider(suffix, val, minV, maxV) {
+      let num = Math.max(minV, Math.min(maxV, parseFloat(val) || minV));
+      document.getElementById("visionInput" + suffix).value = num;
+      document.getElementById("visionSlider" + suffix).value = num;
+    }
+
+    function applyBalloonPreset(actionMode, diamM, stopDistM, stopAreaPct) {
+      modalDraftBalloonMode = actionMode;
+      syncVisionSlider("Diam", diamM, 0.2, 8.0);
+      syncVisionSlider("StopDist", stopDistM, 0.8, 15.0);
+      syncVisionSlider("StopArea", stopAreaPct, 5.0, 80.0);
+      refreshSpeedAndVisionModalUI();
+    }
+
+    function openPidModal() {
+      modalDraftMode = state.steerCtrlMode || "P";
+      modalDraftMaxGo = state.maxGo || 4800;
+      modalDraftBalloonMode = state.balloonActionMode || "APPROACH_STOP";
+      modalDraftCamLte = state.camLteMode !== false;
+      modalDraftWatchdog = state.linkWatchdog !== false;
+      modalDraftLinkTimeout = state.linkTimeoutSec || 3.5;
+      modalDraftRcIgnore = Boolean(state.rcIgnore);
+      modalDraftCamFlip = state.camFlip === 180 ? 180 : 0;
+      const setPair = (prefix, suffix, val) => {
+        document.getElementById(prefix + "Slider" + suffix).value = val;
+        document.getElementById(prefix + "Input" + suffix).value = val;
+      };
+      setPair("pid", "Kp", state.pidKp);
+      setPair("pid", "Ki", state.pidKi);
+      setPair("pid", "Kd", state.pidKd);
+      setPair("pid", "IMax", state.pidIMax);
+      setPair("vision", "Diam", state.balloonRealDiamM || 3.5);
+      setPair("vision", "StopDist", state.balloonStopDistM || 3.5);
+      setPair("vision", "StopArea", state.balloonStopAreaPct || 30.0);
+      document.getElementById("targetColorPickerInput").value = state.targetColorHex || "#ff2a85";
+      syncColorControl("Hue", state.targetHue ?? 166, false);
+      syncColorControl("Tol", state.targetHueTol ?? 10, false);
+      syncColorControl("Sat", state.targetSatMin ?? 105, false);
+      syncColorControl("Val", state.targetValMin ?? 80, false);
+      document.getElementById("pidApplyFeedback").textContent = "";
+      syncRemoteTimeout(modalDraftLinkTimeout);
+      refreshModalModeUI();
+      refreshSpeedAndVisionModalUI();
+      refreshRemoteModalUI();
+      document.getElementById("pidConfigOverlay").classList.remove("hidden");
+    }
+
+    function closePidModal() {
+      document.getElementById("pidConfigOverlay").classList.add("hidden");
+    }
+
+    function handlePidOverlayBackdrop(e) {
+      if (e.target && e.target.id === "pidConfigOverlay") closePidModal();
+    }
+
+    function selectModalCtrlMode(modeStr) {
+      modalDraftMode = modeStr === "PID" ? "PID" : "P";
+      refreshModalModeUI();
+      refreshSpeedAndVisionModalUI();
+    }
+
+    function syncPidInputFromSlider(suffix, val) {
+      document.getElementById("pidInput" + suffix).value = val;
+    }
+
+    function syncPidSliderFromInput(suffix, val, minV, maxV) {
+      let num = Math.max(minV, Math.min(maxV, parseFloat(val) || minV));
+      document.getElementById("pidInput" + suffix).value = num;
+      document.getElementById("pidSlider" + suffix).value = num;
+    }
+
+    function stepPidInput(inputId, delta, minV, maxV) {
+      const iEl = document.getElementById(inputId);
+      if (!iEl) return;
+      if (inputId === "remoteInputTimeout") {
+        const cur = parseFloat(iEl.value) || 3.5;
+        syncRemoteTimeout(Math.max(minV, Math.min(maxV, cur + delta)), true);
+        return;
+      }
+      const prefix = inputId.startsWith("visionInput") ? "vision" : "pid";
+      const suffix = inputId.replace(prefix + "Input", "");
+      let next = Math.round(((parseFloat(iEl.value) || 0) + delta) * 100) / 100;
+      next = Math.max(minV, Math.min(maxV, next));
+      iEl.value = next;
+      document.getElementById(prefix + "Slider" + suffix).value = next;
+    }
+
+    function applyPidPreset(modeStr, kp, ki, kd, imax) {
+      modalDraftMode = modeStr;
+      syncPidSliderFromInput("Kp", kp, 1.0, 45.0);
+      syncPidSliderFromInput("Ki", ki, 0.0, 5.0);
+      syncPidSliderFromInput("Kd", kd, 0.0, 25.0);
+      syncPidSliderFromInput("IMax", imax, 2.0, 40.0);
+      refreshModalModeUI();
+      refreshSpeedAndVisionModalUI();
+    }
+
+    function resetPidIntegralNow() {
+      state.simIntegral = 0.0;
+      state.pidITerm = 0.0;
+      if (isLiveConnected) {
+        sendBoatCommand("reset_pid_i");
+        setTimeout(pollBoatServer, 40);
+      }
+      document.getElementById("pidApplyFeedback").textContent = "INTEGRAL RESET";
+      updateUI();
+    }
+
+    function applyPidSettingsToBoat() {
+      const kp = Math.max(1.0, Math.min(45.0, parseFloat(document.getElementById("pidInputKp").value) || 15.0));
+      const ki = Math.max(0.0, Math.min(5.0, parseFloat(document.getElementById("pidInputKi").value) || 0.0));
+      const kd = Math.max(0.0, Math.min(25.0, parseFloat(document.getElementById("pidInputKd").value) || 0.0));
+      const imax = Math.max(2.0, Math.min(40.0, parseFloat(document.getElementById("pidInputIMax").value) || 15.0));
+      const realDiamM = Math.max(0.2, Math.min(8.0, parseFloat(document.getElementById("visionInputDiam").value) || 3.5));
+      const stopDistM = Math.max(0.8, Math.min(15.0, parseFloat(document.getElementById("visionInputStopDist").value) || 3.5));
+      const stopAreaPct = Math.max(5.0, Math.min(80.0, parseFloat(document.getElementById("visionInputStopArea").value) || 30.0));
+      const tHue = Math.max(0, Math.min(179, parseInt(document.getElementById("colorInputHue").value || "166", 10)));
+      const tTol = Math.max(3, Math.min(35, parseInt(document.getElementById("colorInputTol").value || "10", 10)));
+      const tSat = Math.max(30, Math.min(240, parseInt(document.getElementById("colorInputSat").value || "105", 10)));
+      const tVal = Math.max(30, Math.min(240, parseInt(document.getElementById("colorInputVal").value || "80", 10)));
+      const tHex = document.getElementById("targetColorPickerInput").value || "#ff2a85";
+
+      state.steerCtrlMode = modalDraftMode;
+      state.pidKp = kp; state.pidKi = ki; state.pidKd = kd; state.pidIMax = imax;
+      state.maxGo = modalDraftMaxGo;
+      maxGoLockUntilMs = Date.now() + 1800;
+      state.balloonActionMode = modalDraftBalloonMode;
+      state.balloonRealDiamM = realDiamM;
+      state.balloonStopDistM = stopDistM;
+      state.balloonStopAreaPct = stopAreaPct;
+      const linkTimeoutSec = Math.max(2.0, Math.min(10.0, parseFloat(document.getElementById("remoteInputTimeout")?.value) || 3.5));
+      state.customColorEnable = true;
+      state.targetHue = tHue; state.targetHueTol = tTol; state.targetSatMin = tSat; state.targetValMin = tVal;
+      state.targetColorHex = tHex;
+      state.camLteMode = modalDraftCamLte;
+      state.linkWatchdog = modalDraftWatchdog;
+      state.linkTimeoutSec = linkTimeoutSec;
+      state.rcIgnore = modalDraftRcIgnore;
+      state.camFlip = modalDraftCamFlip;
+
+      if (modalDraftMode === "P" || ki <= 0.0) state.simIntegral = 0.0;
+
+      if (window.location.protocol !== "file:") {
+        sendBoatCommand("set_max_go", modalDraftMaxGo);
+        sendBoatCommand("set_pid_gains", { mode: modalDraftMode, kp, ki, kd, imax });
+        sendBoatCommand("set_balloon_config", { actionMode: modalDraftBalloonMode, realDiamM, stopDistM, stopAreaPct, maxGo: modalDraftMaxGo });
+        sendBoatCommand("set_target_color", { customEnable: true, hue: tHue, hueTol: tTol, satMin: tSat, valMin: tVal, hex: tHex });
+        sendBoatCommand("set_remote_config", {
+          camLteMode: modalDraftCamLte,
+          linkWatchdog: modalDraftWatchdog,
+          linkTimeoutSec,
+          rcIgnore: modalDraftRcIgnore,
+          camFlip: modalDraftCamFlip
+        });
+        setTimeout(pollBoatServer, 60);
+      }
+      if (!isLiveConnected) {
+        addLog("CTRL", `SAVED [${modalDraftMode}] MAX_GO=${modalDraftMaxGo} H=${tHue}`, "auto");
+      }
+
+      savePidToLocalStorage();
+      refreshSpeedAndVisionModalUI();
+      document.getElementById("pidApplyFeedback").textContent = "SAVED";
+      updateUI();
+    }
+
+    let pathLockUntilMs = 0;
+
+    function setDemoPath(val) {
+      pathLockUntilMs = Date.now() + 1800;
+      if (val === "AUTO") {
+        state.pathAutoSwitch = true;
+        if (window.location.protocol !== "file:") {
+          sendBoatCommand("set_path", "AUTO");
+          setTimeout(pollBoatServer, 50);
+        }
+        addLog("PATH", `외란 자동 경로 전환(AUTO) 활성화 -> 현재 ${state.targetPath}`, "auto");
+      } else if (val === "Left" || val === "Center" || val === "Right") {
+        state.targetPath = val;
+        state.pathAutoSwitch = false;
+        if (window.location.protocol !== "file:") {
+          sendBoatCommand("set_path", { path: val, auto: false });
+          setTimeout(pollBoatServer, 50);
+        }
+        addLog("PATH", `추종 경로 '${val}' 수동 고정 (외란 자동전환 해제)`, "warn");
+      }
+      updateUI();
+    }
+
+    function togglePathAutoMode() {
+      if (state.pathAutoSwitch !== false) {
+        setDemoPath(state.targetPath || "Center");
+      } else {
+        setDemoPath("AUTO");
+      }
+    }
+
+    let tickCount = 0;
+    setInterval(() => {
+      document.getElementById("clockText").textContent = new Date().toTimeString().split(" ")[0];
+      if (!state.simRunning || state.estop) return;
+      tickCount += 1;
+
+      const activeArr = state.targetPath === "Left" ? leftCoords : state.targetPath === "Right" ? rightCoords : centerCoords;
+      const prevWp = state.wpIndex;
+
+      state.simProgress += state.mode === "AUTO" ? 0.22 : 0.08;
+      if (state.simProgress >= totalWaypoints - 1) {
+        if (state.mode === "AUTO") {
+          state.mode = "MANUAL";
+          state.speed = 0.0;
+          state.drivePwm = 4443;
+          addLog("FINISH", "COURSE COMPLETE -> MANUAL", "auto");
+        }
+        state.simProgress = 0;
+        state.movedDist = 0;
+        trailCoords.length = 0;
+      }
+
+      const idx = Math.floor(state.simProgress);
+      const nextIdx = Math.min(idx + 1, totalWaypoints - 1);
+      const frac = state.simProgress - idx;
+
+      state.lat = activeArr[idx][0] + (activeArr[nextIdx][0] - activeArr[idx][0]) * frac;
+      state.lon = activeArr[idx][1] + (activeArr[nextIdx][1] - activeArr[idx][1]) * frac;
+      state.targetAngle = calcBearing(state.lat, state.lon, activeArr[nextIdx][0], activeArr[nextIdx][1]);
+      state.angleErr = Math.sin(state.simProgress * 0.9) * 3.2;
+      state.heading = (state.targetAngle - state.angleErr + 360.0) % 360.0;
+
+      state.wpIndex = nextIdx + 1;
+      state.wpDist = calcDistanceM(state.lat, state.lon, activeArr[nextIdx][0], activeArr[nextIdx][1]);
+      state.movedDist = Math.min(totalCourseLengthM, state.simProgress * 1.442);
+      state.distCenter = calcDistanceM(state.lat, state.lon, centerCoords[nextIdx][0], centerCoords[nextIdx][1]);
+      state.distLeft = calcDistanceM(state.lat, state.lon, leftCoords[nextIdx][0], leftCoords[nextIdx][1]);
+      state.distRight = calcDistanceM(state.lat, state.lon, rightCoords[nextIdx][0], rightCoords[nextIdx][1]);
+
+      if (state.mode === "AUTO") {
+        state.speed = 1.45 + Math.sin(state.simProgress * 0.5) * 0.18;
+        if (state.speed > state.maxSpeed) state.maxSpeed = state.speed;
+        state.pidPTerm = state.angleErr * state.pidKp;
+        if (state.steerCtrlMode === "PID") {
+          state.simIntegral = Math.max(-state.pidIMax, Math.min(state.pidIMax, state.simIntegral + state.angleErr * 0.25));
+          state.pidITerm = state.simIntegral * state.pidKi;
+          state.pidDTerm = Math.max(-45, Math.min(45, (state.angleErr - state.simPrevErr) / 0.25)) * state.pidKd;
+        } else {
+          state.simIntegral = 0.0; state.pidITerm = 0.0; state.pidDTerm = 0.0;
+        }
+        state.simPrevErr = state.angleErr;
+        state.steerPwm = Math.max(3000, Math.min(5500, Math.round(4500 - (state.pidPTerm + state.pidITerm + state.pidDTerm))));
+        state.drivePwm = Math.round(4443 + ((state.maxGo || 4800) - 4443) * 0.92);
+      }
+
+      if (state.mode === "BALLOON") {
+        state.balloonDetected = true;
+        const refD = Math.max(4.0, (state.balloonStopDistM || 3.5) + 6.0);
+        state.balloonX = Math.sin(tickCount * 0.25) * 0.28 * Math.max(0.12, state.balloonDistM / refD);
+        state.balloonY = 0.03 + (1.0 - Math.min(1.0, state.balloonDistM / refD)) * 0.22;
+        state.balloonAngleErr = state.balloonX * 31.1;
+        state.angleErr = state.balloonAngleErr;
+        state.balloonDistM = Math.max(0.2, state.balloonDistM - 0.45);
+        const pxRad = ((state.balloonRealDiamM || 3.5) * 520.0) / (2.0 * Math.max(0.5, state.balloonDistM));
+        state.balloonRadius = Math.min(140, Math.max(12, pxRad * 0.35));
+        state.balloonAreaPct = Math.min(65.0, (Math.PI * state.balloonRadius * state.balloonRadius) / (640.0 * 360.0) * 100.0 * 2.8);
+        state.steerPwm = Math.max(3000, Math.min(5500, Math.round(4500 - state.balloonAngleErr * 18.0)));
+
+        if (state.balloonActionMode === "APPROACH_STOP" && (state.balloonDistM <= state.balloonStopDistM || state.balloonAreaPct >= state.balloonStopAreaPct)) {
+          state.mode = "MANUAL";
+          state.balloonState = "FINISH";
+          state.speed = 0.0;
+          state.steerPwm = 4500;
+          state.drivePwm = 4443;
+          const msg = `TARGET REACHED (${state.balloonDistM.toFixed(2)}m) -> SWITCHED TO MANUAL`;
+          showFinishBanner(msg);
+          addLog("FINISH", msg, "auto");
+        } else {
+          state.speed = state.balloonDistM < state.balloonStopDistM + 3.0 ? 0.95 : 1.65;
+          state.drivePwm = state.maxGo || 4800;
+          state.balloonState = Math.abs(state.balloonAngleErr) <= 18.0 ? "CHARGE" : "TRACKING";
+        }
+      }
+
+      if (state.wpIndex !== prevWp && state.wpIndex % 5 === 0) {
+        addLog("NAV", `WP ${prevWp} -> WP ${state.wpIndex}`, "auto");
+      }
+
+      speedHistory.push(state.speed);
+      if (speedHistory.length > 40) speedHistory.shift();
+      errHistory.push(state.angleErr);
+      if (errHistory.length > 40) errHistory.shift();
+
+      trailCoords.push([state.lat, state.lon]);
+      if (trailCoords.length > 65) trailCoords.shift();
+      if (trailLine) trailLine.setLatLngs(trailCoords);
+
+      updateUI();
+    }, 250);
+
+    window.onLeafletLoaded = function() { if (!map && typeof L !== "undefined") initMap(); };
+
+    function loadSavedPidFromLocalStorage() {
+      state.maxGo = 4800;
+      try {
+        const raw = localStorage.getItem("usv_pid_config_v1");
+        if (!raw) return;
+        const cfg = JSON.parse(raw);
+        if (cfg.mode === "P" || cfg.mode === "PID") state.steerCtrlMode = cfg.mode;
+        if (typeof cfg.kp === "number") state.pidKp = cfg.kp;
+        if (typeof cfg.ki === "number") state.pidKi = cfg.ki;
+        if (typeof cfg.kd === "number") state.pidKd = cfg.kd;
+        if (typeof cfg.imax === "number") state.pidIMax = cfg.imax;
+        if (cfg.balloonActionMode) state.balloonActionMode = cfg.balloonActionMode;
+        if (typeof cfg.balloonRealDiamM === "number") state.balloonRealDiamM = cfg.balloonRealDiamM;
+        if (typeof cfg.balloonStopDistM === "number") state.balloonStopDistM = cfg.balloonStopDistM;
+        if (typeof cfg.balloonStopAreaPct === "number") state.balloonStopAreaPct = cfg.balloonStopAreaPct;
+        if (typeof cfg.targetHue === "number") state.targetHue = cfg.targetHue;
+        if (typeof cfg.targetHueTol === "number") state.targetHueTol = cfg.targetHueTol;
+        if (typeof cfg.targetSatMin === "number") state.targetSatMin = cfg.targetSatMin;
+        if (typeof cfg.targetValMin === "number") state.targetValMin = cfg.targetValMin;
+        if (typeof cfg.targetColorHex === "string") state.targetColorHex = cfg.targetColorHex;
+      } catch (e) {}
+    }
+
+    function savePidToLocalStorage() {
+      try {
+        localStorage.setItem("usv_pid_config_v1", JSON.stringify({
+          mode: state.steerCtrlMode,
+          kp: state.pidKp, ki: state.pidKi, kd: state.pidKd, imax: state.pidIMax,
+          balloonActionMode: state.balloonActionMode,
+          balloonRealDiamM: state.balloonRealDiamM,
+          balloonStopDistM: state.balloonStopDistM,
+          balloonStopAreaPct: state.balloonStopAreaPct,
+          targetHue: state.targetHue, targetHueTol: state.targetHueTol,
+          targetSatMin: state.targetSatMin, targetValMin: state.targetValMin,
+          targetColorHex: state.targetColorHex
+        }));
+      } catch (e) {}
+    }
+
+    window.addEventListener("DOMContentLoaded", () => {
+      loadSavedPidFromLocalStorage();
+      initMap();
+      addLog("INIT", "65 WPs COURSE LOADED", "auto");
+      addLog("SAFE", "50Hz CONTROL READY", "auto");
+      updateUI();
+    });
+
+    window.addEventListener("resize", () => {
+      drawTelemetryChart();
+      if (map) map.invalidateSize();
+    });
+
+    let isLiveConnected = false;
+    let pollInFlight = false;
+    let pollFailStreak = 0;
+    const seenServerLogKeys = new Set();
+
+    async function sendBoatCommand(cmdName, cmdValue = null, attempt = 0) {
+      if (window.location.protocol === "file:") return false;
+      const ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
+      const tid = ctrl ? setTimeout(() => ctrl.abort(), 1800) : null;
+      try {
+        const res = await fetch("/api/cmd", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ cmd: cmdName, value: cmdValue }),
+          cache: "no-store",
+          signal: ctrl ? ctrl.signal : undefined
+        });
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        return true;
+      } catch (e) {
+        if (attempt < 1) {
+          await new Promise((r) => setTimeout(r, 120));
+          return sendBoatCommand(cmdName, cmdValue, attempt + 1);
+        }
+        return false;
+      } finally {
+        if (tid) clearTimeout(tid);
+      }
+    }
+
+    async function pollBoatServer() {
+      if (window.location.protocol === "file:" || pollInFlight) return;
+      pollInFlight = true;
+      const ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
+      const tid = ctrl ? setTimeout(() => ctrl.abort(), 2200) : null;
+      const pollT0 = performance.now();
+      try {
+        const res = await fetch("/api/state?hb=1", {
+          cache: "no-store",
+          signal: ctrl ? ctrl.signal : undefined
+        });
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        const data = await res.json();
+        state.linkRttMs = Math.max(1, Math.round(performance.now() - pollT0));
+        const rttEl = document.getElementById("telLinkRtt");
+        if (rttEl) {
+          rttEl.textContent = `${state.linkRttMs} ms`;
+          rttEl.style.color = state.linkRttMs > 350 ? "var(--sig-caution)" : "";
+        }
+        if (pollFailStreak >= 3) {
+          const btn = document.getElementById("simToggleBtn");
+          if (btn) {
+            btn.textContent = "LIVE CONNECTED";
+            btn.style.color = "#10b981";
+            btn.style.borderColor = "#10b981";
+          }
+        }
+        pollFailStreak = 0;
+
+        if (!isLiveConnected) {
+          isLiveConnected = true;
+          state.simRunning = false;
+          trailCoords.length = 0;
+          const btn = document.getElementById("simToggleBtn");
+          if (btn) {
+            btn.textContent = "LIVE CONNECTED";
+            btn.style.color = "#10b981";
+            btn.style.borderColor = "#10b981";
+          }
+          addLog("LIVE", "CONNECTED TO JETSON SERVER", "auto");
+          fetch("/api/paths", { cache: "no-store" })
+            .then((r) => (r.ok ? r.json() : null))
+            .then((paths) => {
+              if (!paths) return;
+              if (Array.isArray(paths.Center) && paths.Center.length) {
+                centerCoords.splice(0, centerCoords.length, ...paths.Center);
+                if (polyCenter) polyCenter.setLatLngs(centerCoords);
+              }
+              if (Array.isArray(paths.Left) && paths.Left.length) {
+                leftCoords.splice(0, leftCoords.length, ...paths.Left);
+                if (polyLeft) polyLeft.setLatLngs(leftCoords);
+              }
+              if (Array.isArray(paths.Right) && paths.Right.length) {
+                rightCoords.splice(0, rightCoords.length, ...paths.Right);
+                if (polyRight) polyRight.setLatLngs(rightCoords);
+              }
+              if (!map) drawOfflineFallbackMap();
+            })
+            .catch(() => {});
+        }
+
+        Object.assign(state, {
+          mode: data.mode,
+          estop: data.estop,
+          speed: data.speed,
+          maxSpeed: data.maxSpeed,
+          movedDist: data.movedDist,
+          stPulse: data.stPulse,
+          thPulse: data.thPulse,
+          steerPwm: data.steerPwm,
+          drivePwm: data.drivePwm,
+          wpIndex: data.wpIndex,
+          wpTotal: data.wpTotal,
+          wpDist: data.wpDist,
+          distLeft: data.distLeft,
+          distCenter: data.distCenter,
+          distRight: data.distRight,
+          fixStatus: data.fixStatus,
+          satellites: data.satellites,
+          hdop: data.hdop,
+          ntripKb: data.ntripKb,
+          heading: data.heading,
+          targetAngle: data.targetAngle,
+          angleErr: data.angleErr
+        });
+        if (Date.now() >= pathLockUntilMs) {
+          if (data.targetPath) state.targetPath = data.targetPath;
+          if (typeof data.pathAutoSwitch === "boolean") state.pathAutoSwitch = data.pathAutoSwitch;
+        }
+        if (data.lat && data.lon) { state.lat = data.lat; state.lon = data.lon; }
+
+        document.getElementById("telLoopHz").textContent = `${data.loopHz.toFixed(1)} Hz`;
+        document.getElementById("telRcHz").textContent = `${data.rcHz.toFixed(0)} Hz`;
+        document.getElementById("telJetson").textContent = `CPU ${data.jetsonLoad.toFixed(0)}% | ${data.jetsonCpuTemp.toFixed(1)}°C`;
+
+        const setLamp = (id, status) => {
+          const el = document.getElementById(id);
+          if (el) el.className = status === "ok" ? "fs-lamp" : status === "warn" ? "fs-lamp warn" : "fs-lamp err";
+        };
+        setLamp("lampRc", data.lampRc);
+        setLamp("lampGps", data.lampGps);
+        setLamp("lampGlitch", data.lampGlitch);
+        setLamp("lampStall", data.lampStall);
+        setLamp("lampSerial", data.lampSerial);
+        setLamp("lampCsv", data.lampCsv);
+        if (data.lampCam) setLamp("lampCam", data.lampCam);
+        if (data.lampLink) setLamp("lampLink", state.linkWatchdog ? data.lampLink : "warn");
+        const lampLinkTxt = document.getElementById("lampLinkText");
+        if (lampLinkTxt) lampLinkTxt.textContent = state.linkWatchdog ? "LINK" : "LINK OFF";
+
+        if (typeof data.cameraOk === "boolean") state.cameraOk = data.cameraOk;
+        if (typeof data.balloonDetected === "boolean") state.balloonDetected = data.balloonDetected;
+        if (data.balloonState) state.balloonState = data.balloonState;
+        if (typeof data.balloonX === "number") state.balloonX = data.balloonX;
+        if (typeof data.balloonY === "number") state.balloonY = data.balloonY;
+        if (typeof data.balloonRadius === "number") state.balloonRadius = data.balloonRadius;
+        if (typeof data.balloonAreaPct === "number") state.balloonAreaPct = data.balloonAreaPct;
+        if (typeof data.balloonDistM === "number") state.balloonDistM = data.balloonDistM;
+        if (typeof data.balloonAngleErr === "number") state.balloonAngleErr = data.balloonAngleErr;
+        if (typeof data.balloonFps === "number") state.balloonFps = data.balloonFps;
+        if (data.steerCtrlMode) state.steerCtrlMode = data.steerCtrlMode;
+        if (typeof data.pidKp === "number") state.pidKp = data.pidKp;
+        if (typeof data.pidKi === "number") state.pidKi = data.pidKi;
+        if (typeof data.pidKd === "number") state.pidKd = data.pidKd;
+        if (typeof data.pidIMax === "number") state.pidIMax = data.pidIMax;
+        if (typeof data.pidPTerm === "number") state.pidPTerm = data.pidPTerm;
+        if (typeof data.pidITerm === "number") state.pidITerm = data.pidITerm;
+        if (typeof data.pidDTerm === "number") state.pidDTerm = data.pidDTerm;
+        if (typeof data.maxGo === "number" && (Date.now() >= maxGoLockUntilMs || data.maxGo === state.maxGo)) state.maxGo = data.maxGo;
+        if (typeof data.lapElapsedSec === "number") state.lapElapsedSec = data.lapElapsedSec;
+        if (typeof data.highPowerElapsedSec === "number") state.highPowerElapsedSec = data.highPowerElapsedSec;
+        if (data.balloonActionMode) state.balloonActionMode = data.balloonActionMode;
+        if (typeof data.balloonRealDiamM === "number") state.balloonRealDiamM = data.balloonRealDiamM;
+        if (typeof data.balloonStopDistM === "number") state.balloonStopDistM = data.balloonStopDistM;
+        if (typeof data.balloonStopAreaPct === "number") state.balloonStopAreaPct = data.balloonStopAreaPct;
+        if (typeof data.customColorEnable === "boolean") state.customColorEnable = data.customColorEnable;
+        if (typeof data.targetHue === "number") state.targetHue = data.targetHue;
+        if (typeof data.targetHueTol === "number") state.targetHueTol = data.targetHueTol;
+        if (typeof data.targetSatMin === "number") state.targetSatMin = data.targetSatMin;
+        if (typeof data.targetValMin === "number") state.targetValMin = data.targetValMin;
+        if (typeof data.targetColorHex === "string") state.targetColorHex = data.targetColorHex;
+        if (typeof data.rcIgnore === "boolean") state.rcIgnore = data.rcIgnore;
+        if (typeof data.linkWatchdog === "boolean") state.linkWatchdog = data.linkWatchdog;
+        if (typeof data.linkTimeoutSec === "number") state.linkTimeoutSec = data.linkTimeoutSec;
+        if (typeof data.linkPaused === "boolean") state.linkPaused = data.linkPaused;
+        if (typeof data.camLteMode === "boolean") state.camLteMode = data.camLteMode;
+        if (typeof data.camFlip === "number") state.camFlip = data.camFlip;
+
+        if (typeof data.balloonFinishSeq === "number" && data.balloonFinishSeq > lastShownFinishSeq) {
+          lastShownFinishSeq = data.balloonFinishSeq;
+          showFinishBanner(data.balloonFinishMsg || "TARGET REACHED -> MANUAL");
+        }
+
+        const imgEl = document.getElementById("globalCamLiveImg");
+        if (imgEl) {
+          const camVisible = (state.mode === "BALLOON") || state.camPrimaryInNav || !state.camPipHidden;
+          const wantCamStream = state.cameraOk && camVisible;
+          if (wantCamStream) {
+            const nowMs = Date.now();
+            const lastTry = parseInt(imgEl.dataset.lastTry || "0", 10);
+            if (imgEl.classList.contains("hidden") && (nowMs - lastTry > 2000)) {
+              imgEl.dataset.lastTry = String(nowMs);
+              imgEl.src = "/api/camera_stream?t=" + nowMs;
+              imgEl.classList.remove("hidden");
+              imgEl.onerror = () => { imgEl.classList.add("hidden"); };
+            }
+          } else if (!imgEl.classList.contains("hidden")) {
+            imgEl.classList.add("hidden");
+            imgEl.removeAttribute("src");
+          }
+        }
+
+        if (Array.isArray(data.logs)) {
+          data.logs.forEach((item) => {
+            const key = `${item.time}_${item.tag}_${item.msg}`;
+            if (!seenServerLogKeys.has(key)) {
+              seenServerLogKeys.add(key);
+              if (seenServerLogKeys.size > 200) seenServerLogKeys.delete(seenServerLogKeys.values().next().value);
+              addLog(item.tag, item.msg, item.level || "auto");
+            }
+          });
+        }
+
+        speedHistory.push(state.speed);
+        if (speedHistory.length > 40) speedHistory.shift();
+        errHistory.push(state.angleErr);
+        if (errHistory.length > 40) errHistory.shift();
+        trailCoords.push([state.lat, state.lon]);
+        if (trailCoords.length > 65) trailCoords.shift();
+        if (trailLine) trailLine.setLatLngs(trailCoords);
+
+        updateUI();
+      } catch (err) {
+        pollFailStreak += 1;
+        if (pollFailStreak >= 3) {
+          if (manualHoldActive) {
+            heldManualKeys.clear();
+            activePointerDir = null;
+            stopWebManualHold(false);
+          }
+          const rttEl = document.getElementById("telLinkRtt");
+          if (rttEl) { rttEl.textContent = "LOST"; rttEl.style.color = "var(--sig-critical)"; }
+          const lampL = document.getElementById("lampLink");
+          if (lampL) lampL.className = "fs-lamp err";
+        }
+        if (isLiveConnected && pollFailStreak >= 4) {
+          isLiveConnected = false;
+          state.linkPaused = true;
+          const btn = document.getElementById("simToggleBtn");
+          if (btn) { btn.textContent = "LINK LOST · HOLD STOP"; btn.style.color = "#ef4444"; btn.style.borderColor = "#ef4444"; }
+          updateUI();
+        }
+      } finally {
+        if (tid) clearTimeout(tid);
+        pollInFlight = false;
+      }
+    }
+
+    setInterval(pollBoatServer, 250);
+  </script>
+</body>
+</html>

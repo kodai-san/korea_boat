@@ -16,11 +16,11 @@ main controller for multipath navigation (Left/Center/Right).
    - If cross-track error (CTE) and directional drift persist, move to an adjacent path with the disturbance.
    - If pushed toward the outer wall on the left/right path, block path changes and strengthen recovery steering.
    - AUTO strategy comes from calibration.json: constant cruise or adaptive full throttle.
-   - After crossing the finish line at the final waypoint (#65), or entering its radius, stop in neutral and return to MANUAL.
+   - Stop in neutral and return to MANUAL at the finish, optionally continuing a configured distance beyond it.
 4. National Geographic Information Institute (NGII) RTK corrections (NTRIP):
    a built-in background client sends $GNGGA sentences and injects RTCM3 corrections.
 5. ArbaLabs Spresense USB output: a separate worker sends the latest GPS sample
-   every 5 seconds at 115200 8N1. See SPRESENSE_USB.md for device selection.
+   every 5 seconds at 921600 8N1. See SPRESENSE_USB.md for device selection.
 
 [Session diagnostics]
 - logs/multipath_log_<session>.csv: telemetry plus GPS validity/age, NTRIP connection
@@ -97,6 +97,7 @@ NAV_PARAMS = {
     "boundary_lookahead_m": 2.4,      # Shorter recovery lookahead when pushed toward a wall on an outer path (m)
     "wp_reach_radius_m": 1.8,         # Waypoint arrival radius (m)
     "finish_radius_m": 1.8,           # Arrival radius at the final waypoint (#65) (m)
+    "finish_margin_m": 0.0,           # Continue this far beyond the finish; positive values require crossing the extended line (m)
 
     # Disturbance detection and path change thresholds (based on 1.50 m lane spacing)
     "shift_cte_m": 0.70,              # Detect a potential disturbance at 0.70 m or more to either side of the path
@@ -918,6 +919,33 @@ def load_waypoints_csv(filepath):
     return pts
 
 
+def validate_finish_margin(value):
+    """Require an explicit finite, nonnegative distance in meters."""
+    try:
+        finite = math.isfinite(value)
+    except (TypeError, OverflowError):
+        finite = False
+    if (isinstance(value, bool) or not isinstance(value, (int, float))
+            or not finite or value < 0):
+        raise ValueError("navigation.finish_margin_m must be a finite number >= 0")
+    return float(value)
+
+
+def resolve_navigation_params(navigation_config, finish_margin_override=None):
+    """Apply persisted navigation settings and an optional one-run override."""
+    if not isinstance(navigation_config, dict):
+        raise ValueError("navigation must be a JSON object")
+    unknown = navigation_config.keys() - {"finish_margin_m"}
+    if unknown:
+        raise ValueError(f"Unknown navigation option(s): {', '.join(sorted(unknown))}")
+    params = dict(NAV_PARAMS)
+    params["finish_margin_m"] = validate_finish_margin(
+        navigation_config.get("finish_margin_m", params["finish_margin_m"]))
+    if finish_margin_override is not None:
+        params["finish_margin_m"] = validate_finish_margin(finish_margin_override)
+    return params
+
+
 class MultipathNavigator:
     """
     Three-lane (left / center / right) multipath navigation engine for Haesucheon.
@@ -930,15 +958,34 @@ class MultipathNavigator:
 
     def __init__(self, paths_dict, params, strategy=None):
         self.paths = paths_dict
-        self.params = params
+        self.params = dict(params)
+        self.finish_margin_m = validate_finish_margin(params.get("finish_margin_m", 0.0))
+        self.params["finish_margin_m"] = self.finish_margin_m
         self.strategy = strategy if strategy is not None else create_auto_strategy({}, params)
         self.ref_lat = paths_dict["center"][0][1]
         self.ref_lon = paths_dict["center"][0][2]
 
         # Precompute ENU coordinates for fast vector calculations.
         self.enu_paths = {}
+        self.finish_directions = {}
         for name, wps in self.paths.items():
-            self.enu_paths[name] = [latlon_to_enu(lat, lon, self.ref_lat, self.ref_lon) for (_, lat, lon) in wps]
+            pts = [latlon_to_enu(lat, lon, self.ref_lat, self.ref_lon) for (_, lat, lon) in wps]
+            if self.finish_margin_m > 0:
+                # Extend the final straight segment for guidance and finish detection.
+                # Keep the CSV coordinates and waypoint numbers unchanged.
+                end_x, end_y = pts[-1]
+                for prev_x, prev_y in reversed(pts[:-1]):
+                    dx, dy = end_x - prev_x, end_y - prev_y
+                    length = math.hypot(dx, dy)
+                    if length > 1e-6:
+                        ux, uy = dx / length, dy / length
+                        self.finish_directions[name] = (ux, uy)
+                        pts[-1] = (end_x + self.finish_margin_m * ux,
+                                   end_y + self.finish_margin_m * uy)
+                        break
+                else:
+                    raise ValueError(f"Cannot extend finish for '{name}': path has no nonzero segment")
+            self.enu_paths[name] = pts
 
         self.active_lane = "center"
         self.target_idx = 1
@@ -1021,19 +1068,24 @@ class MultipathNavigator:
         return self.active_lane, self.paths[self.active_lane][self.target_idx][0], best_dist
 
     def _check_finish_passed(self, lane_name, boat_x, boat_y):
-        """Check arrival within the final waypoint (#65) radius or across its perpendicular finish line (dot product >= 0)."""
+        """Check the extended finish line, or legacy radius arrival when margin is zero."""
         pts = self.enu_paths[lane_name]
         p_prev = pts[-2]
         p_last = pts[-1]
 
         dist_to_last = math.hypot(boat_x - p_last[0], boat_y - p_last[1])
-        if dist_to_last <= self.params["finish_radius_m"]:
+        # A radius would consume small margins and could stop before the original finish.
+        if self.finish_margin_m == 0 and dist_to_last <= self.params["finish_radius_m"]:
             return True
 
         # In the final 25% of the path, use a dot product to check whether the finish line was crossed.
         if self.target_idx >= int(len(pts) * 0.75):
-            ux = p_last[0] - p_prev[0]
-            uy = p_last[1] - p_prev[1]
+            if self.finish_margin_m > 0:
+                # Retain the original direction even for tiny extensions of a repeated endpoint.
+                ux, uy = self.finish_directions[lane_name]
+            else:
+                ux = p_last[0] - p_prev[0]
+                uy = p_last[1] - p_prev[1]
             ulen = math.hypot(ux, uy)
             if ulen > 1e-6:
                 ux /= ulen
@@ -1153,7 +1205,7 @@ class MultipathNavigator:
             else:
                 break
 
-        # 2) Check for completion at the final waypoint (#65).
+        # 2) Check for completion at the finish, including any configured margin.
         if self._check_finish_passed(self.active_lane, bx, by):
             return {
                 "finished": True,
@@ -1368,6 +1420,8 @@ def main(session_stamp=None):
                         help="USB serial number identifying the Spresense, including generic CP210x bridges")
     parser.add_argument("--no-spresense", action="store_true", help="Disable the ArbaLabs GPS USB stream")
     parser.add_argument("--throttle-ratio", type=float, default=None, help="Override AUTO cruise throttle (adaptive strategy can still use full power)")
+    parser.add_argument("--finish-margin-m", type=float, default=None,
+                        help="Continue this many meters beyond the finish (overrides navigation.finish_margin_m; 0 keeps radius arrival)")
     parser.add_argument("--auto-strategy", type=canonical_auto_strategy_name,
                         choices=sorted(AUTO_STRATEGIES), default=None,
                         help="Override autonomous.strategy for this run (legacy unnumbered names also accepted)")
@@ -1376,11 +1430,12 @@ def main(session_stamp=None):
     cal = load_calibration(args.config)
     auto_config = cal.get("autonomous", {})
     try:
+        nav_params = resolve_navigation_params(cal.get("navigation", {}), args.finish_margin_m)
         if args.auto_strategy is not None:
             if not isinstance(auto_config, dict):
                 raise ValueError("autonomous must be a JSON object")
             auto_config = dict(auto_config, strategy=args.auto_strategy)
-        auto_strategy = create_auto_strategy(auto_config, NAV_PARAMS)
+        auto_strategy = create_auto_strategy(auto_config, nav_params)
     except ValueError as exc:
         parser.error(str(exc))
 
@@ -1409,7 +1464,10 @@ def main(session_stamp=None):
         f"Center: {len(paths['center'])} waypoints, Right: {len(paths['right'])} waypoints)"
     )
 
-    navigator = MultipathNavigator(paths, NAV_PARAMS, strategy=auto_strategy)
+    try:
+        navigator = MultipathNavigator(paths, nav_params, strategy=auto_strategy)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     # 2) Initialize the PCA9685 and safely arm the ESC for 2 seconds.
     pca = PCA9685Driver(
@@ -1494,12 +1552,13 @@ def main(session_stamp=None):
     log_event("[AUTO STRATEGY] " + json.dumps({
         "strategy": auto_strategy.name,
         "parameters": auto_strategy.options,
-        "navigation": NAV_PARAMS,
+        "navigation": nav_params,
         "cruise_ratio": pwm_cfg["auto_throttle_ratio"],
         "cruise_pwm_us": auto_cruise_us,
         "full_pwm_us": pwm_cfg["esc_fwd_max_us"],
     }, sort_keys=True))
     print(f"  - AUTO throttle  : {auto_strategy.describe_throttle(auto_cruise_us, pwm_cfg['esc_fwd_max_us'])}")
+    print(f"  - Finish margin  : {navigator.finish_margin_m:g} m beyond the final waypoint")
     print("  - MANUAL -> AUTO : Hold neutral throttle + right steering for 2.0 seconds (then transmitter steering is ignored)")
     print("  - AUTO -> MANUAL : Apply full reverse throttle to return to MANUAL immediately")
     print("  - Safe shutdown  : Ctrl + C (immediate neutral stop)")
@@ -1705,7 +1764,8 @@ def main(session_stamp=None):
                         servo_us = pwm_cfg["servo_center_us"]
                         esc_us = pwm_cfg["esc_neutral_us"]
                         print(
-                            f"\n[COURSE COMPLETE] Passed final WP #{nav_info['wp_number']}! "
+                            f"\n[COURSE COMPLETE] Reached finish for WP #{nav_info['wp_number']} "
+                            f"(margin: {navigator.finish_margin_m:g} m). "
                             f"Stopping the motor in neutral and returning to MANUAL mode."
                         )
                     else:

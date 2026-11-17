@@ -59,6 +59,39 @@ These commands launch the normal boat controller and initialize its hardware.
 `--config path/to/calibration.json` selects a different configuration file.
 The calibration tool preserves the autonomous section when loading and saving.
 
+## Finish margin
+
+Set `navigation.finish_margin_m` in `calibration.json` to continue past the finish
+before stopping in neutral and returning to MANUAL. For example, this section
+sets a 3 m margin for every AUTO strategy:
+
+```json
+"navigation": {
+  "finish_margin_m": 3.0
+}
+```
+
+The margin extends each lane's final segment straight ahead by that distance.
+Steering continues toward the extended endpoint, and completion requires
+crossing its perpendicular line. The arrival radius does not shorten a positive
+margin, even if it is smaller than `finish_radius_m`. The existing final-quarter
+progress check and 10 m lateral limit still apply. CSV files and waypoint numbers
+remain unchanged. The distance is measured from the GPS position; it is the
+neutral-command threshold, not a guarantee of where the moving boat stops.
+
+The default is `0.0`, which preserves completion within the existing 1.8 m finish
+radius or across the original finish line. Missing navigation settings also use
+this default. Values must be finite, nonnegative numbers. The calibration tool
+preserves this section when loading and saving; restart after editing it.
+
+To override the margin for one run:
+
+```sh
+python3 multipath_boat.py --finish-margin-m 3
+```
+
+The effective value appears in the startup summary and session event log.
+
 ## 03 — GPS-course progressive experiment
 
 To enable this mode for subsequent runs, set `autonomous.strategy` to
@@ -180,8 +213,9 @@ distance is `speed × lookahead_time_sec`, clamped to the configured minimum and
 maximum. Defaults give 1.8 seconds of travel, bounded to 2.4–5.0 m. Boundary
 recovery caps this at the existing 2.4 m boundary lookahead. Missing or stale
 speed uses the fixed 3.5 m lookahead, clamped to the configured bounds, while
-power remains at cruise. Targets clamp to the final path endpoint. A lane
-change recomputes projection and prediction against the new lane.
+power remains at cruise. Targets clamp to the final path endpoint, including any
+configured finish margin. A lane change recomputes projection and prediction
+against the new lane.
 
 These settings are additional to the inherited GPS-course progressive options:
 

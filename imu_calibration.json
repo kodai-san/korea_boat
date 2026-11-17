@@ -1,0 +1,21 @@
+{
+  "up": [
+    0.99081,
+    0.13008,
+    -0.03715
+  ],
+  "bias": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "scale": 1.0,
+  "formula": "yaw_rate_right = -scale * (up . (w - bias)), w = phone rotation rate in rad/s",
+  "created": "2026-11-17T09:27:32",
+  "method": "offline fit vs RTK GPS course",
+  "imu_file": "Gyroscope (Rotation Rate) 2026-11-16 17-41-09.xlsx",
+  "boat_log": "multipath_log_20261116_171303.csv",
+  "fitted_scale": 1.019,
+  "clock_offset_s": 0.1,
+  "heading_change_rms_3s_deg": 3.86
+}
