@@ -1,0 +1,168 @@
+hardware_check.py - read-only diagnostic (no PCA9685 writes, no GPS configuration changes)
+Detected ports (same logic as multipath_boat.py): Arduino=/dev/ttyACM1 GPS=/dev/ttyACM0
+
+========================================================================
+1. SYSTEM
+========================================================================
+Date (system clock): 2026-11-17T19:54:42.050187
+Model: NVIDIA Jetson Nano Developer Kit
+L4T: # R32 (release), REVISION: 6.1, GCID: 27863751, BOARD: t210ref, EABI: aarch64, DATE: Mon Jul 26 19:20:30 UTC 2021
+Kernel: 4.9.253-tegra  Python: 3.8.10
+pyserial: 3.4  smbus2: ok
+User groups: jetson adm cdrom sudo audio dip video plugdev i2c lpadmin gdm lightdm sambashare weston-launch gpio jtop
+NTP synchronized: yes
+Uptime: 1125.60 4049.96
+calibration.json ports: arduino=/dev/ttyACM0 gps=auto
+Serial ports:
+  {"device": "/dev/ttyACM1", "vid": "0x2341", "pid": "0x0043", "manufacturer": "Arduino (www.arduino.cc)", "product": null, "serial": "1453230353235121D040", "location": "1-2.3:1.0"}
+  {"device": "/dev/ttyACM0", "vid": "0x1546", "pid": "0x01A9", "manufacturer": "u-blox AG - www.u-blox.com", "product": "u-blox GNSS receiver", "serial": null, "location": "1-2.4:1.0"}
+  by-id: usb-Arduino__www.arduino.cc__0043_1453230353235121D040-if00 -> /dev/ttyACM1
+  by-id: usb-u-blox_AG_-_www.u-blox.com_u-blox_GNSS_receiver-if00 -> /dev/ttyACM0
+Power input (INA3221 monitor, if present):
+Temperatures (sealed hull):
+  AO-therm     30.5 C
+  CPU-therm    21.0 C
+  GPU-therm    21.5 C
+  PLL-therm    19.5 C
+  PMIC-Die     50.0 C
+  thermal-fan-est 21.0 C
+Kernel log: power/USB events (last 20 of 47):
+  [    5.865239] gpu-throttle-alert cooling device registered.
+  [    5.865397] tegra_soctherm 700e2000.soctherm: soctherm: trip temperature -2147483647 forced to -127000
+  [    5.865409] tegra_soctherm 700e2000.soctherm: soctherm: trip temperature -2147483647 forced to -127000
+  [    7.085109] cdc_acm 1-2.4:1.0: ttyACM0: USB ACM device
+  [    7.087190] usbcore: registered new interface driver cdc_acm
+  [    7.087195] cdc_acm: USB Abstract Control Model driver for USB modems and ISDN adapters
+  [   20.342574] soctherm: OC ALARM 0x00000001
+  [  147.996297] soctherm: OC ALARM 0x00000001
+  [  206.348548] soctherm: OC ALARM 0x00000001
+  [  211.024532] soctherm: OC ALARM 0x00000001
+  [  212.751102] soctherm: OC ALARM 0x00000001
+  [  217.254832] soctherm: OC ALARM 0x00000001
+  [  238.020716] soctherm: OC ALARM 0x00000001
+  [  248.048201] soctherm: OC ALARM 0x00000001
+  [  273.362073] soctherm: OC ALARM 0x00000001
+  [  276.413000] soctherm: OC ALARM 0x00000001
+  [  461.214739] usb 1-2.3: USB disconnect, device number 5
+  [  498.666852] usb 2-1.3: USB disconnect, device number 3
+  [  987.567726] usb 2-1.3: USB disconnect, device number 4
+  [  992.406363] cdc_acm 1-2.3:1.0: ttyACM1: USB ACM device
+Free disk space: 38.3 GB
+
+========================================================================
+2. GPS RECEIVER (/dev/ttyACM0 @ 115200 baud)
+========================================================================
+[FAIL] Cannot open GPS port: [Errno 13] could not open port /dev/ttyACM0: [Errno 13] Permission denied: '/dev/ttyACM0'
+
+========================================================================
+3. JETSON UART PORTS (passive listen, to see if the GPS is wired by UART too)
+========================================================================
+  /dev/ttyTHS1     cannot open ([Errno 13] could not open port /dev/ttyTHS1: [Errno 13] Permission denied: '/dev/ttyTHS1')
+  /dev/ttyTHS2     cannot open ([Errno 13] could not open port /dev/ttyTHS2: [Errno 13] Permission denied: '/dev/ttyTHS2')
+
+========================================================================
+4. ARDUINO RC READER (/dev/ttyACM1 @ 115200 baud)
+========================================================================
+[FAIL] Cannot open Arduino port: [Errno 13] could not open port /dev/ttyACM1: [Errno 13] Permission denied: '/dev/ttyACM1'
+
+========================================================================
+5. PCA9685 PWM DRIVER (read only, I2C bus 1 addr 0x40)
+========================================================================
+MODE1=0x11 (sleep=True) MODE2=0x04 PRESCALE=30 -> 196.89 Hz assuming a 25 MHz oscillator
+  servo (channel 0): currently outputting full OFF (no pulses)
+  esc (channel 1): currently outputting full OFF (no pulses)
+Note: the real oscillator can differ from 25 MHz; that needs a scope or a loopback wire to measure.
+
+========================================================================
+6. NTRIP SERVER REACHABILITY (TCP connect only, no login sent)
+========================================================================
+rts2.ngii.go.kr:2101 -> NOT reachable: timed out
+
+========================================================================
+SUMMARY
+========================================================================
+  gps_module               None
+  gps_fusion_mode          None
+  detected_ports           {'arduino': '/dev/ttyACM1', 'gps': '/dev/ttyACM0'}
+  gps_fix_rate_hz          None
+  arduino_fields_per_line  None
+  ntrip_reachable          NOT reachable: timed out
+  temperatures_c           {'AO-therm': 30.5, 'CPU-therm': 21.0, 'GPU-therm': 21.5, 'PLL-therm': 19.5, 'PMIC-Die': 50.0, 'thermal-fan-est': 21.0}
+
+# SUMMARY (JSON)
+{
+  "detected_ports": {
+    "arduino": "/dev/ttyACM1",
+    "gps": "/dev/ttyACM0"
+  },
+  "jetson_model": "NVIDIA Jetson Nano Developer Kit",
+  "python": "3.8.10",
+  "ntp_synchronized": "yes",
+  "serial_ports": [
+    {
+      "device": "/dev/ttyACM1",
+      "vid": "0x2341",
+      "pid": "0x0043",
+      "manufacturer": "Arduino (www.arduino.cc)",
+      "product": null,
+      "serial": "1453230353235121D040",
+      "location": "1-2.3:1.0"
+    },
+    {
+      "device": "/dev/ttyACM0",
+      "vid": "0x1546",
+      "pid": "0x01A9",
+      "manufacturer": "u-blox AG - www.u-blox.com",
+      "product": "u-blox GNSS receiver",
+      "serial": null,
+      "location": "1-2.4:1.0"
+    }
+  ],
+  "power_rails": {},
+  "temperatures_c": {
+    "AO-therm": 30.5,
+    "CPU-therm": 21.0,
+    "GPU-therm": 21.5,
+    "PLL-therm": 19.5,
+    "PMIC-Die": 50.0,
+    "thermal-fan-est": 21.0
+  },
+  "dmesg_power_usb_events": [
+    "[    5.865239] gpu-throttle-alert cooling device registered.",
+    "[    5.865397] tegra_soctherm 700e2000.soctherm: soctherm: trip temperature -2147483647 forced to -127000",
+    "[    5.865409] tegra_soctherm 700e2000.soctherm: soctherm: trip temperature -2147483647 forced to -127000",
+    "[    7.085109] cdc_acm 1-2.4:1.0: ttyACM0: USB ACM device",
+    "[    7.087190] usbcore: registered new interface driver cdc_acm",
+    "[    7.087195] cdc_acm: USB Abstract Control Model driver for USB modems and ISDN adapters",
+    "[   20.342574] soctherm: OC ALARM 0x00000001",
+    "[  147.996297] soctherm: OC ALARM 0x00000001",
+    "[  206.348548] soctherm: OC ALARM 0x00000001",
+    "[  211.024532] soctherm: OC ALARM 0x00000001",
+    "[  212.751102] soctherm: OC ALARM 0x00000001",
+    "[  217.254832] soctherm: OC ALARM 0x00000001",
+    "[  238.020716] soctherm: OC ALARM 0x00000001",
+    "[  248.048201] soctherm: OC ALARM 0x00000001",
+    "[  273.362073] soctherm: OC ALARM 0x00000001",
+    "[  276.413000] soctherm: OC ALARM 0x00000001",
+    "[  461.214739] usb 1-2.3: USB disconnect, device number 5",
+    "[  498.666852] usb 2-1.3: USB disconnect, device number 3",
+    "[  987.567726] usb 2-1.3: USB disconnect, device number 4",
+    "[  992.406363] cdc_acm 1-2.3:1.0: ttyACM1: USB ACM device"
+  ],
+  "free_disk_gb": 38.3,
+  "gps_open_error": "[Errno 13] could not open port /dev/ttyACM0: [Errno 13] Permission denied: '/dev/ttyACM0'",
+  "uart_probe": {
+    "/dev/ttyTHS1": "cannot open ([Errno 13] could not open port /dev/ttyTHS1: [Errno 13] Permission denied: '/dev/ttyTHS1')",
+    "/dev/ttyTHS2": "cannot open ([Errno 13] could not open port /dev/ttyTHS2: [Errno 13] Permission denied: '/dev/ttyTHS2')"
+  },
+  "arduino_open_error": "[Errno 13] could not open port /dev/ttyACM1: [Errno 13] Permission denied: '/dev/ttyACM1'",
+  "pca9685": {
+    "mode1": 17,
+    "mode2": 4,
+    "prescale": 30,
+    "freq_hz_nominal": 196.89,
+    "servo_pulse": "full OFF (no pulses)",
+    "esc_pulse": "full OFF (no pulses)"
+  },
+  "ntrip_reachable": "NOT reachable: timed out"
+}
