@@ -1,2 +1,7 @@
 __pycache__/
 sim_results/
+
+__pycache__/
+*.pyc
+._*
+.DS_Store
