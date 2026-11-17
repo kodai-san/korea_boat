@@ -1,4 +1,4 @@
-"""Offline tests for the 05 turn planner: turn geometry, direction choice, reverse, line placement.
+"""Offline tests for 07_turn_planner: turn geometry, direction choice, reverse, line placement.
 
 The starting conditions come from real 05 starts on 2026-11-17 18:39 (routes 2, 3 and 6 of the RTK plot),
 where turning the short way round drove the boat toward the bank.
@@ -19,7 +19,7 @@ import test_race_features as loop_harness  # noqa: E402
 from auto_strategies import create_auto_strategy  # noqa: E402
 from path_guidance import plan_turn, turn_arc  # noqa: E402
 
-NAME = "05_straight_line"
+NAME = "07_turn_planner"
 DEFAULTS = create_auto_strategy({"strategy": NAME}, mb.NAV_PARAMS).options
 R_LEFT, R_RIGHT = DEFAULTS["turn_radius_left_m"], DEFAULTS["turn_radius_right_m"]
 LOW, HIGH = -DEFAULTS["bank_left_m"], DEFAULTS["bank_right_m"]
@@ -203,13 +203,59 @@ class PlannerNavigatorTest(unittest.TestCase):
         self.assertLess(wrap(info["target_bearing_deg"] - (self.line.bearing_deg + 137.0)), 0.0)
 
 
+class SeparateFrom05Test(unittest.TestCase):
+    """07 is a separate strategy: 05 keeps the night-test behaviour (symmetric limits, no planner)."""
+
+    def navigator(self, name, **options):
+        paths = {lane: mb.load_waypoints_csv(os.path.join(os.path.dirname(__file__), "..", p))
+                 for lane, p in mb.PATH_FILES.items()}
+        strategy = create_auto_strategy({"strategy": name, name: options}, mb.NAV_PARAMS)
+        return mb.MultipathNavigator(paths, dict(mb.NAV_PARAMS, finish_margin_m=1.0), strategy=strategy)
+
+    def test_05_has_no_planner_and_symmetric_limits(self):
+        nav = self.navigator("05_straight_line")
+        line = nav.line_guidance
+        self.assertEqual((line.bank_left_m, line.bank_right_m, line.line_left_m, line.line_right_m),
+                         (2.5, 2.5, 1.5, 1.5))
+        x, y = line.point(14.0, 2.0)
+        lat = nav.ref_lat + math.degrees(y / mb.EARTH_RADIUS_M)
+        lon = nav.ref_lon + math.degrees(x / (mb.EARTH_RADIUS_M * math.cos(math.radians(nav.ref_lat))))
+        nav.enter_auto_mode(lat, lon, now_mono=0.0)
+        info = nav.update(lat, lon, (line.bearing_deg + 137.0) % 360.0, now_mono=0.7, heading_confident=True,
+                          motion={"speed_mps": 1.4})
+        self.assertNotIn(info["prediction_status"], ("turn_right", "turn_left", "plan_neutral_in"))
+        self.assertAlmostEqual(line.line_offset_m, 1.5, places=6)               # Clamped at entry, never moved
+
+    def test_07_test_square_uses_per_side_limits(self):
+        nav = self.navigator(NAME, test_square=True)
+        line = nav.line_guidance
+        x, y = line.point(10.0, 0.0)
+        lat = nav.ref_lat + math.degrees(y / mb.EARTH_RADIUS_M)
+        lon = nav.ref_lon + math.degrees(x / (mb.EARTH_RADIUS_M * math.cos(math.radians(nav.ref_lat))))
+        nav.enter_auto_mode(lat, lon, now_mono=0.0)
+        self.assertIn("-3.20/+4.00 m (bank limits) then -2.60/+3.40 m (line limits)", nav.describe_line())
+        info = nav.update(lat, lon, line.bearing_deg, now_mono=0.1, heading_confident=True, motion={"speed_mps": 1.0})
+        self.assertEqual(info["prediction_status"], "square leg 1: bank -3.20/+4.00 m to start")
+
+    def test_per_side_flags_refused_for_05(self):
+        from auto_strategies import apply_run_overrides
+        auto = mb.load_calibration(os.path.join(os.path.dirname(__file__), "..", "calibration.json"))["autonomous"]
+        with self.assertRaises(ValueError):
+            apply_run_overrides(dict(auto, strategy="05_straight_line"), bank_right_m=4.5)
+        o = create_auto_strategy(apply_run_overrides(dict(auto, strategy=NAME), bank_right_m=4.5, line_limit_m=2.0),
+                                 mb.NAV_PARAMS).options
+        self.assertEqual((o["bank_left_m"], o["bank_right_m"], o["line_left_m"], o["line_right_m"]), (3.2, 4.5, 2.0, 2.0))
+
+
 class PlannerAutoLoopTest(unittest.TestCase):
     """The real main loop with mocked hardware, boat 3.5 m right of the centerline facing the right bank."""
 
     run_loop = loop_harness.AutoLoopFeatureTest.run_loop
 
     def test_reverse_reaches_the_esc_and_reacquires_the_course(self):
-        rows, events, cal = self.run_loop(speed=1.0, cycles=150, course_deg=90.0, offset_m=3.5)
+        rows, events, cal = self.run_loop(argv=["--auto-strategy", NAME], speed=1.0, cycles=150, course_deg=90.0,
+                                          offset_m=3.5)
+        self.assertTrue(all(r["auto_strategy"] == NAME for r in rows if r["mode"] == "AUTO"))
         statuses = [r["prediction_status"] for r in rows]
         pwm = cal["pwm"]
         reverse_us = mb.map_norm_to_pwm(-DEFAULTS["plan_reverse_throttle"], pwm["esc_neutral_us"],
@@ -223,6 +269,13 @@ class PlannerAutoLoopTest(unittest.TestCase):
         self.assertIn("[TURN PLAN]", events)
         self.assertIn("reverse until a turn fits", events)
         self.assertTrue(all(r["recovery_state"] == "" for r in rows))       # Not mistaken for being stuck
+
+    def test_command_line_selects_07_with_one_sided_limit(self):
+        rows, events, _ = self.run_loop(argv=["--auto-strategy", NAME, "--test-square", "--bank-right", "4.5"],
+                                        speed=1.0, cycles=60)
+        self.assertIn("-3.20/+4.50 m (bank limits)", events)
+        auto = [r for r in rows if r["mode"] == "AUTO"][1:]
+        self.assertTrue(auto and all(r["prediction_status"].startswith("square leg 1: bank -3.20/+4.50 m") for r in auto))
 
 
 if __name__ == "__main__":

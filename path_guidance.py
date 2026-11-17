@@ -185,13 +185,15 @@ def plan_turn(d0, phi0_deg, lead_m, radius_left_m, radius_right_m, low_d, high_d
 def square_corners(s_start, limits, leg_length_m):
     """Corners ``(s, d, label)`` of one rectangle per ``(name, left_m, right_m)`` in ``limits``.
 
+    With ``name`` None the label is the symmetric form used by 05 ("+-2.50 m left line").
+
     Coordinates are the course frame of StraightLineGuidance. Each rectangle runs forward along the left
     line (-left_m), across to the right line (+right_m), back along it and across to the start, so every
     corner is a right turn. Labels name the limits and the leg that ends at the corner.
     """
     corners = []
     for name, left_m, right_m in limits:
-        tag = f"{name} -{left_m:.2f}/+{right_m:.2f} m"
+        tag = f"{name} -{left_m:.2f}/+{right_m:.2f} m" if name is not None else f"+-{right_m:.2f} m"
         corners += [
             (s_start, -left_m, f"{tag} to start"),
             (s_start + leg_length_m, -left_m, f"{tag} left line"),

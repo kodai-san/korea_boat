@@ -90,8 +90,7 @@ class RunSettingsTest(unittest.TestCase):
         self.assertFalse(auto["use_04_control"])
         self.assertTrue(resolve_recovery_config(auto)["enabled"])
         o = create_auto_strategy(auto, mb.NAV_PARAMS).options
-        self.assertEqual((o["line_left_m"], o["line_right_m"], o["bank_left_m"], o["bank_right_m"]), (2.6, 3.4, 3.2, 4.0))
-        self.assertEqual((o["test_square"], o["turn_planner"]), (False, True))
+        self.assertEqual((o["line_max_offset_m"], o["band_half_width_m"], o["test_square"]), (1.5, 2.5, False))
 
     def test_use_04_flag_in_json_or_cli(self):
         auto = dict(self.cal(), use_04_control=True)
@@ -104,14 +103,9 @@ class RunSettingsTest(unittest.TestCase):
     def test_line_and_bank_limits_override_json(self):
         auto = apply_run_overrides(self.cal(), line_limit_m=1.0, bank_limit_m=3.2, test_square=True)
         o = create_auto_strategy(auto, mb.NAV_PARAMS).options
-        self.assertEqual((o["line_left_m"], o["line_right_m"], o["bank_left_m"], o["bank_right_m"], o["test_square"]),
-                         (1.0, 1.0, 3.2, 3.2, True))
-        one_side = create_auto_strategy(apply_run_overrides(self.cal(), bank_right_m=4.5, line_left_m=2.0,
-                                                            turn_planner=False), mb.NAV_PARAMS).options
-        self.assertEqual((one_side["bank_left_m"], one_side["bank_right_m"], one_side["line_left_m"],
-                          one_side["line_right_m"], one_side["turn_planner"]), (3.2, 4.5, 2.0, 3.4, False))
+        self.assertEqual((o["line_max_offset_m"], o["band_half_width_m"], o["test_square"]), (1.0, 3.2, True))
         with self.assertRaises(ValueError):    # The line limit plus guard zone must stay inside the bank limit
-            create_auto_strategy(apply_run_overrides(self.cal(), line_limit_m=2.8), mb.NAV_PARAMS)
+            create_auto_strategy(apply_run_overrides(self.cal(), line_limit_m=2.2), mb.NAV_PARAMS)
 
     def test_no_recovery_override(self):
         self.assertFalse(resolve_recovery_config(apply_run_overrides(self.cal(), recovery=False))["enabled"])
@@ -126,8 +120,8 @@ class TestSquareNavigatorTest(unittest.TestCase):
     def setUp(self):
         paths = {lane: mb.load_waypoints_csv(os.path.join(os.path.dirname(__file__), "..", p))
                  for lane, p in mb.PATH_FILES.items()}
-        strategy = create_auto_strategy({"strategy": LINE, LINE: {"test_square": True, "bank_left_m": 2.5, "bank_right_m": 2.5,
-                                                                  "line_left_m": 1.5, "line_right_m": 1.5}}, mb.NAV_PARAMS)
+        strategy = create_auto_strategy({"strategy": LINE, LINE: {"test_square": True, "band_half_width_m": 2.5,
+                                                                  "line_max_offset_m": 1.5}}, mb.NAV_PARAMS)
         self.nav = mb.MultipathNavigator(paths, dict(mb.NAV_PARAMS, finish_margin_m=1.0), strategy=strategy)
         self.line = self.nav.line_guidance
 
@@ -143,9 +137,9 @@ class TestSquareNavigatorTest(unittest.TestCase):
     def test_square_visits_bank_lines_then_line_limits_and_stops(self):
         lane, _, _ = self.nav.enter_auto_mode(*self.latlon(10.0, 0.0), now_mono=0.0)
         self.assertEqual(lane, "test")
-        self.assertIn("-2.50/+2.50 m (bank limits) then -1.50/+1.50 m (line limits)", self.nav.describe_line())
+        self.assertIn("+-2.50 m (bank lines) then +-1.50 m (line limits)", self.nav.describe_line())
         first = self.step(10.5, 0.0, 0.1)
-        self.assertEqual(first["prediction_status"], "square leg 1: bank -2.50/+2.50 m to start")
+        self.assertEqual(first["prediction_status"], "square leg 1: +-2.50 m to start")
         self.assertEqual(first["throttle_norm"], 0.6)
         self.assertFalse(first["finished"])
         visited = []
@@ -158,14 +152,14 @@ class TestSquareNavigatorTest(unittest.TestCase):
             if info["finished"]:
                 break
         self.assertTrue(info["finished"])
-        self.assertIn("square leg 2: bank -2.50/+2.50 m left line", visited)
-        self.assertIn("square leg 9: line -1.50/+1.50 m right line", visited)
+        self.assertIn("square leg 2: +-2.50 m left line", visited)
+        self.assertIn("square leg 9: +-1.50 m right line", visited)
 
     def test_left_line_leg_steers_onto_the_bank_line(self):
         self.nav.enter_auto_mode(*self.latlon(10.0, 0.0), now_mono=0.0)
         self.step(13.0, -2.5, 0.1)                              # Reach the first corner
         info = self.step(16.0, -2.0, 0.2)                       # 0.5 m right of the -2.5 m line, heading along it
-        self.assertEqual(info["prediction_status"], "square leg 2: bank -2.50/+2.50 m left line")
+        self.assertEqual(info["prediction_status"], "square leg 2: +-2.50 m left line")
         self.assertAlmostEqual(info["cte_right_m"], 0.5, places=3)
         self.assertLess(info["steer_norm"], 0.0)                # Steer left, toward the bank line
 
@@ -274,10 +268,10 @@ class AutoLoopFeatureTest(unittest.TestCase):
     def test_test_square_flag_and_limits_from_the_command_line(self):
         rows, events, cal = self.run_loop(argv=["--test-square", "--bank-limit", "3", "--line-limit", "1.2"],
                                           speed=1.0, cycles=60)
-        self.assertIn("-3.00/+3.00 m (bank limits) then -1.20/+1.20 m (line limits)", events)
+        self.assertIn("+-3.00 m (bank lines) then +-1.20 m (line limits)", events)
         auto = [r for r in rows if r["mode"] == "AUTO"][1:]
         self.assertTrue(auto)
-        self.assertTrue(all(r["prediction_status"].startswith("square leg 1: bank -3.00/+3.00 m") for r in auto))
+        self.assertTrue(all(r["prediction_status"].startswith("square leg 1: +-3.00 m") for r in auto))
         pwm = cal["pwm"]
         self.assertEqual(int(auto[-1]["esc_us"]),
                          mb.map_norm_to_pwm(0.6, pwm["esc_neutral_us"], pwm["esc_rev_max_us"], pwm["esc_fwd_max_us"]))

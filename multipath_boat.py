@@ -1027,9 +1027,7 @@ class MultipathNavigator:
         self.line_guidance = None
         if getattr(self.strategy, "uses_straight_line", False) is True:
             center = [latlon_to_enu(lat, lon, self.ref_lat, self.ref_lon) for (_, lat, lon) in paths_dict["center"]]
-            o = self.strategy.options
-            self.line_guidance = StraightLineGuidance(
-                center[0], center[-1], o["bank_left_m"], o["bank_right_m"], o["line_left_m"], o["line_right_m"])
+            self.line_guidance = StraightLineGuidance(center[0], center[-1], *self.strategy.limits())
 
         self.active_lane = "center"
         # False keeps the boat on its lane (boat.py "fixed path"); wall guards still apply.
@@ -1103,7 +1101,8 @@ class MultipathNavigator:
             opts = self.strategy.options
             if opts["test_square"]:
                 s0 = line.frame(bx, by)[0] + opts["test_lead_m"]
-                limits = (("bank", line.bank_left_m, line.bank_right_m), ("line", line.line_left_m, line.line_right_m))
+                names = ("bank", "line") if self.strategy.side_limit_labels else (None, None)
+                limits = ((names[0], line.bank_left_m, line.bank_right_m), (names[1], line.line_left_m, line.line_right_m))
                 self.test_targets = [line.point(s, d) + (label,) for s, d, label in square_corners(
                     s0, limits, opts["test_leg_length_m"])]
                 self.test_leg = 0
@@ -1258,8 +1257,12 @@ class MultipathNavigator:
         line = self.line_guidance
         if self.active_lane == "test":
             o = self.strategy.options
-            return (f"[TEST SQUARE] {o['test_leg_length_m']:g} m rectangles on -{line.bank_left_m:.2f}/+{line.bank_right_m:.2f} m "
-                    f"(bank limits) then -{line.line_left_m:.2f}/+{line.line_right_m:.2f} m (line limits) from the centerline, "
+            if self.strategy.side_limit_labels:
+                limits = (f"-{line.bank_left_m:.2f}/+{line.bank_right_m:.2f} m (bank limits) then "
+                          f"-{line.line_left_m:.2f}/+{line.line_right_m:.2f} m (line limits)")
+            else:
+                limits = f"+-{line.bank_right_m:.2f} m (bank lines) then +-{line.line_right_m:.2f} m (line limits)"
+            return (f"[TEST SQUARE] {o['test_leg_length_m']:g} m rectangles on {limits} from the centerline, "
                     f"starting {o['test_lead_m']:g} m ahead; throttle {100 * o['test_throttle']:.0f}%; "
                     f"entry {line.entry_offset_m:+.2f} m from centerline")
         moved = line.line_offset_m - line.entry_offset_m
@@ -1388,7 +1391,7 @@ class MultipathNavigator:
         moving = speed_ok and speed >= opts["min_course_speed_mps"]
 
         # 2) Turn planner: when far off course, or once on the first forward course after entry.
-        if opts["turn_planner"] and phi is not None and moving and self.turn_dir == 0:
+        if opts.get("turn_planner", False) and phi is not None and moving and self.turn_dir == 0:
             far = abs(phi) > opts["turn_plan_deg"]
             if far or self.plan_pending:
                 first = self.plan_pending
@@ -1724,16 +1727,16 @@ def main(session_stamp=None):
     parser.add_argument("--use-04", action="store_true",
                         help="Run 04_predictive_recovery whatever the strategy (same as autonomous.use_04_control)")
     parser.add_argument("--line-limit", type=float, default=None, metavar="X",
-                        help="05: furthest the straight line may be drawn from the centerline, +-X m on both sides")
+                        help="05/07: furthest the straight line may be drawn from the centerline, +-X m on both sides")
     parser.add_argument("--bank-limit", type=float, default=None, metavar="X",
-                        help="05: bank limit, +-X m from the centerline on both sides")
+                        help="05/07: bank limit, +-X m from the centerline on both sides")
     for side in ("left", "right"):
         parser.add_argument(f"--line-{side}", type=float, default=None, metavar="X",
-                            help=f"05: line limit on the {side} only, X m from the centerline (JSON line_{side}_m)")
+                            help=f"07: line limit on the {side} only, X m from the centerline (JSON line_{side}_m)")
         parser.add_argument(f"--bank-{side}", type=float, default=None, metavar="X",
-                            help=f"05: bank limit on the {side} only, X m from the centerline (JSON bank_{side}_m)")
+                            help=f"07: bank limit on the {side} only, X m from the centerline (JSON bank_{side}_m)")
     parser.add_argument("--no-turn-planner", action="store_true",
-                        help="05: turn the short way round instead of planning the turn against the bank limits")
+                        help="07: turn the short way round instead of planning the turn against the bank limits")
     parser.add_argument("--test-square", action="store_true",
                         help="05: on AUTO entry drive rectangles on the bank lines, then the line limits, and stop")
     parser.add_argument("--no-recovery", action="store_true",

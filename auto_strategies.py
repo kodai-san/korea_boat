@@ -371,12 +371,8 @@ class StraightLineStrategy(ConstantCruiseStrategy):
         "position_heading_max_age_sec": 0.8,
         "forward_acquire_sec": 0.6,
         "forward_memory_sec": 4.0,
-        # Distances from the centerline. Banks measured from RTK bank hits (bank_mapping): left -4.20 m,
-        # right +5.11 m; the bank limits keep about 1 m of water, the line limits sit 0.6 m inside them.
-        "bank_left_m": 3.2,
-        "bank_right_m": 4.0,
-        "line_left_m": 2.6,
-        "line_right_m": 3.4,
+        "band_half_width_m": 2.5,
+        "line_max_offset_m": 1.5,
         "guard_zone_m": 0.5,
         "max_intercept_deg": 15.0,
         "recovery_intercept_deg": 40.0,
@@ -389,24 +385,8 @@ class StraightLineStrategy(ConstantCruiseStrategy):
         "integral_limit_deg": 20.0,
         "integral_delay_sec": 2.0,
         "integral_max_error_deg": 20.0,
-        # Turn planner: when the course is more than turn_plan_deg off the race direction, pick the full-lock
-        # turn (left or right) that stays inside the bank limits in the shortest arc, reversing first if
-        # neither fits (reverse until one fits, then turn at once). Radii measured from full-throttle full-lock turns on 2026-11-16/17 (right 1.9-2.2 m,
-        # left 2.1-2.3 m on 11-17, 2.9-3.5 m on 11-16); turn_delay_sec covers steering and GPS delay.
-        "turn_planner": True,
-        "turn_plan_deg": 60.0,
-        "turn_exit_deg": 25.0,
-        "turn_radius_left_m": 3.0,
-        "turn_radius_right_m": 2.3,
-        "turn_delay_sec": 0.4,
-        "plan_neutral_sec": 0.3,
-        "plan_reverse_max_sec": 4.0,
-        "turn_tolerance_m": 0.3,
-        "turn_restart_lead_m": 0.2,
-        "plan_reverse_throttle": 0.5,
-        "plan_max_reverses": 2.0,
-        # Test pattern: a rectangle on the bank limits, then one on the line limits, to compare where the
-        # code puts them with the real water.
+        # Test pattern: a rectangle on the bank lines (+-band_half_width_m), then on the line limits
+        # (+-line_max_offset_m), to compare where the code puts them with the real water.
         "test_square": False,
         "test_leg_length_m": 15.0,
         "test_lead_m": 3.0,
@@ -417,34 +397,25 @@ class StraightLineStrategy(ConstantCruiseStrategy):
         {key: (0.0, 90.0 if key.endswith("_deg") else None)
          for key, value in default_options.items() if not isinstance(value, bool)},
         test_throttle=(0.1, 1.0),
-        plan_reverse_throttle=(0.1, 1.0),
-        plan_max_reverses=(0.0, 5.0),
     )
 
     @classmethod
     def validate_options(cls, options):
         resolved = super().validate_options(options)
         for key in ("min_course_speed_mps", "course_max_age_sec", "position_heading_max_age_sec",
-                    "forward_acquire_sec", "forward_memory_sec", "bank_left_m", "bank_right_m", "max_intercept_deg",
+                    "forward_acquire_sec", "forward_memory_sec", "band_half_width_m", "max_intercept_deg",
                     "recovery_intercept_deg", "lookahead_time_sec", "lookahead_min_m", "lookahead_max_m",
-                    "prediction_horizon_sec", "course_gain", "turn_plan_deg", "turn_radius_left_m",
-                    "turn_radius_right_m", "plan_reverse_max_sec"):
+                    "prediction_horizon_sec", "course_gain"):
             if resolved[key] <= 0.0:
                 raise ValueError(f"autonomous.{cls.name}.{key} must be greater than zero")
-        for side in ("left", "right"):
-            if resolved[f"line_{side}_m"] + resolved["guard_zone_m"] >= resolved[f"bank_{side}_m"]:
-                raise ValueError(f"autonomous.{cls.name}.line_{side}_m + guard_zone_m must be inside bank_{side}_m")
-        if resolved["turn_exit_deg"] >= resolved["turn_plan_deg"]:
-            raise ValueError(f"autonomous.{cls.name}.turn_exit_deg must be less than turn_plan_deg")
-        if not float(resolved["plan_max_reverses"]).is_integer():
-            raise ValueError(f"autonomous.{cls.name}.plan_max_reverses must be a whole number")
+        if resolved["line_max_offset_m"] + resolved["guard_zone_m"] >= resolved["band_half_width_m"]:
+            raise ValueError(f"autonomous.{cls.name}.line_max_offset_m + guard_zone_m must be inside band_half_width_m")
         if resolved["lookahead_max_m"] < resolved["lookahead_min_m"]:
             raise ValueError(f"autonomous.{cls.name}.lookahead_max_m must be >= lookahead_min_m")
         if resolved["recovery_intercept_deg"] < resolved["max_intercept_deg"]:
             raise ValueError(f"autonomous.{cls.name}.recovery_intercept_deg must be >= max_intercept_deg")
-        for key in ("test_square", "turn_planner"):
-            if not isinstance(resolved[key], bool):
-                raise ValueError(f"autonomous.{cls.name}.{key} must be true or false")
+        if not isinstance(resolved["test_square"], bool):
+            raise ValueError(f"autonomous.{cls.name}.test_square must be true or false")
         for key in ("test_leg_length_m", "test_accept_m"):
             if resolved[key] <= 0.0:
                 raise ValueError(f"autonomous.{cls.name}.{key} must be greater than zero")
@@ -494,8 +465,100 @@ class StraightLineStrategy(ConstantCruiseStrategy):
         command["trim_deg"] = trim_deg
         return command
 
+    side_limit_labels = False
+
+    def limits(self):
+        """(bank_left, bank_right, line_left, line_right): distances from the centerline."""
+        o = self.options
+        return o["band_half_width_m"], o["band_half_width_m"], o["line_max_offset_m"], o["line_max_offset_m"]
+
     def throttle_blend(self, cte_right_m, heading_error_deg):
         return 1.0
+
+    def describe_throttle(self, cruise_us, full_us):
+        o = self.options
+        return (
+            f"full {full_us} us whenever AUTO is steering; straight line from AUTO entry "
+            f"(within +-{o['line_max_offset_m']:.1f} m of the centerline, band +-{o['band_half_width_m']:.1f} m); "
+            f"course PI, integral {o['course_integral_gain']:.2f}/s"
+            + (f"; TEST SQUARE at {100 * o['test_throttle']:.0f}% throttle" if o["test_square"] else "")
+        )
+
+
+class TurnPlannerStrategy(StraightLineStrategy):
+    """05's straight race line plus a turn planner and separate left/right limits.
+
+    When the course is far from the race direction (entry, takeover, collision), the navigator works out both
+    full-lock turns with measured radii and picks the one that stays inside the bank limits in the shortest arc;
+    if neither fits and the bow points toward the limit it would cross, it reverses with the rudder centred until
+    a turn fits, then turns at once. The line is drawn where the turn onto the race direction ends. Built after
+    the 2026-11-17 18:39 starts, where turning the short way round drove the boat toward the bank.
+    """
+
+    name = "07_turn_planner"
+    side_limit_labels = True
+    default_options = dict(
+        {key: value for key, value in StraightLineStrategy.default_options.items()
+         if key not in ("band_half_width_m", "line_max_offset_m")},
+        # Distances from the centerline. Banks measured from RTK bank hits (bank_mapping): left -4.20 m,
+        # right +5.11 m; the bank limits keep about 1 m of water, the line limits sit 0.6 m inside them.
+        bank_left_m=3.2,
+        bank_right_m=4.0,
+        line_left_m=2.6,
+        line_right_m=3.4,
+        # Radii measured from full-throttle full-lock turns on 2026-11-16/17 (right 1.9-2.2 m, left 2.1-2.3 m on
+        # 11-17, 2.9-3.5 m on 11-16); turn_delay_sec covers steering and GPS delay.
+        turn_planner=True,
+        turn_plan_deg=60.0,
+        turn_exit_deg=25.0,
+        turn_radius_left_m=3.0,
+        turn_radius_right_m=2.3,
+        turn_delay_sec=0.4,
+        turn_tolerance_m=0.3,
+        turn_restart_lead_m=0.2,
+        plan_neutral_sec=0.3,
+        plan_reverse_max_sec=4.0,
+        plan_reverse_throttle=0.5,
+        plan_max_reverses=2.0,
+    )
+    option_limits = dict(
+        {key: (0.0, 90.0 if key.endswith("_deg") else None)
+         for key, value in default_options.items() if not isinstance(value, bool)},
+        test_throttle=(0.1, 1.0),
+        plan_reverse_throttle=(0.1, 1.0),
+        plan_max_reverses=(0.0, 5.0),
+    )
+
+    @classmethod
+    def validate_options(cls, options):
+        # Skip 05's symmetric-limit checks; the generic number checks still apply.
+        resolved = super(StraightLineStrategy, cls).validate_options(options)
+        for key in ("min_course_speed_mps", "course_max_age_sec", "position_heading_max_age_sec",
+                    "forward_acquire_sec", "forward_memory_sec", "bank_left_m", "bank_right_m", "max_intercept_deg",
+                    "recovery_intercept_deg", "lookahead_time_sec", "lookahead_min_m", "lookahead_max_m",
+                    "prediction_horizon_sec", "course_gain", "turn_plan_deg", "turn_radius_left_m",
+                    "turn_radius_right_m", "plan_reverse_max_sec", "test_leg_length_m", "test_accept_m"):
+            if resolved[key] <= 0.0:
+                raise ValueError(f"autonomous.{cls.name}.{key} must be greater than zero")
+        for side in ("left", "right"):
+            if resolved[f"line_{side}_m"] + resolved["guard_zone_m"] >= resolved[f"bank_{side}_m"]:
+                raise ValueError(f"autonomous.{cls.name}.line_{side}_m + guard_zone_m must be inside bank_{side}_m")
+        if resolved["lookahead_max_m"] < resolved["lookahead_min_m"]:
+            raise ValueError(f"autonomous.{cls.name}.lookahead_max_m must be >= lookahead_min_m")
+        if resolved["recovery_intercept_deg"] < resolved["max_intercept_deg"]:
+            raise ValueError(f"autonomous.{cls.name}.recovery_intercept_deg must be >= max_intercept_deg")
+        if resolved["turn_exit_deg"] >= resolved["turn_plan_deg"]:
+            raise ValueError(f"autonomous.{cls.name}.turn_exit_deg must be less than turn_plan_deg")
+        if not float(resolved["plan_max_reverses"]).is_integer():
+            raise ValueError(f"autonomous.{cls.name}.plan_max_reverses must be a whole number")
+        for key in ("test_square", "turn_planner"):
+            if not isinstance(resolved[key], bool):
+                raise ValueError(f"autonomous.{cls.name}.{key} must be true or false")
+        return resolved
+
+    def limits(self):
+        o = self.options
+        return o["bank_left_m"], o["bank_right_m"], o["line_left_m"], o["line_right_m"]
 
     def describe_throttle(self, cruise_us, full_us):
         o = self.options
@@ -513,7 +576,7 @@ class StraightLineStrategy(ConstantCruiseStrategy):
 # strategies; never renumber existing modes when adding or retiring one.
 AUTO_STRATEGIES = {
     cls.name: cls for cls in (ConstantCruiseStrategy, AdaptiveThrottleStrategy, GpsCourseProgressiveStrategy,
-                            PredictiveRecoveryStrategy, StraightLineStrategy)
+                            PredictiveRecoveryStrategy, StraightLineStrategy, TurnPlannerStrategy)
 }
 
 AUTO_STRATEGY_ALIASES = {
@@ -522,6 +585,7 @@ AUTO_STRATEGY_ALIASES = {
     "gps_course_progressive": GpsCourseProgressiveStrategy.name,
     "predictive_recovery": PredictiveRecoveryStrategy.name,
     "straight_line": StraightLineStrategy.name,
+    "turn_planner": TurnPlannerStrategy.name,
 }
 
 
@@ -576,23 +640,31 @@ def apply_run_overrides(config, strategy=None, use_04=False, line_limit_m=None, 
                         bank_left_m=None, bank_right_m=None, turn_planner=None):
     """Return a copy of the autonomous section with command-line choices applied (None keeps the JSON).
 
-    line_limit_m / bank_limit_m set both sides; the *_left_m / *_right_m values override one side.
+    The line/bank limit and test-square choices go to 07's block when 07 is selected, otherwise to 05's.
+    line_limit_m / bank_limit_m set both sides; the per-side values and turn_planner exist only in 07.
     """
     config = normalize_autonomous_config(config)
     if strategy is not None:
         config["strategy"] = canonical_auto_strategy_name(strategy)
     if use_04:
         config["use_04_control"] = True
-    line_options = {"line_left_m": line_limit_m, "line_right_m": line_limit_m,
-                    "bank_left_m": bank_limit_m, "bank_right_m": bank_limit_m,
-                    "test_square": test_square, "turn_planner": turn_planner}
-    for key, value in (("line_left_m", line_left_m), ("line_right_m", line_right_m),
-                       ("bank_left_m", bank_left_m), ("bank_right_m", bank_right_m)):
-        if value is not None:
-            line_options[key] = value
+    per_side = {"line_left_m": line_left_m, "line_right_m": line_right_m, "bank_left_m": bank_left_m,
+                "bank_right_m": bank_right_m, "turn_planner": turn_planner}
+    if config["strategy"] == TurnPlannerStrategy.name:
+        target = TurnPlannerStrategy.name
+        line_options = {"line_left_m": line_limit_m, "line_right_m": line_limit_m, "bank_left_m": bank_limit_m,
+                        "bank_right_m": bank_limit_m, "test_square": test_square}
+        line_options.update({key: value for key, value in per_side.items() if value is not None})
+    else:
+        if any(value is not None for value in per_side.values()):
+            raise ValueError("per-side limits and the turn planner switch apply to "
+                             f"{TurnPlannerStrategy.name} only (select it with --auto-strategy)")
+        target = StraightLineStrategy.name
+        line_options = {"line_max_offset_m": line_limit_m, "band_half_width_m": bank_limit_m,
+                        "test_square": test_square}
     line_options = {key: value for key, value in line_options.items() if value is not None}
     if line_options:
-        config[StraightLineStrategy.name] = dict(config.get(StraightLineStrategy.name, {}), **line_options)
+        config[target] = dict(config.get(target, {}), **line_options)
     if recovery is not None:
         config["recovery"] = dict(config.get("recovery") or {}, enabled=recovery)
     return config

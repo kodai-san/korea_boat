@@ -74,7 +74,7 @@ class StraightLineStrategyTest(unittest.TestCase):
             self.assertIn(key, s.options)
 
     def test_rejects_bad_options(self):
-        for options in ({"line_left_m": 2.8}, {"turn_exit_deg": 70.0}, {"turn_planner": 1}, {"lookahead_max_m": 1.0}, {"course_integral_gain": -1.0},
+        for options in ({"line_max_offset_m": 2.2}, {"lookahead_max_m": 1.0}, {"course_integral_gain": -1.0},
                         {"recovery_intercept_deg": 10.0}, {"unknown": 1.0}):
             with self.subTest(options=options), self.assertRaises(ValueError):
                 make_strategy(**options)
@@ -134,9 +134,7 @@ class StraightLineNavigatorTest(unittest.TestCase):
     def setUp(self):
         paths = {lane: mb.load_waypoints_csv(os.path.join(os.path.dirname(__file__), "..", p))
                  for lane, p in mb.PATH_FILES.items()}
-        # Symmetric limits and no turn planner: these tests cover line following and bank protection on their own.
-        self.nav = mb.MultipathNavigator(paths, dict(mb.NAV_PARAMS, finish_margin_m=1.0),
-                                         strategy=make_strategy(**{"bank_left_m": 2.5, "bank_right_m": 2.5, "line_left_m": 1.5, "line_right_m": 1.5, "turn_planner": False}))
+        self.nav = mb.MultipathNavigator(paths, dict(mb.NAV_PARAMS, finish_margin_m=1.0), strategy=make_strategy())
         self.line = self.nav.line_guidance
 
     def latlon(self, s, d):
