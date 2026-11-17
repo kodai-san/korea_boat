@@ -87,6 +87,55 @@ class RCControlTests(unittest.TestCase):
         self.assertEqual(records[0], (1, b.max_LEFT, b.STOP))
         self.assertEqual(b.shared_state['mode'], 'MANUAL')
 
+    def run_rc_auto(self, pulses=None, commands=None, gps=True, cycles=140):
+        b = self.b
+        lat, lon = b.PATHS['Center'][0]
+        return self.run_loop(commands or {}, pulses or (lambda n: (b.HW['st_right'], b.TH_NEU)),
+                             cycles=cycles, gps=(lat, lon, 0., 1., 4, 15, .8) if gps else None)
+
+    def test_rc_auto_entry_survives_held_right_and_dashboard_loss(self):
+        b = self.b
+        self.run_rc_auto(commands={1: [{'cmd': 'set_rc_ignore', 'value': True}]})
+        self.assertEqual(b.shared_state['mode'], 'AUTO')
+        self.assertTrue(b.shared_state['rcAutoActive'])
+        self.assertFalse(b.shared_state['rcManualActive'])
+
+    def test_rc_auto_entry_requires_continuous_hold_and_neutral_throttle(self):
+        b = self.b
+        self.run_rc_auto(pulses=lambda n: (b.ST_NEU if n == 70 else b.HW['st_right'], b.TH_NEU))
+        self.assertEqual(b.shared_state['mode'], 'MANUAL')
+        self.run_rc_auto(pulses=lambda n: (b.HW['st_right'], b.HW['th_fwd']))
+        self.assertEqual(b.shared_state['mode'], 'MANUAL')
+
+    def test_rc_auto_rejects_missing_gps_and_estop(self):
+        b = self.b
+        self.run_rc_auto(gps=False)
+        self.assertEqual(b.shared_state['mode'], 'MANUAL')
+        records, _ = self.run_rc_auto(commands={1: [{'cmd': 'estop_on', 'value': True}]})
+        self.assertEqual(records, [])
+        self.assertEqual(b.shared_state['mode'], 'MANUAL')
+
+    def test_reverse_always_exits_rc_auto_even_with_entry_steering_held(self):
+        b = self.b
+        self.run_rc_auto(pulses=lambda n: (b.HW['st_right'], b.TH_NEU if n < 115 else b.HW['th_rev']))
+        self.assertEqual(b.shared_state['mode'], 'MANUAL')
+        self.assertTrue(b.shared_state['rcManualActive'])
+
+    def test_right_steering_takeover_rearms_after_release(self):
+        b = self.b
+        self.run_rc_auto(pulses=lambda n: (b.ST_NEU if 115 <= n < 120 else b.HW['st_right'], b.TH_NEU))
+        self.assertEqual(b.shared_state['mode'], 'MANUAL')
+        self.assertTrue(b.shared_state['rcManualActive'])
+
+    def test_rc_auto_stops_on_receiver_loss(self):
+        b = self.b
+        records, stops = self.run_rc_auto(pulses=lambda n: (b.HW['st_right'], b.TH_NEU) if n < 115 else (None, None), cycles=155)
+        self.assertEqual(b.shared_state['mode'], 'MANUAL')
+        self.assertTrue(b.shared_state['rcManualActive'])
+        self.assertFalse(b.shared_state['rcAutoActive'])
+        self.assertLess(max(n for n, _, _ in records), 150)
+        self.assertGreater(stops, 2)
+
     def test_estop_still_blocks_rc(self):
         b = self.b
         records, stops = self.run_loop({1: [{'cmd': 'estop_on', 'value': True}]},

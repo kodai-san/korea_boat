@@ -1,11 +1,16 @@
 """Boat dashboard controller with persistent RC takeover.
 
-MANUAL: move either RC stick to take ownership from the dashboard.
+MANUAL: move either RC stick to take ownership from the dashboard. Hold
+neutral throttle + right steering for the calibrated duration (default 2 s)
+to enter AUTO with valid GPS. RC-started AUTO requires a live receiver and
+can run without the dashboard. Release the entry steering before another
+right-steering takeover; full reverse and full left always remain available.
 AUTO/BALLOON: full steering either way (85%) or full reverse (calibrated
 threshold) takes ownership without an arming delay. Web-only mode and GCS
 link hold do not disable takeover. Ownership persists at neutral and after
 RC loss (which commands stop after 0.5 s). To hand back to the dashboard,
-center the sticks and explicitly select a mode. E-stop remains authoritative.
+center the sticks and explicitly select a mode, or use the RC AUTO gesture.
+E-stop remains authoritative.
 This software path requires a running controller and working RC/I2C hardware.
 """
 
@@ -149,6 +154,8 @@ def _load_hw_calibration():
             "th_rev": int(rc["throttle_rev_us"]),
             "th_db": int(rc["throttle_deadband_us"]),
             "rev_ratio": float(ms.get("full_reverse_ratio_threshold", 0.75)),
+            "auto_right_ratio": float(ms.get("right_steer_ratio_threshold", 0.75)),
+            "auto_hold_sec": float(ms.get("right_steer_hold_sec", 2.0)),
         }
     except (KeyError, TypeError, ValueError) as e:
         raise SystemExit(f"{HW_CONFIG_FILE}: invalid or missing hardware/rc/pwm setting ({e})")
@@ -161,6 +168,8 @@ def _load_hw_calibration():
         raise SystemExit(f"{HW_CONFIG_FILE}: servo/ESC channels must be different PCA9685 channels 0-15")
     if not (0.0 < out["rev_ratio"] <= 1.0):
         raise SystemExit(f"{HW_CONFIG_FILE}: mode_switch.full_reverse_ratio_threshold must be in (0, 1]")
+    if not (0.0 < out["auto_right_ratio"] <= 1.0) or not (math.isfinite(out["auto_hold_sec"]) and out["auto_hold_sec"] > 0):
+        raise SystemExit(f"{HW_CONFIG_FILE}: invalid RC AUTO gesture threshold/duration")
     return out
 
 
@@ -2254,6 +2263,10 @@ def main_loop():
     web_manual_stop_hold_t = 0.0
     rc_ignore_mode = False
     rc_manual_latched = False
+    rc_auto_active = False
+    rc_entry_steer_held = False
+    rc_auto_hold_start = None
+    rc_auto_gesture_consumed = False
     gcs_watchdog_enabled = True
     gcs_link_paused = False
 
@@ -2385,9 +2398,28 @@ def main_loop():
             pending_web_cmd["cmd"] = None
             pending_web_cmd["value"] = None
 
+        # A deliberate RC gesture uses the same AUTO initialization as the dashboard.
+        rc_auto_gesture_input = (
+            rc_ok and rc_throttle_norm(last_raw_th) == 0.0
+            and rc_steer_norm(last_raw_st) >= HW["auto_right_ratio"]
+        )
+        rc_auto_gesture = current_mode == "MANUAL" and not estop_active and rc_auto_gesture_input
+        if not rc_auto_gesture:
+            rc_auto_hold_start = None
+            # A held entry gesture cannot restart AUTO after a finish/failsafe.
+            if not rc_auto_gesture_input:
+                rc_auto_gesture_consumed = False
+        elif not rc_auto_gesture_consumed:
+            if rc_auto_hold_start is None:
+                rc_auto_hold_start = now_mono
+            elif now_mono - rc_auto_hold_start >= HW["auto_hold_sec"]:
+                rc_auto_gesture_consumed = True
+                cmds_to_process.append({"cmd": "set_mode", "value": "AUTO", "source": "rc"})
+
         for _cmd_item in cmds_to_process:
           cmd = _cmd_item["cmd"]
           cmd_val = _cmd_item["value"]
+          from_rc = _cmd_item.get("source") == "rc"
           if cmd == "estop_on":
               estop_active = True
               current_mode = "MANUAL"
@@ -2404,15 +2436,23 @@ def main_loop():
               add_event_log("E-STOP", "E-STOP cleared -> MANUAL idle", "auto")
           elif cmd == "set_mode" and cmd_val in ("MANUAL", "AUTO", "BALLOON") and not estop_active:
               # A takeover is released only by an explicit mode selection at neutral.
-              if rc_manual_latched and rc_ok and (rc_steer_norm(last_raw_st) != 0 or rc_throttle_norm(last_raw_th) != 0):
+              if not from_rc and rc_manual_latched and rc_ok and (rc_steer_norm(last_raw_st) != 0 or rc_throttle_norm(last_raw_th) != 0):
                   continue
-              rc_manual_latched = False
+              if not from_rc:
+                  rc_manual_latched = False
+                  rc_auto_active = False
+                  rc_entry_steer_held = False
               if cmd_val == "AUTO" and current_mode != "AUTO":
                   if not gps_ok or not (2 <= fix_status <= 5):
                       safe_stop()
                       add_event_log("FAILSAFE", f"GPS not ready (fix={fix_status}) -> AUTO entry rejected", "warn")
                   else:
                       current_mode = "AUTO"
+                      rc_manual_latched = False
+                      rc_auto_active = from_rc
+                      rc_entry_steer_held = from_rc
+                      web_manual_until_t = web_manual_stop_hold_t = 0.0
+                      web_manual_active = False
                       reset_pid_state()
                       heading_none_start_t = now
                       stall_check_start_t = 0.0
@@ -2451,7 +2491,7 @@ def main_loop():
                       hdg_tag = " | heading: reusing recent GPS course" if heading_reused else ""
                       add_event_log(
                           "MODE",
-                          f"Web command -> AUTO (WP {nav_wp}, {target_path} [{mode_tag}], {nav_dist:.2f} m from lane, "
+                          f"{'RC gesture' if from_rc else 'Web command'} -> AUTO (WP {nav_wp}, {target_path} [{mode_tag}], {nav_dist:.2f} m from lane, "
                           f"{AUTO_STRATEGY.name}){hdg_tag}",
                           "auto",
                       )
@@ -2823,8 +2863,24 @@ def main_loop():
             time.sleep(max(0.001, 0.02 - elapsed))
             continue
 
+        # RC-started AUTO has its own link requirement, independent of the browser.
+        if rc_auto_active and not rc_ok:
+            safe_stop()
+            current_mode = "MANUAL"
+            rc_manual_latched = True
+            rc_auto_active = False
+            rc_entry_steer_held = False
+            add_event_log("FAILSAFE", "RC lost during RC AUTO -> stop and MANUAL", "warn")
+        if rc_entry_steer_held and rc_ok and rc_steer_norm(last_raw_st) < HW["auto_right_ratio"]:
+            rc_entry_steer_held = False
+        suppress_entry_steering = (
+            rc_entry_steer_held and rc_ok
+            and rc_steer_norm(last_raw_st) >= HW["auto_right_ratio"]
+            and rc_throttle_norm(last_raw_th) > -RC_OVERRIDE_REVERSE_RATIO
+        )
+
         # Raw RC always remains available, even in web-only mode and link hold.
-        if rc_ok and rc_takeover_requested(current_mode, last_raw_st, last_raw_th):
+        if rc_ok and not suppress_entry_steering and rc_takeover_requested(current_mode, last_raw_st, last_raw_th):
             if not rc_manual_latched:
                 add_event_log("OVERRIDE", "RC takeover -> MANUAL (dashboard control released)", "warn")
             rc_manual_latched = True
@@ -2846,7 +2902,7 @@ def main_loop():
                     last_pwm_t = now
             else:
                 safe_stop()
-        elif gcs_link_paused:
+        elif gcs_link_paused and not rc_auto_active:
             safe_stop()
             stall_check_start_t = 0.0
             heading_none_start_t = now
@@ -3179,10 +3235,14 @@ def main_loop():
 
         # Leaving AUTO (finish, failsafe, override, E-stop, mode change): reset heading/strategy state
         if was_auto and current_mode != "AUTO":
+            rc_auto_active = False
+            rc_entry_steer_held = False
             nav_info = None
             if HEADING_SELECTOR is not None:
                 HEADING_SELECTOR.reset()
             AUTO_STRATEGY.suspend()
+        shared_state["rcAutoActive"] = rc_auto_active and current_mode == "AUTO"
+        shared_state["rcManualActive"] = rc_manual_latched
         was_auto = (current_mode == "AUTO")
         # Outside AUTO, watch the actual forward command so the next AUTO entry can reuse a fresh GPS course
         if HEADING_SELECTOR is not None and current_mode != "AUTO":
