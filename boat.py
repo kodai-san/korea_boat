@@ -241,7 +241,7 @@ CAM_HFOV_DEG = 62.2
 CAM_RECONNECT_SEC = 2.0
 CAM_TIMEOUT = 2.5
 
-BALLOON_STEER_GAIN = 18.0
+BALLOON_STEER_GAIN = 50.0
 BALLOON_STEER_KD = 3.5
 BALLOON_MIN_AREA = 110
 BALLOON_CHARGE_ANGLE_DEG = 18.0
@@ -3045,7 +3045,7 @@ def main_loop():
                         else:
                             scan_dir = 1 if balloon_last_angle_err >= 0 else -1
                             angle_err = scan_dir * 10.0
-                            steer = clamp(CENTER - int(STEER_SIGN * scan_dir * 220), max_LEFT, max_RIGHT)
+                            steer = clamp(CENTER - int(STEER_SIGN * scan_dir * 5000), max_LEFT, max_RIGHT)
                             drive = lerp(STOP, max_GO, 0.30)
 
                 if current_mode == "BALLOON":

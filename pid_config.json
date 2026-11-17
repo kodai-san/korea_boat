@@ -1,0 +1,22 @@
+{
+  "mode": "P",
+  "kp": 45.0,
+  "ki": 0.0,
+  "kd": 3.0,
+  "imax": 15.0,
+  "maxGo": 4800,
+  "balloonActionMode": "APPROACH_STOP",
+  "balloonRealDiamM": 3.5,
+  "balloonStopDistM": 3.5,
+  "balloonStopAreaPct": 30.0,
+  "customColorEnable": true,
+  "targetHue": 174,
+  "targetHueTol": 10,
+  "targetSatMin": 72,
+  "targetValMin": 83,
+  "targetColorHex": "#a0485a",
+  "camLteMode": true,
+  "camFlip": 180,
+  "linkWatchdog": true,
+  "linkTimeoutSec": 3.5
+}
