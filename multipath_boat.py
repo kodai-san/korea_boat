@@ -81,8 +81,8 @@ NTRIP_CONFIG = {
     "host": "rts2.ngii.go.kr",        # VRS: rts1.ngii.go.kr / FKP: rts2.ngii.go.kr
     "port": 2101,
     "mountpoint": "VRS-RTCM32",       # Team mountpoint (e.g., VRS-RTCM31, FKP-RTCM31)
-    "user": "yeseong5226",               # NGII RTS2 account ID
-    # lim6246 is alternative name
+    # Valid NTRIP accounts: lim6246 or yeseong5226.
+    "user": "lim6246",               # NGII RTS2 account ID
     "password": "ngii",               # Password (default: ngii, or your configured password)
     "gga_interval_sec": 5.0,          # Interval for sending the current position ($GNGGA) to the VRS server (s)
     # Reconnect when the stream stays open but sends nothing (2026-11-16: stalls up to 122 s while "connected"
