@@ -2,6 +2,8 @@
 
 import math
 
+from recovery import DEFAULT_RECOVERY, resolve_recovery_options
+
 
 DEFAULT_AUTO_STRATEGY = "02_adaptive_throttle"
 
@@ -349,11 +351,138 @@ class PredictiveRecoveryStrategy(GpsCourseProgressiveStrategy):
         )
 
 
+class StraightLineStrategy(ConstantCruiseStrategy):
+    """Race line: one straight line from the AUTO entry point, full throttle, GPS-course PI steering.
+
+    The navigator draws a line parallel to the course through the entry point,
+    moved toward the centerline when the entry is near a bank, and passes the
+    line-of-sight course error. Course over ground already includes current,
+    so the outer loop has no integral; the integral here acts on course error
+    and removes rudder trim. It is frozen while launching, slow, without a
+    trusted course, near a bank, or far from the commanded course.
+    """
+
+    name = "05_straight_line"
+    uses_gps_course = True
+    uses_straight_line = True
+    default_options = {
+        "min_course_speed_mps": 0.45,
+        "course_max_age_sec": 0.6,
+        "position_heading_max_age_sec": 0.8,
+        "forward_acquire_sec": 0.6,
+        "forward_memory_sec": 4.0,
+        "band_half_width_m": 2.5,
+        "line_max_offset_m": 1.5,
+        "guard_zone_m": 0.5,
+        "max_intercept_deg": 15.0,
+        "recovery_intercept_deg": 40.0,
+        "lookahead_time_sec": 1.8,
+        "lookahead_min_m": 2.4,
+        "lookahead_max_m": 5.0,
+        "prediction_horizon_sec": 1.0,
+        "course_gain": 1.0,
+        "course_integral_gain": 0.3,
+        "integral_limit_deg": 20.0,
+        "integral_delay_sec": 2.0,
+        "integral_max_error_deg": 20.0,
+        # Test pattern: a rectangle on the bank lines (+-band_half_width_m), then on the line limits
+        # (+-line_max_offset_m), to compare where the code puts them with the real water.
+        "test_square": False,
+        "test_leg_length_m": 15.0,
+        "test_lead_m": 3.0,
+        "test_throttle": 0.6,
+        "test_accept_m": 1.0,
+    }
+    option_limits = dict(
+        {key: (0.0, 90.0 if key.endswith("_deg") else None)
+         for key, value in default_options.items() if not isinstance(value, bool)},
+        test_throttle=(0.1, 1.0),
+    )
+
+    @classmethod
+    def validate_options(cls, options):
+        resolved = super().validate_options(options)
+        for key in ("min_course_speed_mps", "course_max_age_sec", "position_heading_max_age_sec",
+                    "forward_acquire_sec", "forward_memory_sec", "band_half_width_m", "max_intercept_deg",
+                    "recovery_intercept_deg", "lookahead_time_sec", "lookahead_min_m", "lookahead_max_m",
+                    "prediction_horizon_sec", "course_gain"):
+            if resolved[key] <= 0.0:
+                raise ValueError(f"autonomous.{cls.name}.{key} must be greater than zero")
+        if resolved["line_max_offset_m"] + resolved["guard_zone_m"] >= resolved["band_half_width_m"]:
+            raise ValueError(f"autonomous.{cls.name}.line_max_offset_m + guard_zone_m must be inside band_half_width_m")
+        if resolved["lookahead_max_m"] < resolved["lookahead_min_m"]:
+            raise ValueError(f"autonomous.{cls.name}.lookahead_max_m must be >= lookahead_min_m")
+        if resolved["recovery_intercept_deg"] < resolved["max_intercept_deg"]:
+            raise ValueError(f"autonomous.{cls.name}.recovery_intercept_deg must be >= max_intercept_deg")
+        if not isinstance(resolved["test_square"], bool):
+            raise ValueError(f"autonomous.{cls.name}.test_square must be true or false")
+        for key in ("test_leg_length_m", "test_accept_m"):
+            if resolved[key] <= 0.0:
+                raise ValueError(f"autonomous.{cls.name}.{key} must be greater than zero")
+        return resolved
+
+    def reset(self):
+        super().reset()
+        self.integral_deg_s = 0.0
+        self.last_update_mono = None
+        self.entry_mono = None
+
+    def suspend(self):
+        # The servo is centered during a neutral hold; keep the learned trim.
+        self.prev_steer_norm = 0.0
+        self.last_update_mono = None
+
+    def lookahead_distance(self, speed_mps=None):
+        """Speed-dependent line-of-sight distance; missing speed uses the fixed default."""
+        if (isinstance(speed_mps, (int, float)) and not isinstance(speed_mps, bool)
+                and math.isfinite(speed_mps) and speed_mps >= 0):
+            requested = speed_mps * self.options["lookahead_time_sec"]
+        else:
+            requested = self.nav_params.get("lookahead_dist_m", 3.5)
+        return max(self.options["lookahead_min_m"], min(self.options["lookahead_max_m"], requested))
+
+    def update(self, *, cte_right_m, heading_error_deg, boundary_guard, now_mono,
+               heading_confident=False, speed_mps=None):
+        if self.entry_mono is None:
+            self.entry_mono = now_mono
+        dt = 0.0 if self.last_update_mono is None else max(0.0, min(0.2, now_mono - self.last_update_mono))
+        self.last_update_mono = now_mono
+        ki = self.options["course_integral_gain"]
+        valid = (heading_error_deg is not None and not isinstance(heading_error_deg, bool)
+                 and math.isfinite(heading_error_deg))
+        fast = (isinstance(speed_mps, (int, float)) and math.isfinite(speed_mps)
+                and speed_mps >= self.options["min_course_speed_mps"])
+        if (ki > 0 and valid and heading_confident and fast and not boundary_guard
+                and now_mono - self.entry_mono >= self.options["integral_delay_sec"]
+                and abs(heading_error_deg) <= self.options["integral_max_error_deg"]):
+            limit = self.options["integral_limit_deg"] / ki
+            self.integral_deg_s = max(-limit, min(limit, self.integral_deg_s + heading_error_deg * dt))
+        trim_deg = ki * self.integral_deg_s
+        # Without a course the rudder holds only the learned trim (zero until it has been learned).
+        effective = self.options["course_gain"] * heading_error_deg + trim_deg if valid else trim_deg
+        command = super().update(cte_right_m=cte_right_m, heading_error_deg=effective,
+                                 boundary_guard=boundary_guard, now_mono=now_mono)
+        command["trim_deg"] = trim_deg
+        return command
+
+    def throttle_blend(self, cte_right_m, heading_error_deg):
+        return 1.0
+
+    def describe_throttle(self, cruise_us, full_us):
+        o = self.options
+        return (
+            f"full {full_us} us whenever AUTO is steering; straight line from AUTO entry "
+            f"(within +-{o['line_max_offset_m']:.1f} m of the centerline, band +-{o['band_half_width_m']:.1f} m); "
+            f"course PI, integral {o['course_integral_gain']:.2f}/s"
+            + (f"; TEST SQUARE at {100 * o['test_throttle']:.0f}% throttle" if o["test_square"] else "")
+        )
+
+
 # Numbers are permanent creation-order identifiers. Append 05, 06, ... for new
 # strategies; never renumber existing modes when adding or retiring one.
 AUTO_STRATEGIES = {
     cls.name: cls for cls in (ConstantCruiseStrategy, AdaptiveThrottleStrategy, GpsCourseProgressiveStrategy,
-                            PredictiveRecoveryStrategy)
+                            PredictiveRecoveryStrategy, StraightLineStrategy)
 }
 
 AUTO_STRATEGY_ALIASES = {
@@ -361,6 +490,7 @@ AUTO_STRATEGY_ALIASES = {
     "adaptive_throttle": AdaptiveThrottleStrategy.name,
     "gps_course_progressive": GpsCourseProgressiveStrategy.name,
     "predictive_recovery": PredictiveRecoveryStrategy.name,
+    "straight_line": StraightLineStrategy.name,
 }
 
 
@@ -373,6 +503,13 @@ def canonical_auto_strategy_name(name):
     raise ValueError(f"Unknown autonomous strategy {name!r}; choose {', '.join(AUTO_STRATEGIES)}")
 
 
+# Settings in the autonomous section that are not strategy option blocks.
+#   use_04_control: true runs 04_predictive_recovery whatever "strategy" selects (quick way back from 05).
+#   recovery: stuck-recovery settings (recovery.py), used by every strategy.
+FALLBACK_AUTO_STRATEGY = PredictiveRecoveryStrategy.name
+RUN_SETTINGS = ("use_04_control", "recovery")
+
+
 def normalize_autonomous_config(config):
     """Rename selectors and option blocks without mutating settings or choosing between duplicates."""
     if not isinstance(config, dict):
@@ -380,6 +517,9 @@ def normalize_autonomous_config(config):
     normalized = {"strategy": canonical_auto_strategy_name(config.get("strategy", DEFAULT_AUTO_STRATEGY))}
     for name, options in config.items():
         if name == "strategy":
+            continue
+        if name in RUN_SETTINGS:
+            normalized[name] = options
             continue
         if name not in AUTO_STRATEGIES and name not in AUTO_STRATEGY_ALIASES:
             raise ValueError(f"Unknown autonomous setting {name!r}")
@@ -394,16 +534,44 @@ def default_autonomous_config():
     """Return independent defaults for the controller and calibration tool."""
     return {
         "strategy": DEFAULT_AUTO_STRATEGY,
+        "use_04_control": False,
+        "recovery": dict(DEFAULT_RECOVERY),
         **{name: dict(cls.default_options) for name, cls in AUTO_STRATEGIES.items() if cls.default_options},
     }
+
+
+def apply_run_overrides(config, strategy=None, use_04=False, line_limit_m=None, bank_limit_m=None,
+                        test_square=None, recovery=None):
+    """Return a copy of the autonomous section with command-line choices applied (None keeps the JSON)."""
+    config = normalize_autonomous_config(config)
+    if strategy is not None:
+        config["strategy"] = canonical_auto_strategy_name(strategy)
+    if use_04:
+        config["use_04_control"] = True
+    line_options = {"line_max_offset_m": line_limit_m, "band_half_width_m": bank_limit_m, "test_square": test_square}
+    line_options = {key: value for key, value in line_options.items() if value is not None}
+    if line_options:
+        config[StraightLineStrategy.name] = dict(config.get(StraightLineStrategy.name, {}), **line_options)
+    if recovery is not None:
+        config["recovery"] = dict(config.get("recovery") or {}, enabled=recovery)
+    return config
+
+
+def resolve_recovery_config(config):
+    """Validated stuck-recovery settings from the autonomous section."""
+    return resolve_recovery_options(normalize_autonomous_config(config).get("recovery"))
 
 
 def create_auto_strategy(config, nav_params):
     """Validate configuration before hardware initialization; omitted settings use defaults."""
     config = normalize_autonomous_config(config)
-    name = config["strategy"]
+    use_04 = config.get("use_04_control", False)
+    if not isinstance(use_04, bool):
+        raise ValueError("autonomous.use_04_control must be true or false")
+    resolve_recovery_options(config.get("recovery"))
+    name = FALLBACK_AUTO_STRATEGY if use_04 else config["strategy"]
     for configured_name, options in config.items():
-        if configured_name != "strategy":
+        if configured_name not in ("strategy",) + RUN_SETTINGS:
             strategy_type = AUTO_STRATEGIES[configured_name]
             resolved = strategy_type.validate_options(options)
             strategy_type.validate_navigation_options(nav_params, resolved)

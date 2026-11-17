@@ -1,0 +1,124 @@
+2026-11-17T06:12:46 UTC INFO [LOG] Started recording diagnostic events: logs/multipath_events_20261117_151246.log
+2026-11-17T06:12:48 UTC INFO [AUTO STRATEGY] {"cruise_pwm_us": 1990, "cruise_ratio": 1.0, "full_pwm_us": 1990, "navigation": {"boundary_gain_boost": 1.45, "boundary_lookahead_m": 2.4, "drift_oppose_tol_deg": 5.0, "finish_margin_m": 1.0, "finish_radius_m": 1.8, "lookahead_dist_m": 3.5, "max_steer_angle_deg": 35.0, "min_heading_move_m": 0.25, "servo_slew_per_cycle": 0.18, "shift_cooldown_sec": 3.0, "shift_cte_m": 0.7, "shift_hold_sec": 1.2, "sog_cog_blend_mps": 0.45, "wp_reach_radius_m": 1.8}, "parameters": {"course_max_age_sec": 0.6, "cruise_cte_m": 1.5, "cruise_heading_deg": 35.0, "forward_acquire_sec": 0.6, "forward_memory_sec": 4.0, "full_throttle_cte_m": 0.3, "full_throttle_heading_deg": 11.0, "lookahead_max_m": 5.0, "lookahead_min_m": 2.4, "lookahead_time_sec": 1.8, "min_course_speed_mps": 0.45, "position_heading_max_age_sec": 0.8, "prediction_corridor_margin_m": 0.2, "prediction_horizon_sec": 1.0, "prediction_max_path_turn_deg": 15.0, "prediction_min_convergence_mps": 0.05, "throttle_rise_per_sec": 0.5}, "strategy": "04_predictive_recovery"}
+2026-11-17T06:12:50 UTC INFO [GPS STATE] fix_quality=0 (No Fix), valid=False, age=999.000s
+2026-11-17T06:12:50 UTC INFO [DIAGNOSTICS] mode=MANUAL, fix_quality=0, {'gps_valid': 0, 'gps_age_sec': 999.0, 'ntrip_connected': 0, 'ntrip_status': 'connecting', 'ntrip_connection_attempts': 1, 'ntrip_last_response': '', 'ntrip_last_error': '', 'rtcm_bytes_rx': 0, 'rtcm_rx_age_sec': '', 'ntrip_gga_sent': 0, 'rtcm_bytes_written': 0, 'rtcm_write_errors': 0, 'rtcm_last_write_error': '', 'gps_sog_mps': 0.0, 'gps_cog_deg': '', 'gps_diff_age_sec': '', 'gps_alt_m': '', 'gps_utc': ''}
+2026-11-17T06:12:50 UTC INFO [NTRIP] Connection attempt 1: rts2.ngii.go.kr:2101/VRS-RTCM32
+2026-11-17T06:12:50 UTC WARNING [SPRESENSE] No matching free USB port; waiting for Spresense. Set --spresense-port or --spresense-serial-number for a generic USB bridge.
+2026-11-17T06:12:50 UTC INFO [NTRIP] TCP connected; sending mountpoint request
+2026-11-17T06:12:51 UTC INFO [NTRIP] Connected to NGII (rts2.ngii.go.kr:2101/VRS-RTCM32)! Response: ICY 200 OK
+2026-11-17T06:12:51 UTC INFO [GPS STATE] fix_quality=4 (RTK FIX (Precise)), valid=True, age=0.034s
+2026-11-17T06:12:53 UTC INFO [NTRIP] First correction-stream data received: 270 bytes
+2026-11-17T06:12:54 UTC INFO [GPS STATE] fix_quality=0 (No Fix), valid=False, age=2.380s
+2026-11-17T06:12:58 UTC INFO [GPS STATE] fix_quality=2 (DGPS (Differential)), valid=True, age=0.016s
+2026-11-17T06:13:00 UTC INFO [DIAGNOSTICS] mode=MANUAL, fix_quality=2, {'gps_valid': 1, 'gps_age_sec': 1.781, 'ntrip_connected': 1, 'ntrip_status': 'connected', 'ntrip_connection_attempts': 1, 'ntrip_last_response': 'ICY 200 OK', 'ntrip_last_error': '', 'rtcm_bytes_rx': 5765, 'rtcm_rx_age_sec': 0.392, 'ntrip_gga_sent': 2, 'rtcm_bytes_written': 5765, 'rtcm_write_errors': 0, 'rtcm_last_write_error': '', 'gps_sog_mps': 0.056, 'gps_cog_deg': '', 'gps_diff_age_sec': 0.8, 'gps_alt_m': 6.151, 'gps_utc': '061258.80'}
+2026-11-17T06:13:01 UTC INFO [GPS STATE] fix_quality=2 (DGPS (Differential)), valid=False, age=2.535s
+2026-11-17T06:13:01 UTC INFO [GPS STATE] fix_quality=5 (RTK FLOAT), valid=True, age=0.041s
+2026-11-17T06:13:02 UTC INFO [GPS STATE] fix_quality=2 (DGPS (Differential)), valid=True, age=0.024s
+2026-11-17T06:13:02 UTC INFO [GPS STATE] fix_quality=0 (No Fix), valid=False, age=0.425s
+2026-11-17T06:13:08 UTC INFO [GPS STATE] fix_quality=5 (RTK FLOAT), valid=True, age=0.012s
+2026-11-17T06:13:10 UTC INFO [DIAGNOSTICS] mode=MANUAL, fix_quality=5, {'gps_valid': 1, 'gps_age_sec': 0.161, 'ntrip_connected': 1, 'ntrip_status': 'connected', 'ntrip_connection_attempts': 1, 'ntrip_last_response': 'ICY 200 OK', 'ntrip_last_error': '', 'rtcm_bytes_rx': 13885, 'rtcm_rx_age_sec': 0.262, 'ntrip_gga_sent': 4, 'rtcm_bytes_written': 13885, 'rtcm_write_errors': 0, 'rtcm_last_write_error': '', 'gps_sog_mps': 0.955, 'gps_cog_deg': 237.33, 'gps_diff_age_sec': 1.4, 'gps_alt_m': 5.087, 'gps_utc': '061310.40'}
+2026-11-17T06:13:13 UTC INFO [GPS STATE] fix_quality=5 (RTK FLOAT), valid=False, age=2.528s
+2026-11-17T06:13:13 UTC INFO [GPS STATE] fix_quality=5 (RTK FLOAT), valid=True, age=0.005s
+2026-11-17T06:13:16 UTC INFO [GPS STATE] fix_quality=0 (No Fix), valid=False, age=0.972s
+2026-11-17T06:13:20 UTC INFO [DIAGNOSTICS] mode=MANUAL, fix_quality=0, {'gps_valid': 0, 'gps_age_sec': 4.998, 'ntrip_connected': 1, 'ntrip_status': 'connected', 'ntrip_connection_attempts': 1, 'ntrip_last_response': 'ICY 200 OK', 'ntrip_last_error': '', 'rtcm_bytes_rx': 22005, 'rtcm_rx_age_sec': 0.37, 'ntrip_gga_sent': 6, 'rtcm_bytes_written': 22005, 'rtcm_write_errors': 0, 'rtcm_last_write_error': '', 'gps_sog_mps': 0.704, 'gps_cog_deg': 241.6, 'gps_diff_age_sec': '', 'gps_alt_m': '', 'gps_utc': '061320.40'}
+2026-11-17T06:13:21 UTC INFO [GPS STATE] fix_quality=2 (DGPS (Differential)), valid=True, age=0.026s
+2026-11-17T06:13:21 UTC WARNING [SPRESENSE] No matching free USB port; waiting for Spresense. Set --spresense-port or --spresense-serial-number for a generic USB bridge.
+2026-11-17T06:13:24 UTC INFO [GPS STATE] fix_quality=5 (RTK FLOAT), valid=True, age=0.035s
+2026-11-17T06:13:26 UTC INFO [GPS STATE] fix_quality=0 (No Fix), valid=False, age=1.166s
+2026-11-17T06:13:29 UTC INFO [GPS STATE] fix_quality=5 (RTK FLOAT), valid=True, age=0.023s
+2026-11-17T06:13:30 UTC INFO [DIAGNOSTICS] mode=MANUAL, fix_quality=5, {'gps_valid': 1, 'gps_age_sec': 0.827, 'ntrip_connected': 1, 'ntrip_status': 'connected', 'ntrip_connection_attempts': 1, 'ntrip_last_response': 'ICY 200 OK', 'ntrip_last_error': '', 'rtcm_bytes_rx': 29752, 'rtcm_rx_age_sec': 0.21, 'ntrip_gga_sent': 8, 'rtcm_bytes_written': 29752, 'rtcm_write_errors': 0, 'rtcm_last_write_error': '', 'gps_sog_mps': 0.353, 'gps_cog_deg': 39.52, 'gps_diff_age_sec': 0.8, 'gps_alt_m': 3.577, 'gps_utc': '061329.80'}
+2026-11-17T06:13:32 UTC INFO [GPS STATE] fix_quality=0 (No Fix), valid=False, age=1.106s
+2026-11-17T06:13:33 UTC INFO [GPS STATE] fix_quality=2 (DGPS (Differential)), valid=True, age=0.004s
+2026-11-17T06:13:33 UTC INFO [GPS STATE] fix_quality=5 (RTK FLOAT), valid=True, age=0.013s
+2026-11-17T06:13:40 UTC INFO [DIAGNOSTICS] mode=MANUAL, fix_quality=5, {'gps_valid': 1, 'gps_age_sec': 1.06, 'ntrip_connected': 1, 'ntrip_status': 'connected', 'ntrip_connection_attempts': 1, 'ntrip_last_response': 'ICY 200 OK', 'ntrip_last_error': '', 'rtcm_bytes_rx': 38245, 'rtcm_rx_age_sec': 0.587, 'ntrip_gga_sent': 9, 'rtcm_bytes_written': 38245, 'rtcm_write_errors': 0, 'rtcm_last_write_error': '', 'gps_sog_mps': 0.26, 'gps_cog_deg': 184.06, 'gps_diff_age_sec': 0.6, 'gps_alt_m': 6.521, 'gps_utc': '061339.60'}
+2026-11-17T06:13:41 UTC INFO [GPS STATE] fix_quality=0 (No Fix), valid=False, age=0.431s
+2026-11-17T06:13:46 UTC INFO [GPS STATE] fix_quality=2 (DGPS (Differential)), valid=True, age=0.028s
+2026-11-17T06:13:46 UTC INFO [GPS STATE] fix_quality=5 (RTK FLOAT), valid=True, age=0.018s
+2026-11-17T06:13:48 UTC INFO [AUTO HEADING] Acquiring forward motion
+2026-11-17T06:13:49 UTC INFO [GPS STATE] fix_quality=2 (DGPS (Differential)), valid=True, age=0.029s
+2026-11-17T06:13:50 UTC INFO [GPS STATE] fix_quality=5 (RTK FLOAT), valid=True, age=0.017s
+2026-11-17T06:13:50 UTC INFO [DIAGNOSTICS] mode=AUTO, fix_quality=5, {'gps_valid': 1, 'gps_age_sec': 0.468, 'ntrip_connected': 1, 'ntrip_status': 'connected', 'ntrip_connection_attempts': 1, 'ntrip_last_response': 'ICY 200 OK', 'ntrip_last_error': '', 'rtcm_bytes_rx': 46365, 'rtcm_rx_age_sec': 0.465, 'ntrip_gga_sent': 11, 'rtcm_bytes_written': 46365, 'rtcm_write_errors': 0, 'rtcm_last_write_error': '', 'gps_sog_mps': 1.572, 'gps_cog_deg': 246.6, 'gps_diff_age_sec': 1.2, 'gps_alt_m': 4.605, 'gps_utc': '061350.20'}
+2026-11-17T06:13:51 UTC WARNING [SPRESENSE] No matching free USB port; waiting for Spresense. Set --spresense-port or --spresense-serial-number for a generic USB bridge.
+2026-11-17T06:13:52 UTC INFO [GPS STATE] fix_quality=2 (DGPS (Differential)), valid=True, age=0.022s
+2026-11-17T06:13:52 UTC INFO [GPS STATE] fix_quality=5 (RTK FLOAT), valid=True, age=0.015s
+2026-11-17T06:13:53 UTC INFO [GPS STATE] fix_quality=2 (DGPS (Differential)), valid=True, age=0.013s
+2026-11-17T06:13:54 UTC INFO [GPS STATE] fix_quality=0 (No Fix), valid=False, age=1.354s
+2026-11-17T06:13:59 UTC INFO [GPS STATE] fix_quality=2 (DGPS (Differential)), valid=True, age=0.015s
+2026-11-17T06:14:00 UTC INFO [GPS STATE] fix_quality=5 (RTK FLOAT), valid=True, age=0.040s
+2026-11-17T06:14:00 UTC INFO [DIAGNOSTICS] mode=MANUAL, fix_quality=5, {'gps_valid': 1, 'gps_age_sec': 0.29, 'ntrip_connected': 1, 'ntrip_status': 'connected', 'ntrip_connection_attempts': 1, 'ntrip_last_response': 'ICY 200 OK', 'ntrip_last_error': '', 'rtcm_bytes_rx': 54485, 'rtcm_rx_age_sec': 0.539, 'ntrip_gga_sent': 13, 'rtcm_bytes_written': 54485, 'rtcm_write_errors': 0, 'rtcm_last_write_error': '', 'gps_sog_mps': 0.084, 'gps_cog_deg': '', 'gps_diff_age_sec': 0.4, 'gps_alt_m': 7.493, 'gps_utc': '061400.40'}
+2026-11-17T06:14:03 UTC INFO [GPS STATE] fix_quality=0 (No Fix), valid=False, age=2.193s
+2026-11-17T06:14:05 UTC INFO [GPS STATE] fix_quality=2 (DGPS (Differential)), valid=True, age=0.015s
+2026-11-17T06:14:07 UTC INFO [GPS STATE] fix_quality=5 (RTK FLOAT), valid=True, age=0.016s
+2026-11-17T06:14:10 UTC INFO [DIAGNOSTICS] mode=MANUAL, fix_quality=5, {'gps_valid': 1, 'gps_age_sec': 0.802, 'ntrip_connected': 1, 'ntrip_status': 'connected', 'ntrip_connection_attempts': 1, 'ntrip_last_response': 'ICY 200 OK', 'ntrip_last_error': '', 'rtcm_bytes_rx': 62605, 'rtcm_rx_age_sec': 0.278, 'ntrip_gga_sent': 15, 'rtcm_bytes_written': 62605, 'rtcm_write_errors': 0, 'rtcm_last_write_error': '', 'gps_sog_mps': 0.289, 'gps_cog_deg': 185.82, 'gps_diff_age_sec': 0.8, 'gps_alt_m': 9.571, 'gps_utc': '061409.80'}
+2026-11-17T06:14:12 UTC INFO [GPS STATE] fix_quality=2 (DGPS (Differential)), valid=True, age=0.032s
+2026-11-17T06:14:13 UTC INFO [GPS STATE] fix_quality=5 (RTK FLOAT), valid=True, age=0.012s
+2026-11-17T06:14:14 UTC INFO [AUTO HEADING] Acquiring forward motion
+2026-11-17T06:14:18 UTC INFO [GPS STATE] fix_quality=2 (DGPS (Differential)), valid=True, age=0.036s
+2026-11-17T06:14:19 UTC INFO [GPS STATE] fix_quality=0 (No Fix), valid=False, age=0.953s
+2026-11-17T06:14:20 UTC INFO [DIAGNOSTICS] mode=AUTO, fix_quality=0, {'gps_valid': 0, 'gps_age_sec': 2.106, 'ntrip_connected': 1, 'ntrip_status': 'connected', 'ntrip_connection_attempts': 1, 'ntrip_last_response': 'ICY 200 OK', 'ntrip_last_error': '', 'rtcm_bytes_rx': 70725, 'rtcm_rx_age_sec': 0.429, 'ntrip_gga_sent': 16, 'rtcm_bytes_written': 70725, 'rtcm_write_errors': 0, 'rtcm_last_write_error': '', 'gps_sog_mps': 1.544, 'gps_cog_deg': 252.16, 'gps_diff_age_sec': '', 'gps_alt_m': '', 'gps_utc': '061420.20'}
+2026-11-17T06:14:21 UTC INFO [GPS STATE] fix_quality=5 (RTK FLOAT), valid=True, age=0.017s
+2026-11-17T06:14:22 UTC WARNING [SPRESENSE] No matching free USB port; waiting for Spresense. Set --spresense-port or --spresense-serial-number for a generic USB bridge.
+2026-11-17T06:14:27 UTC INFO [GPS STATE] fix_quality=5 (RTK FLOAT), valid=False, age=2.537s
+2026-11-17T06:14:27 UTC INFO [GPS STATE] fix_quality=5 (RTK FLOAT), valid=True, age=0.032s
+2026-11-17T06:14:27 UTC INFO [GPS STATE] fix_quality=4 (RTK FIX (Precise)), valid=True, age=0.031s
+2026-11-17T06:14:30 UTC INFO [DIAGNOSTICS] mode=AUTO, fix_quality=4, {'gps_valid': 1, 'gps_age_sec': 0.55, 'ntrip_connected': 1, 'ntrip_status': 'connected', 'ntrip_connection_attempts': 1, 'ntrip_last_response': 'ICY 200 OK', 'ntrip_last_error': '', 'rtcm_bytes_rx': 78845, 'rtcm_rx_age_sec': 0.486, 'ntrip_gga_sent': 18, 'rtcm_bytes_written': 78845, 'rtcm_write_errors': 0, 'rtcm_last_write_error': '', 'gps_sog_mps': 1.464, 'gps_cog_deg': 209.71, 'gps_diff_age_sec': 1.2, 'gps_alt_m': 5.125, 'gps_utc': '061430.20'}
+2026-11-17T06:14:31 UTC INFO [GPS STATE] fix_quality=0 (No Fix), valid=False, age=0.762s
+2026-11-17T06:14:37 UTC INFO [GPS STATE] fix_quality=2 (DGPS (Differential)), valid=True, age=0.012s
+2026-11-17T06:14:38 UTC INFO [GPS STATE] fix_quality=5 (RTK FLOAT), valid=True, age=0.036s
+2026-11-17T06:14:40 UTC INFO [DIAGNOSTICS] mode=AUTO, fix_quality=5, {'gps_valid': 1, 'gps_age_sec': 2.362, 'ntrip_connected': 1, 'ntrip_status': 'connected', 'ntrip_connection_attempts': 1, 'ntrip_last_response': 'ICY 200 OK', 'ntrip_last_error': '', 'rtcm_bytes_rx': 86965, 'rtcm_rx_age_sec': 0.68, 'ntrip_gga_sent': 20, 'rtcm_bytes_written': 86965, 'rtcm_write_errors': 0, 'rtcm_last_write_error': '', 'gps_sog_mps': 1.69, 'gps_cog_deg': 219.96, 'gps_diff_age_sec': 1.4, 'gps_alt_m': 4.971, 'gps_utc': '061438.40'}
+2026-11-17T06:14:41 UTC INFO [GPS STATE] fix_quality=5 (RTK FLOAT), valid=False, age=2.512s
+2026-11-17T06:14:41 UTC INFO [GPS STATE] fix_quality=5 (RTK FLOAT), valid=True, age=0.008s
+2026-11-17T06:14:45 UTC INFO [GPS STATE] fix_quality=2 (DGPS (Differential)), valid=True, age=0.040s
+2026-11-17T06:14:46 UTC INFO [GPS STATE] fix_quality=5 (RTK FLOAT), valid=True, age=0.005s
+2026-11-17T06:14:50 UTC INFO [DIAGNOSTICS] mode=MANUAL, fix_quality=5, {'gps_valid': 1, 'gps_age_sec': 0.174, 'ntrip_connected': 1, 'ntrip_status': 'connected', 'ntrip_connection_attempts': 1, 'ntrip_last_response': 'ICY 200 OK', 'ntrip_last_error': '', 'rtcm_bytes_rx': 95085, 'rtcm_rx_age_sec': 0.611, 'ntrip_gga_sent': 22, 'rtcm_bytes_written': 95085, 'rtcm_write_errors': 0, 'rtcm_last_write_error': '', 'gps_sog_mps': 0.513, 'gps_cog_deg': 340.57, 'gps_diff_age_sec': 0.6, 'gps_alt_m': 4.908, 'gps_utc': '061450.60'}
+2026-11-17T06:14:52 UTC WARNING [SPRESENSE] No matching free USB port; waiting for Spresense. Set --spresense-port or --spresense-serial-number for a generic USB bridge.
+2026-11-17T06:14:56 UTC INFO [GPS STATE] fix_quality=0 (No Fix), valid=False, age=1.202s
+2026-11-17T06:15:00 UTC INFO [DIAGNOSTICS] mode=MANUAL, fix_quality=0, {'gps_valid': 0, 'gps_age_sec': 5.578, 'ntrip_connected': 1, 'ntrip_status': 'connected', 'ntrip_connection_attempts': 1, 'ntrip_last_response': 'ICY 200 OK', 'ntrip_last_error': '', 'rtcm_bytes_rx': 103205, 'rtcm_rx_age_sec': 0.63, 'ntrip_gga_sent': 24, 'rtcm_bytes_written': 103205, 'rtcm_write_errors': 0, 'rtcm_last_write_error': '', 'gps_sog_mps': 0.184, 'gps_cog_deg': 255.62, 'gps_diff_age_sec': '', 'gps_alt_m': '', 'gps_utc': '061500.60'}
+2026-11-17T06:15:02 UTC INFO [GPS STATE] fix_quality=2 (DGPS (Differential)), valid=True, age=0.020s
+2026-11-17T06:15:05 UTC INFO [GPS STATE] fix_quality=0 (No Fix), valid=False, age=0.804s
+2026-11-17T06:15:09 UTC INFO [GPS STATE] fix_quality=2 (DGPS (Differential)), valid=True, age=0.047s
+2026-11-17T06:15:10 UTC INFO [DIAGNOSTICS] mode=MANUAL, fix_quality=2, {'gps_valid': 1, 'gps_age_sec': 0.205, 'ntrip_connected': 1, 'ntrip_status': 'connected', 'ntrip_connection_attempts': 1, 'ntrip_last_response': 'ICY 200 OK', 'ntrip_last_error': '', 'rtcm_bytes_rx': 111325, 'rtcm_rx_age_sec': 0.525, 'ntrip_gga_sent': 25, 'rtcm_bytes_written': 111325, 'rtcm_write_errors': 0, 'rtcm_last_write_error': '', 'gps_sog_mps': 0.104, 'gps_cog_deg': '', 'gps_diff_age_sec': 0.6, 'gps_alt_m': 8.166, 'gps_utc': '061510.60'}
+2026-11-17T06:15:14 UTC INFO [GPS STATE] fix_quality=0 (No Fix), valid=False, age=0.241s
+2026-11-17T06:15:15 UTC INFO [GPS STATE] fix_quality=5 (RTK FLOAT), valid=True, age=0.013s
+2026-11-17T06:15:17 UTC INFO [GPS STATE] fix_quality=4 (RTK FIX (Precise)), valid=True, age=0.033s
+2026-11-17T06:15:19 UTC INFO [GPS STATE] fix_quality=0 (No Fix), valid=False, age=0.811s
+2026-11-17T06:15:21 UTC INFO [DIAGNOSTICS] mode=MANUAL, fix_quality=0, {'gps_valid': 0, 'gps_age_sec': 2.269, 'ntrip_connected': 1, 'ntrip_status': 'connected', 'ntrip_connection_attempts': 1, 'ntrip_last_response': 'ICY 200 OK', 'ntrip_last_error': '', 'rtcm_bytes_rx': 119445, 'rtcm_rx_age_sec': 0.346, 'ntrip_gga_sent': 27, 'rtcm_bytes_written': 119445, 'rtcm_write_errors': 0, 'rtcm_last_write_error': '', 'gps_sog_mps': 0.42, 'gps_cog_deg': 331.24, 'gps_diff_age_sec': '', 'gps_alt_m': '', 'gps_utc': '061519.60'}
+2026-11-17T06:15:22 UTC INFO [GPS STATE] fix_quality=2 (DGPS (Differential)), valid=True, age=0.030s
+2026-11-17T06:15:23 UTC WARNING [SPRESENSE] No matching free USB port; waiting for Spresense. Set --spresense-port or --spresense-serial-number for a generic USB bridge.
+2026-11-17T06:15:23 UTC INFO [GPS STATE] fix_quality=5 (RTK FLOAT), valid=True, age=0.017s
+2026-11-17T06:15:25 UTC INFO [GPS STATE] fix_quality=0 (No Fix), valid=False, age=1.572s
+2026-11-17T06:15:27 UTC INFO [GPS STATE] fix_quality=5 (RTK FLOAT), valid=True, age=0.007s
+2026-11-17T06:15:31 UTC INFO [DIAGNOSTICS] mode=MANUAL, fix_quality=5, {'gps_valid': 1, 'gps_age_sec': 0.044, 'ntrip_connected': 1, 'ntrip_status': 'connected', 'ntrip_connection_attempts': 1, 'ntrip_last_response': 'ICY 200 OK', 'ntrip_last_error': '', 'rtcm_bytes_rx': 125837, 'rtcm_rx_age_sec': 0.434, 'ntrip_gga_sent': 29, 'rtcm_bytes_written': 125837, 'rtcm_write_errors': 0, 'rtcm_last_write_error': '', 'gps_sog_mps': 1.172, 'gps_cog_deg': 57.72, 'gps_diff_age_sec': 0.8, 'gps_alt_m': 5.113, 'gps_utc': '061530.80'}
+2026-11-17T06:15:31 UTC INFO [GPS STATE] fix_quality=0 (No Fix), valid=False, age=0.308s
+2026-11-17T06:15:38 UTC INFO [GPS STATE] fix_quality=2 (DGPS (Differential)), valid=True, age=0.019s
+2026-11-17T06:15:38 UTC INFO [GPS STATE] fix_quality=5 (RTK FLOAT), valid=True, age=0.049s
+2026-11-17T06:15:41 UTC INFO [DIAGNOSTICS] mode=MANUAL, fix_quality=5, {'gps_valid': 1, 'gps_age_sec': 0.106, 'ntrip_connected': 1, 'ntrip_status': 'connected', 'ntrip_connection_attempts': 1, 'ntrip_last_response': 'ICY 200 OK', 'ntrip_last_error': '', 'rtcm_bytes_rx': 135685, 'rtcm_rx_age_sec': 0.726, 'ntrip_gga_sent': 31, 'rtcm_bytes_written': 135685, 'rtcm_write_errors': 0, 'rtcm_last_write_error': '', 'gps_sog_mps': 0.722, 'gps_cog_deg': 61.44, 'gps_diff_age_sec': 0.8, 'gps_alt_m': 5.255, 'gps_utc': '061540.80'}
+2026-11-17T06:15:41 UTC INFO [GPS STATE] fix_quality=0 (No Fix), valid=False, age=0.415s
+2026-11-17T06:15:46 UTC INFO [GPS STATE] fix_quality=2 (DGPS (Differential)), valid=True, age=0.033s
+2026-11-17T06:15:47 UTC INFO [GPS STATE] fix_quality=5 (RTK FLOAT), valid=True, age=0.043s
+2026-11-17T06:15:51 UTC INFO [DIAGNOSTICS] mode=MANUAL, fix_quality=5, {'gps_valid': 1, 'gps_age_sec': 0.165, 'ntrip_connected': 1, 'ntrip_status': 'connected', 'ntrip_connection_attempts': 1, 'ntrip_last_response': 'ICY 200 OK', 'ntrip_last_error': '', 'rtcm_bytes_rx': 143805, 'rtcm_rx_age_sec': 0.697, 'ntrip_gga_sent': 32, 'rtcm_bytes_written': 143805, 'rtcm_write_errors': 0, 'rtcm_last_write_error': '', 'gps_sog_mps': 1.129, 'gps_cog_deg': 42.79, 'gps_diff_age_sec': 0.8, 'gps_alt_m': 5.087, 'gps_utc': '061550.80'}
+2026-11-17T06:15:53 UTC WARNING [SPRESENSE] No matching free USB port; waiting for Spresense. Set --spresense-port or --spresense-serial-number for a generic USB bridge.
+2026-11-17T06:15:57 UTC INFO [GPS STATE] fix_quality=2 (DGPS (Differential)), valid=True, age=0.026s
+2026-11-17T06:15:59 UTC INFO [GPS STATE] fix_quality=5 (RTK FLOAT), valid=True, age=0.015s
+2026-11-17T06:16:01 UTC INFO [DIAGNOSTICS] mode=MANUAL, fix_quality=5, {'gps_valid': 1, 'gps_age_sec': 0.151, 'ntrip_connected': 1, 'ntrip_status': 'connected', 'ntrip_connection_attempts': 1, 'ntrip_last_response': 'ICY 200 OK', 'ntrip_last_error': '', 'rtcm_bytes_rx': 151925, 'rtcm_rx_age_sec': 0.781, 'ntrip_gga_sent': 34, 'rtcm_bytes_written': 151925, 'rtcm_write_errors': 0, 'rtcm_last_write_error': '', 'gps_sog_mps': 1.117, 'gps_cog_deg': 63.38, 'gps_diff_age_sec': 1.8, 'gps_alt_m': 7.369, 'gps_utc': '061600.80'}
+2026-11-17T06:16:04 UTC INFO [GPS STATE] fix_quality=0 (No Fix), valid=False, age=1.011s
+2026-11-17T06:16:04 UTC INFO [GPS STATE] fix_quality=2 (DGPS (Differential)), valid=True, age=0.033s
+2026-11-17T06:16:06 UTC INFO [GPS STATE] fix_quality=5 (RTK FLOAT), valid=True, age=0.048s
+2026-11-17T06:16:06 UTC INFO [GPS STATE] fix_quality=2 (DGPS (Differential)), valid=True, age=0.028s
+2026-11-17T06:16:08 UTC INFO [GPS STATE] fix_quality=5 (RTK FLOAT), valid=True, age=0.002s
+2026-11-17T06:16:08 UTC INFO [GPS STATE] fix_quality=2 (DGPS (Differential)), valid=True, age=0.015s
+2026-11-17T06:16:10 UTC INFO [GPS STATE] fix_quality=5 (RTK FLOAT), valid=True, age=0.021s
+2026-11-17T06:16:11 UTC INFO [DIAGNOSTICS] mode=MANUAL, fix_quality=5, {'gps_valid': 1, 'gps_age_sec': 0.392, 'ntrip_connected': 1, 'ntrip_status': 'connected', 'ntrip_connection_attempts': 1, 'ntrip_last_response': 'ICY 200 OK', 'ntrip_last_error': '', 'rtcm_bytes_rx': 160045, 'rtcm_rx_age_sec': 0.549, 'ntrip_gga_sent': 36, 'rtcm_bytes_written': 160045, 'rtcm_write_errors': 0, 'rtcm_last_write_error': '', 'gps_sog_mps': 1.049, 'gps_cog_deg': 68.35, 'gps_diff_age_sec': 1.6, 'gps_alt_m': 1.129, 'gps_utc': '061610.60'}
+2026-11-17T06:16:21 UTC INFO [GPS STATE] fix_quality=5 (RTK FLOAT), valid=False, age=2.532s
+2026-11-17T06:16:21 UTC INFO [DIAGNOSTICS] mode=MANUAL, fix_quality=5, {'gps_valid': 0, 'gps_age_sec': 2.532, 'ntrip_connected': 1, 'ntrip_status': 'connected', 'ntrip_connection_attempts': 1, 'ntrip_last_response': 'ICY 200 OK', 'ntrip_last_error': '', 'rtcm_bytes_rx': 168165, 'rtcm_rx_age_sec': 0.669, 'ntrip_gga_sent': 38, 'rtcm_bytes_written': 168165, 'rtcm_write_errors': 0, 'rtcm_last_write_error': '', 'gps_sog_mps': 0.866, 'gps_cog_deg': 53.06, 'gps_diff_age_sec': 1.4, 'gps_alt_m': 22.223, 'gps_utc': '061618.40'}
+2026-11-17T06:16:21 UTC INFO [GPS STATE] fix_quality=2 (DGPS (Differential)), valid=True, age=0.015s
+2026-11-17T06:16:23 UTC INFO [GPS STATE] fix_quality=5 (RTK FLOAT), valid=True, age=0.002s
+2026-11-17T06:16:23 UTC WARNING [SPRESENSE] No matching free USB port; waiting for Spresense. Set --spresense-port or --spresense-serial-number for a generic USB bridge.
+2026-11-17T06:16:25 UTC INFO [GPS STATE] fix_quality=2 (DGPS (Differential)), valid=True, age=0.019s
+2026-11-17T06:16:27 UTC INFO [GPS STATE] fix_quality=5 (RTK FLOAT), valid=True, age=0.001s
+2026-11-17T06:16:28 UTC INFO [GPS STATE] fix_quality=0 (No Fix), valid=False, age=0.317s
+2026-11-17T06:16:28 UTC INFO [GPS STATE] fix_quality=2 (DGPS (Differential)), valid=True, age=0.039s
+2026-11-17T06:16:29 UTC INFO [GPS STATE] fix_quality=5 (RTK FLOAT), valid=True, age=0.032s
+2026-11-17T06:16:31 UTC INFO [DIAGNOSTICS] mode=MANUAL, fix_quality=5, {'gps_valid': 1, 'gps_age_sec': 0.186, 'ntrip_connected': 1, 'ntrip_status': 'connected', 'ntrip_connection_attempts': 1, 'ntrip_last_response': 'ICY 200 OK', 'ntrip_last_error': '', 'rtcm_bytes_rx': 176415, 'rtcm_rx_age_sec': 0.079, 'ntrip_gga_sent': 40, 'rtcm_bytes_written': 176415, 'rtcm_write_errors': 0, 'rtcm_last_write_error': '', 'gps_sog_mps': 0.145, 'gps_cog_deg': 323.21, 'gps_diff_age_sec': 1.8, 'gps_alt_m': 10.045, 'gps_utc': '061630.80'}
+2026-11-17T06:16:31 UTC INFO [NTRIP STOP] {'connected': False, 'status': 'stopped', 'connection_attempts': 1, 'last_response': 'ICY 200 OK', 'last_error': '', 'rtcm_bytes_rx': 176665, 'rtcm_rx_age_sec': 0.0016004590006559738, 'gga_sent': 40}
+2026-11-17T06:16:31 UTC INFO [SESSION END]

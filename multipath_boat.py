@@ -49,9 +49,11 @@ import sys
 import threading
 import time
 
-from auto_strategies import AUTO_STRATEGIES, canonical_auto_strategy_name, create_auto_strategy
+from auto_strategies import (AUTO_STRATEGIES, apply_run_overrides, canonical_auto_strategy_name,
+                             create_auto_strategy, resolve_recovery_config)
 from gps_heading import MotionHeadingSelector
-from path_guidance import interpolate_lookahead
+from path_guidance import StraightLineGuidance, interpolate_lookahead, square_corners
+from recovery import StuckRecovery
 from spresense_stream import (
     SpresenseGPSStreamer, reserved_spresense_ports, same_serial_port,
 )
@@ -79,9 +81,13 @@ NTRIP_CONFIG = {
     "host": "rts2.ngii.go.kr",        # VRS: rts1.ngii.go.kr / FKP: rts2.ngii.go.kr
     "port": 2101,
     "mountpoint": "VRS-RTCM32",       # Team mountpoint (e.g., VRS-RTCM31, FKP-RTCM31)
-    "user": "lim6246",               # NGII RTS2 account ID
+    "user": "yeseong5226",               # NGII RTS2 account ID
+    # lim6246 is alternative name
     "password": "ngii",               # Password (default: ngii, or your configured password)
-    "gga_interval_sec": 5.0           # Interval for sending the current position ($GNGGA) to the VRS server (s)
+    "gga_interval_sec": 5.0,          # Interval for sending the current position ($GNGGA) to the VRS server (s)
+    # Reconnect when the stream stays open but sends nothing (2026-11-16: stalls up to 122 s while "connected"
+    # cost RTK for 31% of a run). Corrections normally arrive every 1-2 s; the F9P holds RTK ~60 s on old data.
+    "stall_timeout_sec": 8.0
 }
 
 # 2) Path CSV files (relative to the current directory)
@@ -110,7 +116,10 @@ NAV_PARAMS = {
     "boundary_gain_boost": 1.45,      # Recovery steering gain multiplier when drifting outside an outer path toward a wall
     "servo_slew_per_cycle": 0.18,     # Maximum steering change per cycle to prevent abrupt servo motion (at 20 Hz)
     "min_heading_move_m": 0.25,       # Minimum movement to update GPS heading, filtering stationary noise (m)
-    "sog_cog_blend_mps": 0.45         # Minimum speed at which to trust $GNRMC course over ground (m/s)
+    "sog_cog_blend_mps": 0.45,        # Minimum speed at which to trust $GNRMC course over ground (m/s)
+    # "blend": 50/50 of RMC course and the 0.25 m movement bearing (original).
+    # "cog": receiver Doppler course every fix above sog_cog_blend_mps, movement bearing below it.
+    "heading_source": "blend"
 }
 
 DEFAULT_CALIBRATION_FILE = "calibration.json"
@@ -503,6 +512,14 @@ class ZEDF9PReceiver:
             self._anchor_lon = new_lon
             return
 
+        if (NAV_PARAMS.get("heading_source", "blend") == "cog" and rmc_cog is not None
+                and sog_mps >= NAV_PARAMS["sog_cog_blend_mps"]):
+            # Doppler course: low noise, no 0.25 m chord lag, updated every fix while moving.
+            self.heading_deg = rmc_cog % 360.0
+            self._anchor_lat = new_lat
+            self._anchor_lon = new_lon
+            return
+
         moved_m = distance_m_between(self._anchor_lat, self._anchor_lon, new_lat, new_lon)
         if moved_m >= NAV_PARAMS["min_heading_move_m"]:
             vec_heading = bearing_deg_between(self._anchor_lat, self._anchor_lon, new_lat, new_lon)
@@ -650,6 +667,10 @@ class ZEDF9PReceiver:
                         with self.state_lock:
                             self.sog_mps = sog
                             self.cog_deg = cog
+                            # Apply the Doppler course as soon as it arrives, whatever the GGA/RMC order.
+                            if (NAV_PARAMS.get("heading_source", "blend") == "cog" and cog is not None
+                                    and self._anchor_lat is not None and sog >= NAV_PARAMS["sog_cog_blend_mps"]):
+                                self.heading_deg = cog % 360.0
             except Exception:
                 time.sleep(0.02)
 
@@ -849,9 +870,14 @@ class NGII_NtripClient:
                 sock.settimeout(2.0)
                 last_gga_sent = 0.0
                 first_data = True
+                stall_timeout = float(self.cfg.get("stall_timeout_sec", 0.0))
+                last_data_time = time.monotonic()
 
                 while self.running:
                     now = time.monotonic()
+                    if stall_timeout > 0 and now - last_data_time > stall_timeout:
+                        phase = "stall_watchdog"
+                        raise ConnectionError(f"no correction data for {now - last_data_time:.1f} s; reconnecting")
                     snap = self.gps.get_snapshot()
                     if snap["gga_raw"] and (now - last_gga_sent >= gga_interval):
                         sock.sendall((snap["gga_raw"] + "\r\n").encode("ascii"))
@@ -866,9 +892,10 @@ class NGII_NtripClient:
                             data = sock.recv(2048)
                         if not data:
                             raise ConnectionError("NTRIP stream closed")
+                        last_data_time = time.monotonic()
                         with self.state_lock:
                             self.rtcm_bytes_rx += len(data)
-                            self.last_rtcm_rx_time = time.monotonic()
+                            self.last_rtcm_rx_time = last_data_time
                         if first_data:
                             log_event(f"[NTRIP] First correction-stream data received: {len(data)} bytes")
                             first_data = False
@@ -882,7 +909,7 @@ class NGII_NtripClient:
                     self.status = "error"
                     self.last_error = f"{phase}: {exc}"
                 log_event(f"[NTRIP RECONNECT PENDING] phase={phase}, {type(exc).__name__}: {exc}", logging.WARNING)
-                time.sleep(5.0)
+                time.sleep(1.0 if phase == "stall_watchdog" else 5.0)
             finally:
                 with self.state_lock:
                     self.connected = False
@@ -987,6 +1014,15 @@ class MultipathNavigator:
                     raise ValueError(f"Cannot extend finish for '{name}': path has no nonzero segment")
             self.enu_paths[name] = pts
 
+        # Straight-line strategies follow one line drawn at AUTO entry instead of the three lanes.
+        # The course frame comes from the unextended centerline CSV; the banks are parallel to it.
+        self.line_guidance = None
+        if getattr(self.strategy, "uses_straight_line", False) is True:
+            center = [latlon_to_enu(lat, lon, self.ref_lat, self.ref_lon) for (_, lat, lon) in paths_dict["center"]]
+            self.line_guidance = StraightLineGuidance(
+                center[0], center[-1], self.strategy.options["band_half_width_m"],
+                self.strategy.options["line_max_offset_m"])
+
         self.active_lane = "center"
         self.target_idx = 1
         self.guidance_segment_idx = 0    # Continuous projection progress, independent of waypoint arrival radius.
@@ -1038,6 +1074,22 @@ class MultipathNavigator:
             now_mono = time.monotonic()
 
         bx, by = latlon_to_enu(boat_lat, boat_lon, self.ref_lat, self.ref_lon)
+
+        if self.line_guidance is not None:
+            line = self.line_guidance
+            line.draw_line(bx, by)
+            self.active_lane = "line"
+            self.strategy.reset()
+            opts = self.strategy.options
+            if opts["test_square"]:
+                s0 = line.frame(bx, by)[0] + opts["test_lead_m"]
+                self.test_targets = [line.point(s, d) + (label,) for s, d, label in square_corners(
+                    s0, (opts["band_half_width_m"], opts["line_max_offset_m"]), opts["test_leg_length_m"])]
+                self.test_leg = 0
+                self.test_leg_start = (bx, by)
+                self.active_lane = "test"
+            return self.active_lane, self._line_wp_number(line.frame(bx, by)[0]), abs(
+                line.entry_offset_m - line.line_offset_m)
 
         best_lane = "center"
         best_dist = float("inf")
@@ -1175,6 +1227,125 @@ class MultipathNavigator:
         return dict(motion, path_bearing_deg=path_bearing_deg, corridor_clear=clearance >= 0,
                     corridor_clearance_m=clearance, path_turn_deg=max_turn)
 
+    def _line_wp_number(self, s):
+        """Centerline waypoint number just ahead of along-course distance s (for display and logs)."""
+        wps = self.paths["center"]
+        k = int(math.ceil(max(0.0, s) / self.line_guidance.length * (len(wps) - 1)))
+        return wps[max(0, min(len(wps) - 1, k))][0]
+
+    def describe_line(self):
+        line = self.line_guidance
+        if self.active_lane == "test":
+            o = self.strategy.options
+            return (f"[TEST SQUARE] {o['test_leg_length_m']:g} m rectangles on +-{o['band_half_width_m']:.2f} m "
+                    f"(bank lines) then +-{o['line_max_offset_m']:.2f} m (line limits) from the centerline, "
+                    f"starting {o['test_lead_m']:g} m ahead; throttle {100 * o['test_throttle']:.0f}%; "
+                    f"entry {line.entry_offset_m:+.2f} m from centerline")
+        moved = line.line_offset_m - line.entry_offset_m
+        return (f"[AUTO LINE] bearing {line.bearing_deg:.1f} deg, entry {line.entry_offset_m:+.2f} m from centerline, "
+                f"line {line.line_offset_m:+.2f} m" + (f" (moved {moved:+.2f} m toward the centerline)" if moved else ""))
+
+    def _update_test_square(self, bx, by, boat_heading_deg, now_mono, heading_confident, motion):
+        """Follow the test rectangles leg by leg at test_throttle; no bank protection (the legs are the limits)."""
+        opts = self.strategy.options
+        line = self.line_guidance
+        while self.test_leg < len(self.test_targets):
+            ax, ay = self.test_leg_start
+            tx, ty, label = self.test_targets[self.test_leg]
+            leg_len = math.hypot(tx - ax, ty - ay)
+            if leg_len > 1e-6:
+                ux, uy = (tx - ax) / leg_len, (ty - ay) / leg_len
+                along = (bx - ax) * ux + (by - ay) * uy
+                if along < leg_len - opts["test_accept_m"]:
+                    break
+            self.test_leg += 1
+            self.test_leg_start = (tx, ty)
+            if self.test_leg < len(self.test_targets):
+                log_event(f"[TEST SQUARE] leg {self.test_leg + 1}/{len(self.test_targets)}: "
+                          f"{self.test_targets[self.test_leg][2]}")
+        s, d = line.frame(bx, by)
+        wp_number = self._line_wp_number(s)
+        if self.test_leg >= len(self.test_targets):
+            log_event("[TEST SQUARE] complete")
+            return {"finished": True, "active_lane": self.active_lane, "shifted_to": None, "wp_number": wp_number,
+                    "cte_right_m": 0.0, "steer_norm": 0.0, "target_bearing_deg": line.bearing_deg,
+                    "boundary_guard": False, "throttle_blend": 0.0}
+
+        cross = (bx - ax) * uy - (by - ay) * ux               # + = right of the leg
+        speed = motion.get("speed_mps") if isinstance(motion, dict) else None
+        speed_ok = isinstance(speed, (int, float)) and math.isfinite(speed)
+        lookahead = self.strategy.lookahead_distance(speed if speed_ok else None)
+        leg_bearing = math.degrees(math.atan2(ux, uy))
+        intercept = max(-60.0, min(60.0, math.degrees(math.atan2(cross, lookahead))))
+        target_bearing = (leg_bearing - intercept) % 360.0
+        heading_err = None if boat_heading_deg is None else wrap_180(target_bearing - boat_heading_deg)
+        command = self.strategy.update(cte_right_m=cross, heading_error_deg=heading_err, boundary_guard=False,
+                                       now_mono=now_mono, heading_confident=heading_confident,
+                                       speed_mps=speed if speed_ok else None)
+        return {
+            "finished": False, "active_lane": self.active_lane, "shifted_to": None, "wp_number": wp_number,
+            "cte_right_m": cross, "steer_norm": command["steer_norm"], "target_bearing_deg": target_bearing,
+            "boundary_guard": False, "throttle_blend": 0.0, "throttle_norm": opts["test_throttle"],
+            "lookahead_m": lookahead, "lookahead_target_e_m": tx, "lookahead_target_n_m": ty,
+            "cte_rate_mps": None, "predicted_cte_m": None,
+            "prediction_status": f"square leg {self.test_leg + 1}: {label}",
+            "prediction_corridor_clearance_m": opts["band_half_width_m"] - abs(d), "throttle_target_blend": None,
+        }
+
+    def _update_straight_line(self, bx, by, boat_heading_deg, now_mono, heading_confident, motion):
+        """One straight line from AUTO entry: line-of-sight course command with bank protection."""
+        line = self.line_guidance
+        opts = self.strategy.options
+        band = opts["band_half_width_m"]
+        s, d = line.frame(bx, by)
+        cte = d - line.line_offset_m
+        wp_number = self._line_wp_number(s)
+        if s >= line.length + self.finish_margin_m:
+            return {"finished": True, "active_lane": self.active_lane, "shifted_to": None, "wp_number": wp_number,
+                    "cte_right_m": cte, "steer_norm": 0.0, "target_bearing_deg": line.bearing_deg,
+                    "boundary_guard": False, "throttle_blend": 0.0}
+
+        speed = motion.get("speed_mps") if isinstance(motion, dict) else None
+        speed_ok = isinstance(speed, (int, float)) and math.isfinite(speed)
+        lookahead = self.strategy.lookahead_distance(speed if speed_ok else None)
+        rate = future = None
+        if boat_heading_deg is not None and speed_ok:
+            rate = line.lateral_rate(speed, boat_heading_deg)
+            future = d + opts["prediction_horizon_sec"] * rate
+        outward = rate is not None and d * rate > 0
+
+        # Soft zone near a bank: steeper intercept and boosted gain. Hard limit: the 1 s forecast leaves
+        # the band while moving outward, so steer straight back toward the centerline.
+        status = "line" if abs(cte) <= 0.3 else "merging"
+        guard = False
+        intercept = opts["max_intercept_deg"]
+        if future is not None and outward and abs(future) >= band:
+            status, guard = "hard_limit", True
+            target_bearing = (line.bearing_deg + math.copysign(opts["recovery_intercept_deg"], -d)) % 360.0
+        else:
+            if abs(d) >= band - opts["guard_zone_m"] and (rate is None or outward):
+                status, guard = "bank_guard", True
+                intercept = opts["recovery_intercept_deg"]
+            target_bearing = line.desired_course(d, lookahead, intercept)
+        if boat_heading_deg is None:
+            status = "heading_unavailable"
+
+        heading_err = None if boat_heading_deg is None else wrap_180(target_bearing - boat_heading_deg)
+        command = self.strategy.update(cte_right_m=cte, heading_error_deg=heading_err, boundary_guard=guard,
+                                       now_mono=now_mono, heading_confident=heading_confident,
+                                       speed_mps=speed if speed_ok else None)
+        lx, ly = line.point(s + lookahead, line.line_offset_m)
+        clearance = band - abs(future if future is not None else d)
+        return {
+            "finished": False, "active_lane": self.active_lane, "shifted_to": None, "wp_number": wp_number,
+            "cte_right_m": cte, "steer_norm": command["steer_norm"], "target_bearing_deg": target_bearing,
+            "boundary_guard": guard, "throttle_blend": command["throttle_blend"],
+            "lookahead_m": lookahead, "lookahead_target_e_m": lx, "lookahead_target_n_m": ly,
+            "cte_rate_mps": rate, "predicted_cte_m": None if future is None else future - line.line_offset_m,
+            "prediction_status": status, "prediction_corridor_clearance_m": clearance,
+            "throttle_target_blend": command["throttle_blend"],
+        }
+
     def update(self, boat_lat, boat_lon, boat_heading_deg, now_mono=None, heading_confident=False,
                motion=None):
         """
@@ -1186,6 +1357,11 @@ class MultipathNavigator:
             now_mono = time.monotonic()
 
         bx, by = latlon_to_enu(boat_lat, boat_lon, self.ref_lat, self.ref_lon)
+
+        if self.line_guidance is not None and self.active_lane == "test":
+            return self._update_test_square(bx, by, boat_heading_deg, now_mono, heading_confident, motion)
+        if self.line_guidance is not None:
+            return self._update_straight_line(bx, by, boat_heading_deg, now_mono, heading_confident, motion)
 
         # 1) Calculate the closest segment and CTE on the current path.
         predictive = getattr(self.strategy, "uses_predictive_guidance", False) is True
@@ -1399,7 +1575,8 @@ def open_telemetry_log(stamp=None):
             "gps_course_gga_skew_sec", "position_heading_deg", "position_heading_age_sec",
             "position_speed_mps", "gps_course_deg", "gps_course_speed_mps",
             "lookahead_m", "lookahead_target_e_m", "lookahead_target_n_m", "cte_rate_mps",
-            "predicted_cte_m", "prediction_status", "prediction_corridor_clearance_m", "throttle_target_blend"
+            "predicted_cte_m", "prediction_status", "prediction_corridor_clearance_m", "throttle_target_blend",
+            "recovery_state"
         ])
         f.flush()
         print(f"[LOG] Started recording telemetry: {filepath}")
@@ -1425,17 +1602,28 @@ def main(session_stamp=None):
     parser.add_argument("--auto-strategy", type=canonical_auto_strategy_name,
                         choices=sorted(AUTO_STRATEGIES), default=None,
                         help="Override autonomous.strategy for this run (legacy unnumbered names also accepted)")
+    parser.add_argument("--use-04", action="store_true",
+                        help="Run 04_predictive_recovery whatever the strategy (same as autonomous.use_04_control)")
+    parser.add_argument("--line-limit", type=float, default=None, metavar="X",
+                        help="05: furthest the straight line may be drawn from the centerline, +-X m (default JSON, 1.5)")
+    parser.add_argument("--bank-limit", type=float, default=None, metavar="X",
+                        help="05: bank boundary, +-X m from the centerline (default JSON, 2.5)")
+    parser.add_argument("--test-square", action="store_true",
+                        help="05: on AUTO entry drive rectangles on the bank lines, then the line limits, and stop")
+    parser.add_argument("--no-recovery", action="store_true",
+                        help="Disable stuck recovery (reverse off the bank and retry) for this run")
     args = parser.parse_args()
 
     cal = load_calibration(args.config)
     auto_config = cal.get("autonomous", {})
     try:
         nav_params = resolve_navigation_params(cal.get("navigation", {}), args.finish_margin_m)
-        if args.auto_strategy is not None:
-            if not isinstance(auto_config, dict):
-                raise ValueError("autonomous must be a JSON object")
-            auto_config = dict(auto_config, strategy=args.auto_strategy)
+        auto_config = apply_run_overrides(
+            auto_config, strategy=args.auto_strategy, use_04=args.use_04, line_limit_m=args.line_limit,
+            bank_limit_m=args.bank_limit, test_square=True if args.test_square else None,
+            recovery=False if args.no_recovery else None)
         auto_strategy = create_auto_strategy(auto_config, nav_params)
+        recovery = StuckRecovery(resolve_recovery_config(auto_config))
     except ValueError as exc:
         parser.error(str(exc))
 
@@ -1537,6 +1725,8 @@ def main(session_stamp=None):
     signal.signal(signal.SIGTERM, shutdown_handler)
 
     mode = "MANUAL"
+    last_esc_us = pwm_cfg["esc_neutral_us"]
+    last_recovery_state = ""
     right_steer_hold_start = None
     last_no_gps_warn_t = 0.0
     last_non_rtk_warn_t = 0.0
@@ -1556,9 +1746,17 @@ def main(session_stamp=None):
         "cruise_ratio": pwm_cfg["auto_throttle_ratio"],
         "cruise_pwm_us": auto_cruise_us,
         "full_pwm_us": pwm_cfg["esc_fwd_max_us"],
+        "recovery": recovery.options,
     }, sort_keys=True))
     print(f"  - AUTO throttle  : {auto_strategy.describe_throttle(auto_cruise_us, pwm_cfg['esc_fwd_max_us'])}")
     print(f"  - Finish margin  : {navigator.finish_margin_m:g} m beyond the final waypoint")
+    rec_o = recovery.options
+    print(f"  - Stuck recovery : " + (
+        f"ON (below {rec_o['stuck_speed_mps']:g} m/s for {rec_o['stuck_sec']:g} s -> reverse "
+        f"{100 * rec_o['reverse_throttle']:.0f}% for {rec_o['reverse_sec']:g} s, up to {rec_o['max_attempts']} tries)"
+        if recovery.enabled else "OFF"))
+    if navigator.line_guidance is not None and auto_strategy.options["test_square"]:
+        print("  - TEST SQUARE    : AUTO drives the test rectangles, then stops (not a race run)")
     print("  - MANUAL -> AUTO : Hold neutral throttle + right steering for 2.0 seconds (then transmitter steering is ignored)")
     print("  - AUTO -> MANUAL : Apply full reverse throttle to return to MANUAL immediately")
     print("  - Safe shutdown  : Ctrl + C (immediate neutral stop)")
@@ -1600,6 +1798,7 @@ def main(session_stamp=None):
             spresense.start()
         while running:
             loop_t0 = time.monotonic()
+            recovery_state = ""
 
             ch1_us, ch2_us, rc_alive = rc.get_latest()
             gps_snap = gps.get_snapshot()
@@ -1691,6 +1890,9 @@ def main(session_stamp=None):
                             lane, wp_no, init_dist = navigator.enter_auto_mode(
                                 gps_snap["lat"], gps_snap["lon"], now_mono=loop_t0
                             )
+                            if navigator.line_guidance is not None:
+                                log_event(navigator.describe_line())
+                            recovery.reset(loop_t0)
                             mode = "AUTO"
                             servo_us = pwm_cfg["servo_center_us"]
                             esc_us = auto_cruise_us
@@ -1703,6 +1905,9 @@ def main(session_stamp=None):
 
             else:
                 # ==================== AUTO mode ====================
+                # Stuck recovery: forward command but no GPS speed -> neutral, reverse, neutral, then retry.
+                rec_cmd = recovery.update(loop_t0, last_esc_us > pwm_cfg["esc_neutral_us"],
+                                          gps_snap.get("sog_mps") if gps_snap["valid"] else None)
                 # 1) Ignore transmitter steering (st_norm); monitor for full reverse throttle.
                 if th_norm <= -ms_cfg["full_reverse_ratio_threshold"]:
                     mode = "MANUAL"
@@ -1730,6 +1935,28 @@ def main(session_stamp=None):
                     if loop_t0 - last_no_gps_warn_t > 2.0:
                         print("\n[GPS WARNING] GPS reception delayed -> holding neutral until reception recovers.")
                         last_no_gps_warn_t = loop_t0
+
+                elif rec_cmd is not None:
+                    recovery_state = rec_cmd["state"]
+                    if recovery_state != last_recovery_state:
+                        log_event(f"[RECOVERY] {recovery_state} (attempt {recovery.attempts}/"
+                                  f"{recovery.options['max_attempts']}, GPS speed {gps_snap.get('sog_mps')})",
+                                  logging.WARNING)
+                    servo_us = pwm_cfg["servo_center_us"]
+                    # Reverse motion must not become the steering heading after the retry.
+                    gps.reset_heading_anchor()
+                    if heading_selector is not None:
+                        heading_selector.suspend()
+                    auto_strategy.suspend()
+                    if recovery_state == "gave_up":
+                        mode = "MANUAL"
+                        if heading_selector is not None:
+                            heading_selector.reset()
+                        esc_us = pwm_cfg["esc_neutral_us"]
+                        print("\n[RECOVERY] Still stuck after the last attempt -> neutral and MANUAL mode.")
+                    else:
+                        esc_us = map_norm_to_pwm(rec_cmd["throttle_norm"], pwm_cfg["esc_neutral_us"],
+                                                 pwm_cfg["esc_rev_max_us"], pwm_cfg["esc_fwd_max_us"])
 
                 else:
                     # If RTK drops to standard GPS/DGPS, continue navigating and warn every 10 seconds.
@@ -1775,15 +2002,22 @@ def main(session_stamp=None):
                             pwm_cfg["servo_left_us"],
                             pwm_cfg["servo_right_us"]
                         )
-                        thr_blend = max(0.0, min(1.0, nav_info.get("throttle_blend", 0.0)))
-                        esc_us = int(round(
-                            auto_cruise_us
-                            + thr_blend * (pwm_cfg["esc_fwd_max_us"] - auto_cruise_us)
-                        ))
+                        if nav_info.get("throttle_norm") is not None:
+                            # Fixed throttle requested by the navigator (05 test square).
+                            esc_us = map_norm_to_pwm(nav_info["throttle_norm"], pwm_cfg["esc_neutral_us"],
+                                                     pwm_cfg["esc_rev_max_us"], pwm_cfg["esc_fwd_max_us"])
+                        else:
+                            thr_blend = max(0.0, min(1.0, nav_info.get("throttle_blend", 0.0)))
+                            esc_us = int(round(
+                                auto_cruise_us
+                                + thr_blend * (pwm_cfg["esc_fwd_max_us"] - auto_cruise_us)
+                            ))
 
             # 4) Write the servo and ESC hardware outputs.
             pca.set_pwm_us(servo_ch, servo_us)
             pca.set_pwm_us(esc_ch, esc_us)
+            last_esc_us = esc_us
+            last_recovery_state = recovery_state
 
             # 5) Display the live terminal status line and write CSV telemetry.
             diagnostics = record_diagnostics(loop_t0, gps_snap)
@@ -1839,7 +2073,8 @@ def main(session_stamp=None):
                         gps_snap.get("course_deg"), gps_snap.get("course_speed_mps"),
                         *[nav_info.get(key) if nav_info else None for key in (
                             "lookahead_m", "lookahead_target_e_m", "lookahead_target_n_m", "cte_rate_mps",
-                            "predicted_cte_m", "prediction_status", "prediction_corridor_clearance_m", "throttle_target_blend")]
+                            "predicted_cte_m", "prediction_status", "prediction_corridor_clearance_m", "throttle_target_blend")],
+                        recovery_state
                     ])
                 except OSError as exc:
                     log_event(f"[LOG WARNING] Telemetry write failed: {exc}", logging.WARNING)
