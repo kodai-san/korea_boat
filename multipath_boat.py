@@ -52,7 +52,8 @@ import time
 from auto_strategies import (AUTO_STRATEGIES, apply_run_overrides, canonical_auto_strategy_name,
                              create_auto_strategy, resolve_recovery_config)
 from gps_heading import MotionHeadingSelector
-from path_guidance import StraightLineGuidance, interpolate_lookahead, plan_turn, square_corners, turn_arc
+from path_guidance import (StraightLineGuidance, interpolate_lookahead, plan_turn, plan_turn_by_time,
+                           square_corners, turn_arc)
 from recovery import StuckRecovery
 from spresense_stream import (
     SpresenseGPSStreamer, reserved_spresense_ports, same_serial_port,
@@ -1097,6 +1098,7 @@ class MultipathNavigator:
             self.rev_end = 0.0
             self.rev_start = 0.0
             self.rev_phi = 0.0
+            self.rev_dir = 0                 # Turn a three-point reverse is making room for (0 = either)
             self.reverses = 0
             opts = self.strategy.options
             if opts["test_square"]:
@@ -1354,6 +1356,26 @@ class MultipathNavigator:
             return plan_turn(dd, phi_deg, lead_m, opts["turn_radius_left_m"], opts["turn_radius_right_m"],
                              -line.bank_left_m, line.bank_right_m, opts["turn_tolerance_m"])
 
+        def directed_arc(dd, phi_deg, direction):
+            radius = opts["turn_radius_right_m"] if direction > 0 else opts["turn_radius_left_m"]
+            return turn_arc(dd, phi_deg, radius, direction, opts["turn_restart_lead_m"])
+
+        def room_for(dd, phi_deg, direction):
+            """Is there room to start the turn (the chosen one, or either when direction is 0) from here?"""
+            if direction == 0:
+                return plan(dd, phi_deg, opts["turn_restart_lead_m"])[1]
+            arc = directed_arc(dd, phi_deg, direction)
+            return max(-line.bank_left_m - arc["min_d"], arc["max_d"] - line.bank_right_m) <= opts["turn_tolerance_m"]
+
+        def start_reverse(phi_deg, direction, message):
+            self.reverses += 1
+            self.rev_phi, self.rev_dir = phi_deg, direction
+            self.rev_phase, self.rev_end = "plan_neutral_in", now_mono + opts["plan_neutral_sec"]
+            log_event(message + f" (max {opts['plan_reverse_max_sec']:g} s, attempt {self.reverses}/"
+                      f"{int(opts['plan_max_reverses'])})")
+            self.strategy.suspend()
+            return result("plan_neutral_in", 0.0, line.bearing_deg, throttle_blend=0.0, throttle_norm=0.0)
+
         def start_turn(arc, fits, phi_deg, reason):
             self.turn_dir = arc["direction"]
             line.set_line(arc["end_d"])
@@ -1372,7 +1394,7 @@ class MultipathNavigator:
             if self.rev_phase == "plan_neutral_in" and now_mono >= self.rev_end:
                 self.rev_phase, self.rev_start = "plan_reverse", now_mono
             if self.rev_phase == "plan_reverse":
-                _, room = plan(d, self.rev_phi, opts["turn_restart_lead_m"])
+                room = room_for(d, self.rev_phi, self.rev_dir)
                 if room or now_mono - self.rev_start >= opts["plan_reverse_max_sec"]:
                     self.rev_phase, self.rev_end = "plan_neutral_out", now_mono + opts["plan_neutral_sec"]
             if self.rev_phase == "plan_neutral_out" and now_mono >= self.rev_end:
@@ -1381,7 +1403,11 @@ class MultipathNavigator:
                 self.strategy.suspend()
                 throttle = -opts["plan_reverse_throttle"] if self.rev_phase == "plan_reverse" else 0.0
                 return result(self.rev_phase, 0.0, line.bearing_deg, throttle_blend=0.0, throttle_norm=throttle)
-            arc, fits = plan(d, self.rev_phi, opts["turn_restart_lead_m"])
+            if self.rev_dir and room_for(d, self.rev_phi, self.rev_dir):
+                arc = directed_arc(d, self.rev_phi, self.rev_dir)
+                fits = True
+            else:
+                arc, fits = plan(d, self.rev_phi, opts["turn_restart_lead_m"])
             start_turn(arc, fits, self.rev_phi, "after reversing,")
             # The course measured while reversing points backward: the selector waits for forward motion.
             reacquire = True
@@ -1399,18 +1425,33 @@ class MultipathNavigator:
                 lead = speed * opts["turn_delay_sec"]
                 if far:
                     arc, fits = plan(d, phi, lead)
+                    if opts.get("three_point_turns", False):
+                        can_reverse = self.reverses < opts["plan_max_reverses"]
+                        best = plan_turn_by_time(
+                            d, phi, lead, opts["turn_radius_left_m"], opts["turn_radius_right_m"],
+                            -line.bank_left_m, line.bank_right_m, opts["turn_tolerance_m"], opts["plan_cruise_mps"],
+                            opts["plan_reverse_mps"], opts["plan_restart_sec"], opts["plan_neutral_sec"],
+                            opts["plan_reverse_mps"] * opts["plan_reverse_max_sec"] if can_reverse else 0.0,
+                            opts["turn_restart_lead_m"])
+                        if best is not None and best["reverse_m"] > 0:
+                            side = "right" if best["direction"] > 0 else "left"
+                            alternative = (f"; best forward turn: {arc['sweep_deg']:.0f} deg {'right' if arc['direction'] > 0 else 'left'}"
+                                           if fits else "")
+                            return start_reverse(phi, best["direction"],
+                                                 f"[TURN PLAN] course {phi:+.0f} deg off at {d:+.2f} m: three-point turn, "
+                                                 f"reverse about {best['reverse_m']:.1f} m then turn {side} "
+                                                 f"{best['arc']['sweep_deg']:.0f} deg (estimated {best['cost_sec']:.1f} s"
+                                                 f"{alternative})")
+                        if best is not None:
+                            arc, fits = best["arc"], True
                     # Reversing only gains room when the bow points clearly toward the limit the turn would cross.
                     gains_room = math.sin(math.radians(phi)) * arc["violation_side"] > 0.3
                     if not fits and gains_room and self.reverses < opts["plan_max_reverses"]:
-                        self.reverses += 1
-                        self.rev_phi = phi
-                        self.rev_phase, self.rev_end = "plan_neutral_in", now_mono + opts["plan_neutral_sec"]
-                        log_event(f"[TURN PLAN] course {phi:+.0f} deg off at {d:+.2f} m: no turn fits the bank limits "
-                                  f"and the bow points toward the {'right' if arc['violation_side'] > 0 else 'left'} "
-                                  f"limit -> reverse until a turn fits (max {opts['plan_reverse_max_sec']:g} s, "
-                                  f"attempt {self.reverses}/{int(opts['plan_max_reverses'])})")
-                        self.strategy.suspend()
-                        return result("plan_neutral_in", 0.0, line.bearing_deg, throttle_blend=0.0, throttle_norm=0.0)
+                        return start_reverse(phi, 0,
+                                             f"[TURN PLAN] course {phi:+.0f} deg off at {d:+.2f} m: no turn fits the bank "
+                                             f"limits and the bow points toward the "
+                                             f"{'right' if arc['violation_side'] > 0 else 'left'} limit -> reverse until a "
+                                             f"turn fits")
                     start_turn(arc, fits, phi, "")
                 elif first:
                     # The turn onto the race direction ends here, so start the line there.
@@ -1735,6 +1776,8 @@ def main(session_stamp=None):
                             help=f"07: line limit on the {side} only, X m from the centerline (JSON line_{side}_m)")
         parser.add_argument(f"--bank-{side}", type=float, default=None, metavar="X",
                             help=f"07: bank limit on the {side} only, X m from the centerline (JSON bank_{side}_m)")
+    parser.add_argument("--three-point-turns", action="store_true",
+                        help="07: choose turn right / turn left / reverse-then-turn by estimated time")
     parser.add_argument("--no-turn-planner", action="store_true",
                         help="07: turn the short way round instead of planning the turn against the bank limits")
     parser.add_argument("--test-square", action="store_true",
@@ -1752,7 +1795,8 @@ def main(session_stamp=None):
             bank_limit_m=args.bank_limit, test_square=True if args.test_square else None,
             recovery=False if args.no_recovery else None, line_left_m=args.line_left, line_right_m=args.line_right,
             bank_left_m=args.bank_left, bank_right_m=args.bank_right,
-            turn_planner=False if args.no_turn_planner else None)
+            turn_planner=False if args.no_turn_planner else None,
+            three_point_turns=True if args.three_point_turns else None)
         auto_strategy = create_auto_strategy(auto_config, nav_params)
         recovery = StuckRecovery(resolve_recovery_config(auto_config))
     except ValueError as exc:

@@ -41,6 +41,7 @@ python3 multipath_boat.py                      # 05_straight_line (calibration.j
 python3 multipath_boat.py --use-04             # back to 04
 python3 multipath_boat.py --auto-strategy 07_turn_planner                  # 05 + turn planner, per-side limits
 python3 multipath_boat.py --auto-strategy 07_turn_planner --bank-right 4.5  # one side only (07)
+python3 multipath_boat.py --auto-strategy 07_turn_planner --three-point-turns  # reverse-then-turn when faster (07)
 python3 multipath_boat.py --line-limit 1.0 --bank-limit 3.0
 python3 multipath_boat.py --test-square        # drive the boundary rectangles, then stop
 python3 analyse_square.py logs/multipath_log_<stamp>.csv

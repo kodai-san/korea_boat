@@ -520,6 +520,12 @@ class TurnPlannerStrategy(StraightLineStrategy):
         plan_reverse_max_sec=4.0,
         plan_reverse_throttle=0.5,
         plan_max_reverses=2.0,
+        # Three-point turns: choose the fastest of turn right / turn left / reverse-then-turn by estimated time,
+        # even when a long forward turn fits (e.g. a 254 deg circle vs a short reverse and a 106 deg turn).
+        three_point_turns=False,
+        plan_cruise_mps=1.6,
+        plan_reverse_mps=0.5,
+        plan_restart_sec=0.6,
     )
     option_limits = dict(
         {key: (0.0, 90.0 if key.endswith("_deg") else None)
@@ -537,7 +543,8 @@ class TurnPlannerStrategy(StraightLineStrategy):
                     "forward_acquire_sec", "forward_memory_sec", "bank_left_m", "bank_right_m", "max_intercept_deg",
                     "recovery_intercept_deg", "lookahead_time_sec", "lookahead_min_m", "lookahead_max_m",
                     "prediction_horizon_sec", "course_gain", "turn_plan_deg", "turn_radius_left_m",
-                    "turn_radius_right_m", "plan_reverse_max_sec", "test_leg_length_m", "test_accept_m"):
+                    "turn_radius_right_m", "plan_reverse_max_sec", "test_leg_length_m", "test_accept_m",
+                    "plan_cruise_mps", "plan_reverse_mps"):
             if resolved[key] <= 0.0:
                 raise ValueError(f"autonomous.{cls.name}.{key} must be greater than zero")
         for side in ("left", "right"):
@@ -551,7 +558,7 @@ class TurnPlannerStrategy(StraightLineStrategy):
             raise ValueError(f"autonomous.{cls.name}.turn_exit_deg must be less than turn_plan_deg")
         if not float(resolved["plan_max_reverses"]).is_integer():
             raise ValueError(f"autonomous.{cls.name}.plan_max_reverses must be a whole number")
-        for key in ("test_square", "turn_planner"):
+        for key in ("test_square", "turn_planner", "three_point_turns"):
             if not isinstance(resolved[key], bool):
                 raise ValueError(f"autonomous.{cls.name}.{key} must be true or false")
         return resolved
@@ -566,7 +573,8 @@ class TurnPlannerStrategy(StraightLineStrategy):
             f"full {full_us} us whenever AUTO is steering; straight line from AUTO entry "
             f"(line within -{o['line_left_m']:.1f}/+{o['line_right_m']:.1f} m of the centerline, "
             f"bank limits -{o['bank_left_m']:.1f}/+{o['bank_right_m']:.1f} m); "
-            + ("turn planner on; " if o["turn_planner"] else "turn planner off; ")
+            + ("turn planner on" + (" with three-point turns; " if o["three_point_turns"] else "; ")
+               if o["turn_planner"] else "turn planner off; ")
             + f"course PI, integral {o['course_integral_gain']:.2f}/s"
             + (f"; TEST SQUARE at {100 * o['test_throttle']:.0f}% throttle" if o["test_square"] else "")
         )
@@ -637,11 +645,12 @@ def default_autonomous_config():
 
 def apply_run_overrides(config, strategy=None, use_04=False, line_limit_m=None, bank_limit_m=None,
                         test_square=None, recovery=None, line_left_m=None, line_right_m=None,
-                        bank_left_m=None, bank_right_m=None, turn_planner=None):
+                        bank_left_m=None, bank_right_m=None, turn_planner=None, three_point_turns=None):
     """Return a copy of the autonomous section with command-line choices applied (None keeps the JSON).
 
     The line/bank limit and test-square choices go to 07's block when 07 is selected, otherwise to 05's.
-    line_limit_m / bank_limit_m set both sides; the per-side values and turn_planner exist only in 07.
+    line_limit_m / bank_limit_m set both sides; the per-side values, turn_planner and three_point_turns exist
+    only in 07.
     """
     config = normalize_autonomous_config(config)
     if strategy is not None:
@@ -649,7 +658,7 @@ def apply_run_overrides(config, strategy=None, use_04=False, line_limit_m=None, 
     if use_04:
         config["use_04_control"] = True
     per_side = {"line_left_m": line_left_m, "line_right_m": line_right_m, "bank_left_m": bank_left_m,
-                "bank_right_m": bank_right_m, "turn_planner": turn_planner}
+                "bank_right_m": bank_right_m, "turn_planner": turn_planner, "three_point_turns": three_point_turns}
     if config["strategy"] == TurnPlannerStrategy.name:
         target = TurnPlannerStrategy.name
         line_options = {"line_left_m": line_limit_m, "line_right_m": line_limit_m, "bank_left_m": bank_limit_m,
@@ -657,7 +666,7 @@ def apply_run_overrides(config, strategy=None, use_04=False, line_limit_m=None, 
         line_options.update({key: value for key, value in per_side.items() if value is not None})
     else:
         if any(value is not None for value in per_side.values()):
-            raise ValueError("per-side limits and the turn planner switch apply to "
+            raise ValueError("per-side limits, the turn planner switch and three-point turns apply to "
                              f"{TurnPlannerStrategy.name} only (select it with --auto-strategy)")
         target = StraightLineStrategy.name
         line_options = {"line_max_offset_m": line_limit_m, "band_half_width_m": bank_limit_m,

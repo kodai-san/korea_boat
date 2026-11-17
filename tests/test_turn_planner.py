@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 import multipath_boat as mb  # noqa: E402
 import test_race_features as loop_harness  # noqa: E402
 from auto_strategies import create_auto_strategy  # noqa: E402
-from path_guidance import plan_turn, turn_arc  # noqa: E402
+from path_guidance import plan_turn, plan_turn_by_time, turn_arc  # noqa: E402
 
 NAME = "07_turn_planner"
 DEFAULTS = create_auto_strategy({"strategy": NAME}, mb.NAV_PARAMS).options
@@ -203,6 +203,70 @@ class PlannerNavigatorTest(unittest.TestCase):
         self.assertLess(wrap(info["target_bearing_deg"] - (self.line.bearing_deg + 137.0)), 0.0)
 
 
+class ThreePointTurnTest(unittest.TestCase):
+    """--three-point-turns: pick turn right / turn left / reverse-then-turn by estimated time."""
+
+    def by_time(self, d, phi, speed, **overrides):
+        o = dict(DEFAULTS, **overrides)
+        return plan_turn_by_time(d, phi, lead(speed), o["turn_radius_left_m"], o["turn_radius_right_m"], LOW, HIGH,
+                                 o["turn_tolerance_m"], o["plan_cruise_mps"], o["plan_reverse_mps"],
+                                 o["plan_restart_sec"], o["plan_neutral_sec"],
+                                 o["plan_reverse_mps"] * o["plan_reverse_max_sec"], o["turn_restart_lead_m"])
+
+    def test_short_reverse_and_short_turn_beats_a_full_circle(self):
+        best = self.by_time(0.44, 106.0, 1.65)                   # Route 3: the forward-only planner turns right 254 deg
+        self.assertEqual(best["direction"], -1)
+        self.assertGreater(best["reverse_m"], 0.0)
+        self.assertLess(best["reverse_m"], 0.5)
+        self.assertAlmostEqual(best["arc"]["sweep_deg"], 106.0, places=0)
+
+    def test_no_reverse_when_the_forward_turn_is_quicker(self):
+        best = self.by_time(3.28, 137.0, 1.4)                    # Route 6
+        self.assertEqual((best["direction"], best["reverse_m"]), (+1, 0.0))
+
+    def test_slow_restart_makes_the_full_circle_win(self):
+        best = self.by_time(0.44, 106.0, 1.65, plan_restart_sec=20.0)
+        self.assertEqual((best["direction"], best["reverse_m"]), (+1, 0.0))
+
+    def test_cost_counts_ground_lost_behind_the_start(self):
+        # The 254 deg circle finishes about 2 m behind its start; the 106 deg turn finishes ahead.
+        circle = turn_arc(0.44, 106.0, R_RIGHT, +1)
+        short = turn_arc(0.44, 106.0, R_LEFT, -1)
+        self.assertLess(circle["advance_m"], -1.5)
+        self.assertGreater(short["advance_m"], 2.5)
+
+    def test_navigator_reverses_for_the_chosen_turn_then_turns(self):
+        nav_test = PlannerNavigatorTest("test_line_limits_are_per_side")
+        nav_test.setUp(three_point_turns=True)
+        nav_test.nav.enter_auto_mode(*nav_test.latlon(35.0, 0.44), now_mono=0.0)
+        start = nav_test.step(35.0, 0.44, 106.0, 0.7, speed=1.65)
+        self.assertEqual(start["prediction_status"], "plan_neutral_in")
+        self.assertEqual(nav_test.nav.rev_dir, -1)
+        t = 0.7 + DEFAULTS["plan_neutral_sec"] + 0.05
+        self.assertEqual(nav_test.step(35.0, 0.44, -74.0, t, speed=0.3)["prediction_status"], "plan_reverse")
+        done = nav_test.step(34.9, 0.10, -74.0, t + 1.0, speed=0.4)          # Backed off: the left turn fits
+        self.assertEqual(done["prediction_status"], "plan_neutral_out")
+        turn = nav_test.step(34.9, 0.10, -74.0, t + 1.0 + DEFAULTS["plan_neutral_sec"] + 0.05, speed=0.1)
+        self.assertEqual(turn["prediction_status"], "turn_left")
+        self.assertLess(turn["steer_norm"], 0.0)
+
+    def test_flag_off_keeps_the_forward_only_planner(self):
+        nav_test = PlannerNavigatorTest("test_line_limits_are_per_side")
+        nav_test.setUp()
+        nav_test.nav.enter_auto_mode(*nav_test.latlon(35.0, 0.44), now_mono=0.0)
+        self.assertEqual(nav_test.step(35.0, 0.44, 106.0, 0.7, speed=1.65)["prediction_status"], "turn_right")
+
+    def test_flag_is_07_only(self):
+        from auto_strategies import apply_run_overrides
+        auto = mb.load_calibration(os.path.join(os.path.dirname(__file__), "..", "calibration.json"))["autonomous"]
+        with self.assertRaises(ValueError):
+            apply_run_overrides(dict(auto, strategy="05_straight_line"), three_point_turns=True)
+        strategy = create_auto_strategy(apply_run_overrides(dict(auto, strategy=NAME), three_point_turns=True),
+                                        mb.NAV_PARAMS)
+        self.assertTrue(strategy.options["three_point_turns"])
+        self.assertIn("three-point", strategy.describe_throttle(1914, 1990))
+
+
 class SeparateFrom05Test(unittest.TestCase):
     """07 is a separate strategy: 05 keeps the night-test behaviour (symmetric limits, no planner)."""
 
@@ -269,6 +333,13 @@ class PlannerAutoLoopTest(unittest.TestCase):
         self.assertIn("[TURN PLAN]", events)
         self.assertIn("reverse until a turn fits", events)
         self.assertTrue(all(r["recovery_state"] == "" for r in rows))       # Not mistaken for being stuck
+
+    def test_three_point_flag_from_the_command_line(self):
+        # 0.5 m right of the centerline, 106 deg off: the forward-only planner would circle 254 deg to the right.
+        rows, events, _ = self.run_loop(argv=["--auto-strategy", NAME, "--three-point-turns"], speed=1.65,
+                                        cycles=60, course_deg=106.0, offset_m=0.5)
+        self.assertIn("three-point turn, reverse about", events)
+        self.assertIn("plan_reverse", [r["prediction_status"] for r in rows])
 
     def test_command_line_selects_07_with_one_sided_limit(self):
         rows, events, _ = self.run_loop(argv=["--auto-strategy", NAME, "--test-square", "--bank-right", "4.5"],

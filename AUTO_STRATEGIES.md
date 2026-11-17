@@ -532,6 +532,23 @@ entry, below `min_course_speed_mps`, without an RTK-trusted course, in the bank
 zones, and when the course error exceeds `integral_max_error_deg`. Without a
 course the rudder holds the learned trim (zero at launch).
 
+**Three-point turns (`three_point_turns`, off by default; `--three-point-turns`).**
+The planner above only reverses when no forward turn fits. With this flag it
+compares turn right, turn left, and reverse-then-turn by estimated time and
+takes the fastest, even when a long forward turn fits. The estimate is the turn
+time plus the ground lost along the race direction at `plan_cruise_mps` (a
+254-degree circle finishes about 2 m behind its start), plus, for a reverse, two
+neutral pauses, the reverse at `plan_reverse_mps` and `plan_restart_sec` for
+stopping and starting again. Example (17 Nov route 3, 106 degrees off on the
+centreline): forward only, the boat circles 254 degrees right; with the flag it
+reverses about 0.2 m and turns 106 degrees left, about 3.4 s faster in a simple
+model. The boat reverses until the chosen turn fits (at most
+`plan_reverse_max_sec`), then turns at once. Leave it off until a land check has
+shown that this ESC reverses after the neutral pause, and measure
+`plan_restart_sec` then: a slow ESC makes the full circle the better choice. The
+event log records `[TURN PLAN] ... three-point turn, reverse about X m then turn
+...`.
+
 `--no-turn-planner` (or `"turn_planner": false`) makes 07 turn the short way
 round like 05 and keep the line at the entry point; the per-side limits stay.
 
@@ -546,6 +563,8 @@ round like 05 and keep the line at the entry point; the per-side limits stay.
 | `turn_tolerance_m` | 0.3 | Predicted overshoot of a bank limit still accepted as fitting. |
 | `plan_neutral_sec`, `plan_reverse_max_sec`, `plan_reverse_throttle`, `plan_max_reverses` | 0.3, 4.0, 0.5, 2 | The reverse-then-turn manoeuvre (reverse until a turn fits, at most 4 s). |
 | `turn_restart_lead_m` | 0.2 | Straight travel assumed before the turn bites when starting from rest after a reverse. |
+| `three_point_turns` | false | Choose turn right / turn left / reverse-then-turn by estimated time. |
+| `plan_cruise_mps`, `plan_reverse_mps`, `plan_restart_sec` | 1.6, 0.5, 0.6 | Speeds and the stop-start penalty used in that estimate. |
 | other options | as 05 | Line following, PI steering, bank guard, test square. |
 
 ## Stuck recovery (all strategies)
