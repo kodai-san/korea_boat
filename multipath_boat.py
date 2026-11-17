@@ -460,6 +460,7 @@ class ZEDF9PReceiver:
         # after a no-fix GGA, which must not be mixed into the new USB sample.
         self.latest_gps_sample = None
         self.last_fix_time = 0.0
+        self.last_rx_mono = 0.0           # Last serial line of any kind (for link watchdogs)
         self.rtcm_bytes_written = 0
         self.rtcm_write_errors = 0
         self.last_rtcm_write_error = ""
@@ -611,66 +612,73 @@ class ZEDF9PReceiver:
         self._course_time_seconds = seconds
         self.course_valid = course is not None
 
+    def ingest_nmea_line(self, line):
+        """Parse one NMEA sentence for the shared threaded GPS receiver.
+
+        Malformed numeric fields raise ValueError; callers decide how to recover.
+        """
+        if not line.startswith("$") or not verify_nmea_checksum(line):
+            return
+
+        fields = line.split("*")[0].split(",")
+        talker_msg = fields[0]
+
+        if talker_msg.endswith("GGA") and len(fields) >= 10:
+            qual = int(fields[6]) if fields[6].isdigit() else 0
+            sats = int(fields[7]) if fields[7].isdigit() else 0
+            hdop = float(fields[8]) if fields[8] else 99.9
+            lat = parse_nmea_latlon(fields[2], fields[3]) if qual > 0 else None
+            lon = parse_nmea_latlon(fields[4], fields[5]) if qual > 0 else None
+            # Logging-only fields: never let a malformed value discard the position fix.
+            alt = parse_float_or_none(fields[9])
+            diff_age = parse_float_or_none(fields[13]) if len(fields) > 13 else None
+
+            with self.state_lock:
+                self.latest_gps_sample = {
+                    "timestamp": fields[1],  # Original GGA UTC time, never USB send time.
+                    "fix_quality": qual,
+                    "latitude": lat,
+                    "longitude": lon,
+                    "num_sats": sats,
+                    "hdop": hdop if fields[8] else None,
+                }
+                self.fix_quality = qual
+                self.num_sats = sats
+                self.hdop = hdop
+                self.alt_m = alt
+                self.diff_age_sec = diff_age
+                self.gps_utc = fields[1]
+                self._update_position_observation(lat, lon, fields[1], qual)
+                if qual > 0 and lat is not None and lon is not None:
+                    self.lat = lat
+                    self.lon = lon
+                    self.latest_gga_raw = line
+                    self.last_fix_time = time.monotonic()
+                    self._update_movement_heading(lat, lon, self.sog_mps, self.cog_deg)
+
+        elif talker_msg.endswith("RMC"):
+            with self.state_lock:
+                self._update_course_observation(fields)
+            if len(fields) >= 9 and fields[2] == "A":
+                knots = float(fields[7]) if fields[7] else 0.0
+                sog = knots * 0.514444
+                cog = float(fields[8]) if fields[8] else None
+                with self.state_lock:
+                    self.sog_mps = sog
+                    self.cog_deg = cog
+                    # Apply the Doppler course as soon as it arrives, whatever the GGA/RMC order.
+                    if (NAV_PARAMS.get("heading_source", "blend") == "cog" and cog is not None
+                            and self._anchor_lat is not None and sog >= NAV_PARAMS["sog_cog_blend_mps"]):
+                        self.heading_deg = cog % 360.0
+
     def _read_loop(self):
         while self.running:
             try:
                 raw = self.ser.readline()
                 if not raw:
                     continue
-                line = raw.decode("ascii", errors="ignore").strip()
-                if not line.startswith("$") or not verify_nmea_checksum(line):
-                    continue
-
-                fields = line.split("*")[0].split(",")
-                talker_msg = fields[0]
-
-                if talker_msg.endswith("GGA") and len(fields) >= 10:
-                    qual = int(fields[6]) if fields[6].isdigit() else 0
-                    sats = int(fields[7]) if fields[7].isdigit() else 0
-                    hdop = float(fields[8]) if fields[8] else 99.9
-                    lat = parse_nmea_latlon(fields[2], fields[3]) if qual > 0 else None
-                    lon = parse_nmea_latlon(fields[4], fields[5]) if qual > 0 else None
-                    # Logging-only fields: never let a malformed value discard the position fix.
-                    alt = parse_float_or_none(fields[9])
-                    diff_age = parse_float_or_none(fields[13]) if len(fields) > 13 else None
-
-                    with self.state_lock:
-                        self.latest_gps_sample = {
-                            "timestamp": fields[1],  # Original GGA UTC time, never USB send time.
-                            "fix_quality": qual,
-                            "latitude": lat,
-                            "longitude": lon,
-                            "num_sats": sats,
-                            "hdop": hdop if fields[8] else None,
-                        }
-                        self.fix_quality = qual
-                        self.num_sats = sats
-                        self.hdop = hdop
-                        self.alt_m = alt
-                        self.diff_age_sec = diff_age
-                        self.gps_utc = fields[1]
-                        self._update_position_observation(lat, lon, fields[1], qual)
-                        if qual > 0 and lat is not None and lon is not None:
-                            self.lat = lat
-                            self.lon = lon
-                            self.latest_gga_raw = line
-                            self.last_fix_time = time.monotonic()
-                            self._update_movement_heading(lat, lon, self.sog_mps, self.cog_deg)
-
-                elif talker_msg.endswith("RMC"):
-                    with self.state_lock:
-                        self._update_course_observation(fields)
-                    if len(fields) >= 9 and fields[2] == "A":
-                        knots = float(fields[7]) if fields[7] else 0.0
-                        sog = knots * 0.514444
-                        cog = float(fields[8]) if fields[8] else None
-                        with self.state_lock:
-                            self.sog_mps = sog
-                            self.cog_deg = cog
-                            # Apply the Doppler course as soon as it arrives, whatever the GGA/RMC order.
-                            if (NAV_PARAMS.get("heading_source", "blend") == "cog" and cog is not None
-                                    and self._anchor_lat is not None and sog >= NAV_PARAMS["sog_cog_blend_mps"]):
-                                self.heading_deg = cog % 360.0
+                self.last_rx_mono = time.monotonic()
+                self.ingest_nmea_line(raw.decode("ascii", errors="ignore").strip())
             except Exception:
                 time.sleep(0.02)
 
@@ -1024,6 +1032,8 @@ class MultipathNavigator:
                 self.strategy.options["line_max_offset_m"])
 
         self.active_lane = "center"
+        # False keeps the boat on its lane (boat.py "fixed path"); wall guards still apply.
+        self.allow_lane_shift = True
         self.target_idx = 1
         self.guidance_segment_idx = 0    # Continuous projection progress, independent of waypoint arrival radius.
         self.disturb_dir = 0             # -1: leftward drift, 0: no drift, +1: rightward drift
@@ -1068,10 +1078,12 @@ class MultipathNavigator:
 
         return best_seg_idx, best_dist_m, best_cte_right, best_seg_bearing
 
-    def enter_auto_mode(self, boat_lat, boat_lon, now_mono=None):
-        """On AUTO entry, select the nearest path and a target waypoint ahead of the boat."""
+    def enter_auto_mode(self, boat_lat, boat_lon, now_mono=None, lane=None):
+        """On AUTO entry, select the nearest path (or the given lane) and a target waypoint ahead of the boat."""
         if now_mono is None:
             now_mono = time.monotonic()
+        if lane is not None and lane not in self.LANE_ORDER:
+            raise ValueError(f"Unknown lane {lane!r}")
 
         bx, by = latlon_to_enu(boat_lat, boat_lon, self.ref_lat, self.ref_lon)
 
@@ -1095,7 +1107,7 @@ class MultipathNavigator:
         best_dist = float("inf")
         best_seg = 0
 
-        for lane in self.LANE_ORDER:
+        for lane in ([lane] if lane is not None else self.LANE_ORDER):
             seg_idx, dist_m, _, _ = self._closest_segment_metrics(lane, bx, by, start_idx=0)
             if dist_m < best_dist:
                 best_dist = dist_m
@@ -1405,7 +1417,8 @@ class MultipathNavigator:
         if cte_right_m >= self.params["shift_cte_m"]:
             if lane_idx < 2:  # A left -> center or center -> right shift is possible.
                 not_recovering = (drift_deg >= -self.params["drift_oppose_tol_deg"])
-                if not_recovering and (now_mono - self.last_shift_t >= self.params["shift_cooldown_sec"]):
+                if (self.allow_lane_shift and not_recovering
+                        and now_mono - self.last_shift_t >= self.params["shift_cooldown_sec"]):
                     if self.disturb_dir != 1:
                         self.disturb_dir = 1
                         self.disturb_start_t = now_mono
@@ -1425,7 +1438,8 @@ class MultipathNavigator:
         elif cte_right_m <= -self.params["shift_cte_m"]:
             if lane_idx > 0:  # A right -> center or center -> left shift is possible.
                 not_recovering = (drift_deg <= self.params["drift_oppose_tol_deg"])
-                if not_recovering and (now_mono - self.last_shift_t >= self.params["shift_cooldown_sec"]):
+                if (self.allow_lane_shift and not_recovering
+                        and now_mono - self.last_shift_t >= self.params["shift_cooldown_sec"]):
                     if self.disturb_dir != -1:
                         self.disturb_dir = -1
                         self.disturb_start_t = now_mono

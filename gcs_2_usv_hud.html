@@ -1972,6 +1972,7 @@
       drivePwm: 4520,
       targetPath: "Center",
       pathAutoSwitch: true,
+      autoGuidance: "",
       wpIndex: 1,
       wpTotal: totalWaypoints,
       wpDist: 1.44,
@@ -2690,20 +2691,23 @@
       document.getElementById("distValCenter").textContent = `${state.distCenter.toFixed(2)} m`;
       document.getElementById("distValRight").textContent = `${state.distRight.toFixed(2)} m`;
 
-      document.getElementById("distBoxLeft").classList.toggle("active-path", state.targetPath === "Left");
-      document.getElementById("distBoxCenter").classList.toggle("active-path", state.targetPath === "Center");
-      document.getElementById("distBoxRight").classList.toggle("active-path", state.targetPath === "Right");
+      const lineGuidance = Boolean(state.autoGuidance);
+      document.getElementById("distBoxLeft").classList.toggle("active-path", !lineGuidance && state.targetPath === "Left");
+      document.getElementById("distBoxCenter").classList.toggle("active-path", !lineGuidance && state.targetPath === "Center");
+      document.getElementById("distBoxRight").classList.toggle("active-path", !lineGuidance && state.targetPath === "Right");
 
       const isAutoPath = state.pathAutoSwitch !== false;
       const korLane = state.targetPath === "Left" ? "PORT" : state.targetPath === "Right" ? "STBD" : "CENTER";
       const pathAutoBtn = document.getElementById("btnPathAutoMode");
       if (pathAutoBtn) {
+        pathAutoBtn.disabled = lineGuidance;
         pathAutoBtn.classList.toggle("active", isAutoPath);
         pathAutoBtn.style.borderColor = isAutoPath ? "" : "var(--sig-caution)";
         pathAutoBtn.style.color = isAutoPath ? "" : "var(--sig-caution)";
-        pathAutoBtn.textContent = isAutoPath ? `AUTO (${korLane})` : `${korLane} LOCKED · resume AUTO`;
+        pathAutoBtn.textContent = lineGuidance ? state.autoGuidance : isAutoPath ? `AUTO (${korLane})` : `${korLane} LOCKED · resume AUTO`;
       }
       const pathSelect = document.getElementById("demoPathSelect");
+      if (pathSelect) pathSelect.disabled = lineGuidance;
       const wantSel = isAutoPath ? "AUTO" : state.targetPath;
       if (pathSelect && pathSelect.value !== wantSel) pathSelect.value = wantSel;
 
@@ -2754,7 +2758,7 @@
       document.getElementById("autoSpeedVal").textContent = state.speed.toFixed(1);
       document.getElementById("autoHeadingText").textContent = `${Math.round(state.heading)}°`;
       document.getElementById("autoRemainTotalText").textContent = `REM ${remainM.toFixed(1)}m / ${knots} kt`;
-      document.getElementById("autoPathBadge").textContent = `${state.targetPath === "Left" ? "PORT" : state.targetPath === "Right" ? "STBD" : "CENTER"} · ${state.pathAutoSwitch !== false ? "AUTO" : "LOCK"}`;
+      document.getElementById("autoPathBadge").textContent = state.autoGuidance || `${state.targetPath === "Left" ? "PORT" : state.targetPath === "Right" ? "STBD" : "CENTER"} · ${state.pathAutoSwitch !== false ? "AUTO" : "LOCK"}`;
       document.getElementById("autoWpCur").textContent = state.wpIndex;
       document.getElementById("autoWpTotal").textContent = state.wpTotal;
       document.getElementById("autoDistVal").textContent = state.wpDist.toFixed(2);
@@ -4145,6 +4149,7 @@
           distLeft: data.distLeft,
           distCenter: data.distCenter,
           distRight: data.distRight,
+          autoGuidance: data.autoGuidance || "",
           fixStatus: data.fixStatus,
           satellites: data.satellites,
           hdop: data.hdop,

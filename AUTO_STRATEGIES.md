@@ -60,6 +60,60 @@ These commands launch the normal boat controller and initialize its hardware.
 `--config path/to/calibration.json` selects a different configuration file.
 The calibration tool preserves the autonomous section when loading and saving.
 
+## boat.py (web control page)
+
+`boat.py` uses the same AUTO controller: the multipath navigator, the strategy
+selected here, the GPS-course heading selector, and `navigation.finish_margin_m`.
+It also uses the same hardware calibration as multipath_boat.py. At start-up it
+reads `hardware`, `rc`, `pwm`, `mode_switch`, `autonomous` and `navigation` from
+`calibration.json`, and it refuses to start without that file.
+
+- **Hardware:** boat.py talks to the hardware with multipath_boat.py's own
+  drivers, so both programs behave the same way. The serial ports, baud rates,
+  PCA9685 bus, address, frequency, servo channel and ESC channel come from
+  `hardware`.
+  - **Motor and steering:** `PCA9685Driver`, a direct I2C driver that takes
+    microseconds. It needs `smbus2` (`pip3 install smbus2`).
+  - **RC:** `ArduinoRCReader` reads the Arduino's `CH1,CH2` lines in its own thread.
+  - **GPS:** `ZEDF9PReceiver` reads the ZED-F9P in its own thread, and
+    `NGII_NtripClient` injects the RTCM corrections through the same receiver.
+    The NTRIP login is in `NTRIP_CONFIG` in multipath_boat.py, not in boat.py.
+  - **Ports:** `"auto"` uses the same USB-ID detection as multipath_boat.py. A
+    background thread opens the ports and reopens them after an unplug, so a
+    reconnect never stalls the control loop. A GPS port that stays silent for 5 s
+    is reopened.
+- **PWM:** the web page and the controllers keep boat.py's internal scale
+  (`CENTER` 4500, `STOP` 4443, `max_GO`). Only the output to the PCA9685 is
+  converted:
+  - `CENTER`..`max_LEFT`/`max_RIGHT` becomes `servo_center_us`..`servo_left_us`/`servo_right_us`.
+  - `STOP`..4800 becomes `esc_neutral_us`..`esc_fwd_max_us`.
+  - `STOP`..`max_BACK` becomes `esc_neutral_us`..`esc_rev_max_us`.
+
+  `max_GO` presets above 4800 are capped at `esc_fwd_max_us`, so the 5000–5200
+  presets give no more thrust than 4800.
+- **RC:** the stick pulses are normalized with the `rc` neutral, end-point and
+  deadband values, so reversed channels work. The emergency override triggers on
+  85% steering either way, or on `mode_switch.full_reverse_ratio_threshold`
+  reverse.
+- **Steering:** the strategy's [-1, 1] output maps to `CENTER`..`max_RIGHT`
+  (positive) or `CENTER`..`max_LEFT` (negative). `STEER_SIGN = -1` swaps sides.
+- **Throttle:** cruise is `auto_throttle_ratio` of the way from `STOP` to the web
+  page's `max_GO`, and full power is `max_GO`. With a ratio of 1.0, cruise and
+  full power are the same.
+- **Lanes:** the web page's lane lock sets the AUTO lane and turns off lane
+  changes for lane-based strategies. With `05_straight_line`, AUTO entry draws
+  the course line; the dashboard labels straight-line or test-square guidance
+  and disables lane selection. Test-square mode uses its configured test throttle.
+  Wall-guard recovery still applies during normal straight-line guidance.
+- **Safety:** boat.py keeps its own failsafes. These are the RC override, E-stop,
+  link-loss hold, GPS timeout, the 1 s bad-fix stop, the 5 s stall stop, and a 5 s
+  no-heading stop.
+- **Log columns:** the `auto_log_*.csv` file has these extra columns: `CTE_m`,
+  `Strategy`, `ThrottleBlend`, `HeadingSrc` and `WallGuard`.
+
+The web page's P/PID steering gains no longer affect AUTO. The camera BALLOON
+mode is unchanged.
+
 ## Finish margin
 
 Set `navigation.finish_margin_m` in `calibration.json` to continue past the finish
