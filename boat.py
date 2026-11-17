@@ -2,15 +2,14 @@
 
 MANUAL: move either RC stick to take ownership from the dashboard. Hold
 neutral throttle + right steering for the calibrated duration (default 2 s)
-to enter AUTO with valid GPS. RC-started AUTO requires a live receiver and
-can run without the dashboard. Release the entry steering before another
-right-steering takeover; full reverse and full left always remain available.
-AUTO/BALLOON: full steering either way (85%) or full reverse (calibrated
-threshold) takes ownership without an arming delay. Web-only mode and GCS
-link hold do not disable takeover. Ownership persists at neutral and after
-RC loss (which commands stop after 0.5 s). To hand back to the dashboard,
-center the sticks and explicitly select a mode, or use the RC AUTO gesture.
-E-stop remains authoritative.
+to enter VISION (BALLOON) with a live camera. Release the entry steering
+before another right-steering takeover; full reverse and full left always
+remain available. AUTO/BALLOON: full steering either way (85%) or full
+reverse (calibrated threshold) takes ownership without an arming delay.
+Web-only mode and GCS link hold do not disable takeover. Ownership persists
+at neutral and after RC loss (which commands stop after 0.5 s). To hand
+back to the dashboard, center the sticks and explicitly select a mode, or
+use the RC VISION gesture. E-stop remains authoritative.
 This software path requires a running controller and working RC/I2C hardware.
 """
 
@@ -2205,7 +2204,7 @@ def main_loop():
             pending_web_cmd["cmd"] = None
             pending_web_cmd["value"] = None
 
-        # A deliberate RC gesture uses the same AUTO initialization as the dashboard.
+        # A deliberate RC gesture uses the same VISION (BALLOON) init as the dashboard.
         rc_auto_gesture_input = (
             rc_ok and rc_throttle_norm(last_raw_th) == 0.0
             and rc_steer_norm(last_raw_st) >= HW["auto_right_ratio"]
@@ -2213,7 +2212,7 @@ def main_loop():
         rc_auto_gesture = current_mode == "MANUAL" and not estop_active and rc_auto_gesture_input
         if not rc_auto_gesture:
             rc_auto_hold_start = None
-            # A held entry gesture cannot restart AUTO after a finish/failsafe.
+            # A held entry gesture cannot restart VISION after a finish/failsafe.
             if not rc_auto_gesture_input:
                 rc_auto_gesture_consumed = False
         elif not rc_auto_gesture_consumed:
@@ -2221,7 +2220,7 @@ def main_loop():
                 rc_auto_hold_start = now_mono
             elif now_mono - rc_auto_hold_start >= HW["auto_hold_sec"]:
                 rc_auto_gesture_consumed = True
-                cmds_to_process.append({"cmd": "set_mode", "value": "AUTO", "source": "rc"})
+                cmds_to_process.append({"cmd": "set_mode", "value": "BALLOON", "source": "rc"})
 
         for _cmd_item in cmds_to_process:
           cmd = _cmd_item["cmd"]
@@ -2321,6 +2320,8 @@ def main_loop():
                       add_event_log("FAILSAFE", "Pi camera not ready -> BALLOON entry rejected", "warn")
                   else:
                       current_mode = "BALLOON"
+                      rc_manual_latched = False
+                      rc_entry_steer_held = from_rc
                       stall_check_start_t = 0.0
                       balloon_arrive_count = 0
                       balloon_mode_start_t = now
@@ -2330,7 +2331,11 @@ def main_loop():
                       ST_V, TH_V = ST_NEU, TH_NEU
                       with state_lock:
                           shared_state["mode"] = current_mode
-                      add_event_log("BALLOON", "Web command -> VISION (optical target tracking)", "auto")
+                      add_event_log(
+                          "BALLOON",
+                          f"{'RC gesture' if from_rc else 'Web command'} -> VISION (optical target tracking)",
+                          "auto",
+                      )
           elif cmd == "reset_wp":
               current_point = 0
               total_moved_m = 0.0
