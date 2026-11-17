@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def load_boat():
     real_open = builtins.open
     def open_file(path, *args, **kwargs):
-        if str(path).startswith(str(ROOT / 'auto_log_')):
+        if str(path).startswith(str(ROOT / 'logs' / 'auto_log_')):
             return io.StringIO()
         return real_open(path, *args, **kwargs)
     spec = importlib.util.spec_from_file_location('boat_rc_test', ROOT / 'boat.py')

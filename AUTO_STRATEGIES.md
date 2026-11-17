@@ -108,7 +108,7 @@ reads `hardware`, `rc`, `pwm`, `mode_switch`, `autonomous` and `navigation` from
 - **Safety:** boat.py keeps its own failsafes. These are the RC override, E-stop,
   link-loss hold, GPS timeout, the 1 s bad-fix stop, the 5 s stall stop, and a 5 s
   no-heading stop.
-- **Log columns:** the `auto_log_*.csv` file has these extra columns: `CTE_m`,
+- **Log columns:** the `logs/auto_log_*.csv` file has these extra columns: `CTE_m`,
   `Strategy`, `ThrottleBlend`, `HeadingSrc` and `WallGuard`.
 
 The web page's P/PID steering gains no longer affect AUTO. The camera BALLOON

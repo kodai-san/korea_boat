@@ -510,7 +510,9 @@ def pwm_ready():
     vals = (CENTER, max_LEFT, max_RIGHT, STOP, max_GO, max_BACK)
     return not any(v <= 0 for v in vals)
 
-log_filename = os.path.join(BASE_DIR, f"auto_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+log_dir = os.path.join(BASE_DIR, "logs")
+os.makedirs(log_dir, exist_ok=True)
+log_filename = os.path.join(log_dir, f"auto_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
 log_file = open(log_filename, "w", encoding="utf-8", buffering=8192)
 log_file.write("Time,Mode,Path,WP,Distance,Error,Lat,Lon,RTK,Speed_mps,PWM_Steer,PWM_Thr,"
                "CTE_m,Strategy,ThrottleBlend,HeadingSrc,WallGuard\n")
