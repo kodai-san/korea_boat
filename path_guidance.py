@@ -164,18 +164,19 @@ def turn_arc(d0, phi0_deg, radius_m, direction, lead_m=0.0, step_deg=2.0):
             "min_d": min(track), "max_d": max(track), "end_d": track[-2]}
 
 
-def plan_turn(d0, phi0_deg, lead_m, radius_left_m, radius_right_m, low_d, high_d):
+def plan_turn(d0, phi0_deg, lead_m, radius_left_m, radius_right_m, low_d, high_d, tolerance_m=0.0):
     """Choose the turn direction that keeps the boat inside ``low_d <= d <= high_d`` in the shortest arc.
 
-    Returns ``(arc, fits)``. If neither direction fits, ``arc`` is the one that leaves the band least,
-    with ``arc["violation_side"]`` +1 (beyond high_d) or -1 (beyond low_d).
+    A turn that leaves the band by at most ``tolerance_m`` counts as fitting. Returns ``(arc, fits)``. If
+    neither direction fits, ``arc`` is the one that leaves the band least, with ``arc["violation_side"]``
+    +1 (beyond high_d) or -1 (beyond low_d).
     """
     arcs = [turn_arc(d0, phi0_deg, radius_right_m, +1, lead_m), turn_arc(d0, phi0_deg, radius_left_m, -1, lead_m)]
     for arc in arcs:
         below, above = low_d - arc["min_d"], arc["max_d"] - high_d
         arc["violation_m"] = max(0.0, below, above)
         arc["violation_side"] = (1 if above >= below else -1) if arc["violation_m"] > 0 else 0
-    fitting = [arc for arc in arcs if arc["violation_m"] == 0]
+    fitting = [arc for arc in arcs if arc["violation_m"] <= tolerance_m]
     if fitting:
         return min(fitting, key=lambda arc: arc["arc_m"]), True
     return min(arcs, key=lambda arc: arc["violation_m"]), False

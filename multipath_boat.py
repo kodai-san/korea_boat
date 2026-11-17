@@ -1097,6 +1097,8 @@ class MultipathNavigator:
             self.turn_dir = 0
             self.rev_phase = None
             self.rev_end = 0.0
+            self.rev_start = 0.0
+            self.rev_phi = 0.0
             self.reverses = 0
             opts = self.strategy.options
             if opts["test_square"]:
@@ -1345,28 +1347,47 @@ class MultipathNavigator:
             out.update(extra)
             return out
 
-        # 1) Reverse chosen by the planner: neutral, reverse with the rudder centered, neutral (ESC direction change).
+        def plan(dd, phi_deg, lead_m):
+            return plan_turn(dd, phi_deg, lead_m, opts["turn_radius_left_m"], opts["turn_radius_right_m"],
+                             -line.bank_left_m, line.bank_right_m, opts["turn_tolerance_m"])
+
+        def start_turn(arc, fits, phi_deg, reason):
+            self.turn_dir = arc["direction"]
+            line.set_line(arc["end_d"])
+            log_event(f"[TURN PLAN] {reason + ' ' if reason else ''}course {phi_deg:+.0f} deg off at {d:+.2f} m: turn "
+                      f"{'right' if self.turn_dir > 0 else 'left'} {arc['sweep_deg']:.0f} deg, predicted "
+                      f"{arc['min_d']:+.2f}..{arc['max_d']:+.2f} m "
+                      + ("(inside the bank limits)" if fits else
+                         f"(least bad: {arc['violation_m']:.2f} m past a bank limit)")
+                      + f"; line {line.line_offset_m:+.2f} m")
+
+        # 1) Reverse chosen by the planner: neutral, reverse with the rudder centered until a turn fits (or
+        # plan_reverse_max_sec), neutral, then start the turn at once. With the rudder centered the bow keeps the
+        # heading it had before reversing, so no forward run is needed to measure it again.
         reacquire = False
         if self.rev_phase is not None:
-            following = {"plan_neutral_in": ("plan_reverse", opts["plan_reverse_sec"]),
-                         "plan_reverse": ("plan_neutral_out", opts["plan_neutral_sec"]),
-                         "plan_neutral_out": (None, 0.0)}
-            while self.rev_phase is not None and now_mono >= self.rev_end:
-                self.rev_phase, duration = following[self.rev_phase]
-                self.rev_end += duration
+            if self.rev_phase == "plan_neutral_in" and now_mono >= self.rev_end:
+                self.rev_phase, self.rev_start = "plan_reverse", now_mono
+            if self.rev_phase == "plan_reverse":
+                _, room = plan(d, self.rev_phi, opts["turn_restart_lead_m"])
+                if room or now_mono - self.rev_start >= opts["plan_reverse_max_sec"]:
+                    self.rev_phase, self.rev_end = "plan_neutral_out", now_mono + opts["plan_neutral_sec"]
+            if self.rev_phase == "plan_neutral_out" and now_mono >= self.rev_end:
+                self.rev_phase = None
             if self.rev_phase is not None:
                 self.strategy.suspend()
                 throttle = -opts["plan_reverse_throttle"] if self.rev_phase == "plan_reverse" else 0.0
                 return result(self.rev_phase, 0.0, line.bearing_deg, throttle_blend=0.0, throttle_norm=throttle)
-            # The course measured while reversing points backward: plan again from fresh forward motion.
-            self.plan_pending = True
+            arc, fits = plan(d, self.rev_phi, opts["turn_restart_lead_m"])
+            start_turn(arc, fits, self.rev_phi, "after reversing,")
+            # The course measured while reversing points backward: the selector waits for forward motion.
             reacquire = True
             boat_heading_deg = None
 
         phi = None if boat_heading_deg is None else wrap_180(boat_heading_deg - line.bearing_deg)
         moving = speed_ok and speed >= opts["min_course_speed_mps"]
 
-        # 2) Turn planner: when far off course, or once on the first forward course after entry or a reverse.
+        # 2) Turn planner: when far off course, or once on the first forward course after entry.
         if opts["turn_planner"] and phi is not None and moving and self.turn_dir == 0:
             far = abs(phi) > opts["turn_plan_deg"]
             if far or self.plan_pending:
@@ -1374,26 +1395,20 @@ class MultipathNavigator:
                 self.plan_pending = False
                 lead = speed * opts["turn_delay_sec"]
                 if far:
-                    arc, fits = plan_turn(d, phi, lead, opts["turn_radius_left_m"], opts["turn_radius_right_m"],
-                                          -line.bank_left_m, line.bank_right_m)
-                    heading_toward_violation = math.sin(math.radians(phi)) * arc["violation_side"] > 0
-                    if not fits and heading_toward_violation and self.reverses < opts["plan_max_reverses"]:
+                    arc, fits = plan(d, phi, lead)
+                    # Reversing only gains room when the bow points clearly toward the limit the turn would cross.
+                    gains_room = math.sin(math.radians(phi)) * arc["violation_side"] > 0.3
+                    if not fits and gains_room and self.reverses < opts["plan_max_reverses"]:
                         self.reverses += 1
+                        self.rev_phi = phi
                         self.rev_phase, self.rev_end = "plan_neutral_in", now_mono + opts["plan_neutral_sec"]
                         log_event(f"[TURN PLAN] course {phi:+.0f} deg off at {d:+.2f} m: no turn fits the bank limits "
-                                  f"and the boat is heading toward the {'right' if arc['violation_side'] > 0 else 'left'} "
-                                  f"limit -> reverse {opts['plan_reverse_sec']:g} s "
-                                  f"(attempt {self.reverses}/{int(opts['plan_max_reverses'])})")
+                                  f"and the bow points toward the {'right' if arc['violation_side'] > 0 else 'left'} "
+                                  f"limit -> reverse until a turn fits (max {opts['plan_reverse_max_sec']:g} s, "
+                                  f"attempt {self.reverses}/{int(opts['plan_max_reverses'])})")
                         self.strategy.suspend()
                         return result("plan_neutral_in", 0.0, line.bearing_deg, throttle_blend=0.0, throttle_norm=0.0)
-                    self.turn_dir = arc["direction"]
-                    line.set_line(arc["end_d"])
-                    log_event(f"[TURN PLAN] course {phi:+.0f} deg off at {d:+.2f} m: turn "
-                              f"{'right' if self.turn_dir > 0 else 'left'} {arc['sweep_deg']:.0f} deg, predicted "
-                              f"{arc['min_d']:+.2f}..{arc['max_d']:+.2f} m "
-                              + ("(inside the bank limits)" if fits else
-                                 f"(least bad: {arc['violation_m']:.2f} m past a bank limit)")
-                              + f"; line {line.line_offset_m:+.2f} m")
+                    start_turn(arc, fits, phi, "")
                 elif first:
                     # The turn onto the race direction ends here, so start the line there.
                     direction = 1 if phi < 0 else -1

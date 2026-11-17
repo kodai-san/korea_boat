@@ -61,7 +61,7 @@ class PlanDirectionTest(unittest.TestCase):
     """Real starts from the 18:39 run: d (m from centerline), course offset (deg), GPS speed (m/s)."""
 
     def plan(self, d, phi, speed):
-        return plan_turn(d, phi, lead(speed), R_LEFT, R_RIGHT, LOW, HIGH)
+        return plan_turn(d, phi, lead(speed), R_LEFT, R_RIGHT, LOW, HIGH, DEFAULTS["turn_tolerance_m"])
 
     def test_route_6_turns_away_from_the_right_bank(self):
         arc, fits = self.plan(2.89, 137.0, 1.38)       # Turned left (short way) and hit the bank on the water
@@ -124,27 +124,49 @@ class PlannerNavigatorTest(unittest.TestCase):
         self.nav.enter_auto_mode(*self.latlon(35.4, 0.03), now_mono=0.0)
         info = self.step(35.4, 0.03, 106.0, 0.7, speed=1.65)
         self.assertEqual(info["prediction_status"], "turn_right")
-        arc, _ = plan_turn(0.03, 106.0, lead(1.65), R_LEFT, R_RIGHT, LOW, HIGH)
+        arc, _ = plan_turn(0.03, 106.0, lead(1.65), R_LEFT, R_RIGHT, LOW, HIGH, DEFAULTS["turn_tolerance_m"])
         self.assertAlmostEqual(self.line.line_offset_m, max(-self.line.line_left_m, arc["end_d"]), places=6)
 
-    def test_facing_the_bank_reverses_then_replans(self):
+    def test_facing_the_bank_reverses_until_a_turn_fits_then_turns_at_once(self):
         self.nav.enter_auto_mode(*self.latlon(20.0, 3.5), now_mono=0.0)
         start = self.step(20.0, 3.5, 90.0, 1.0, speed=1.0)
         self.assertEqual((start["prediction_status"], start["throttle_norm"], start["steer_norm"]),
                          ("plan_neutral_in", 0.0, 0.0))
-        rev = self.step(20.0, 3.5, 90.0, 1.0 + DEFAULTS["plan_neutral_sec"] + 0.05, speed=1.0)
+        t = 1.0 + DEFAULTS["plan_neutral_sec"] + 0.05
+        rev = self.step(20.0, 3.5, -90.0, t, speed=0.5)             # GPS course now points backward
         self.assertEqual(rev["prediction_status"], "plan_reverse")
         self.assertEqual(rev["throttle_norm"], -DEFAULTS["plan_reverse_throttle"])
-        out = self.step(20.0, 3.3, -90.0, 1.0 + DEFAULTS["plan_neutral_sec"] + DEFAULTS["plan_reverse_sec"] + 0.05)
-        self.assertEqual(out["prediction_status"], "plan_neutral_out")
-        done = self.step(20.0, 3.0, -90.0, 1.0 + 2 * DEFAULTS["plan_neutral_sec"] + DEFAULTS["plan_reverse_sec"] + 0.05)
-        self.assertTrue(done["reacquire_heading"])
-        self.assertEqual(done["prediction_status"], "heading_unavailable")     # The backward course is ignored
-        self.assertNotIn("throttle_norm", done)
-        # Fresh forward course, now 3.0 m off and still facing the bank: one more reverse is allowed.
-        again = self.step(20.0, 3.0, 90.0, 4.0, speed=1.0)
-        self.assertEqual(again["prediction_status"], "plan_neutral_in")
-        self.assertEqual(self.nav.reverses, 2)
+        still = self.step(20.0, 2.6, -90.0, t + 1.0, speed=0.5)      # Not enough room yet: keep reversing
+        self.assertEqual(still["prediction_status"], "plan_reverse")
+        room = self.step(20.0, 1.2, -90.0, t + 2.0, speed=0.5)       # A turn now fits
+        self.assertEqual(room["prediction_status"], "plan_neutral_out")
+        turn = self.step(20.0, 1.2, -90.0, t + 2.0 + DEFAULTS["plan_neutral_sec"] + 0.05, speed=0.2)
+        self.assertIn(turn["prediction_status"], ("turn_right", "turn_left"))
+        self.assertTrue(turn["reacquire_heading"])                    # Backward course dropped, no forward re-run
+        self.assertNotIn("throttle_norm", turn)                        # Full forward again
+        arc, fits = plan_turn(1.2, 90.0, DEFAULTS["turn_restart_lead_m"], R_LEFT, R_RIGHT, LOW, HIGH,
+                              DEFAULTS["turn_tolerance_m"])
+        self.assertTrue(fits)
+        self.assertEqual(turn["prediction_status"], "turn_right" if arc["direction"] > 0 else "turn_left")
+        # The turn continues while the course is still unknown after the reverse.
+        self.assertEqual(self.step(20.5, 1.3, None, t + 2.6)["prediction_status"], turn["prediction_status"])
+
+    def test_reverse_gives_up_after_the_time_limit(self):
+        self.nav.enter_auto_mode(*self.latlon(20.0, 3.5), now_mono=0.0)
+        self.step(20.0, 3.5, 90.0, 1.0, speed=1.0)
+        t = 1.0 + DEFAULTS["plan_neutral_sec"] + 0.05
+        self.step(20.0, 3.5, -90.0, t, speed=0.5)
+        stuck = self.step(20.0, 3.5, -90.0, t + DEFAULTS["plan_reverse_max_sec"] + 0.1, speed=0.0)
+        self.assertEqual(stuck["prediction_status"], "plan_neutral_out")
+        least_bad = self.step(20.0, 3.5, -90.0, t + DEFAULTS["plan_reverse_max_sec"] + 0.5, speed=0.0)
+        self.assertIn(least_bad["prediction_status"], ("turn_right", "turn_left"))
+
+    def test_no_reverse_when_it_would_not_gain_room(self):
+        # Pointing straight backward mid-channel: reversing moves along the course, not away from a limit.
+        self.nav.enter_auto_mode(*self.latlon(40.0, 0.5), now_mono=0.0)
+        info = self.step(40.0, 0.5, 180.0, 1.0, speed=1.0)
+        self.assertIn(info["prediction_status"], ("turn_right", "turn_left"))
+        self.assertEqual(self.nav.reverses, 0)
 
     def test_reverse_limit_then_least_bad_turn(self):
         self.setUp(plan_max_reverses=0)
@@ -199,6 +221,7 @@ class PlannerAutoLoopTest(unittest.TestCase):
         after = statuses.index("plan_neutral_out")
         self.assertIn("acquiring_forward_motion", [r["heading_state"] for r in rows[after:]])
         self.assertIn("[TURN PLAN]", events)
+        self.assertIn("reverse until a turn fits", events)
         self.assertTrue(all(r["recovery_state"] == "" for r in rows))       # Not mistaken for being stuck
 
 

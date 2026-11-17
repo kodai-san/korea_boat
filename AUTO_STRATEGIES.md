@@ -408,15 +408,21 @@ lane switching and `left.csv`/`right.csv` are not used. The event log records
 direction (at entry, after a takeover, or after a collision), the navigator
 works out both full-lock turns with the measured radii (`turn_radius_left_m`
 3.0, `turn_radius_right_m` 2.3) and chooses the one that stays inside the bank
-limits in the shortest arc. The short way round can point the boat straight at
-the bank (17 Nov routes 2, 3 and 6). The boat holds full lock in that direction
-until the course is within `turn_exit_deg` (25), even when the other way
-becomes shorter, and the line is drawn where the turn ends. If neither turn
-fits and the boat is heading toward the limit it would cross, it goes neutral
-(`plan_neutral_sec`), reverses at `plan_reverse_throttle` for
-`plan_reverse_sec` with the rudder centered, goes neutral, and plans again from
-fresh forward motion (at most `plan_max_reverses` times per AUTO run; then the
-least-bad turn). The event log records `[TURN PLAN]` with the choice and the
+limits in the shortest arc (a predicted overshoot up to `turn_tolerance_m`
+counts as fitting; the bank limits already keep about 1 m of water). The short
+way round can point the boat straight at the bank (17 Nov routes 2, 3 and 6).
+The boat holds full lock in that direction until the course is within
+`turn_exit_deg` (25), even when the other way becomes shorter, and the line is
+drawn where the turn ends. If neither turn fits and the bow points clearly
+toward the limit it would cross, it goes neutral (`plan_neutral_sec`), reverses
+at `plan_reverse_throttle` with the rudder centered until a turn fits (at most
+`plan_reverse_max_sec`), goes neutral, and starts that turn at once: with the
+rudder centered the bow kept its heading, so no forward run is needed to
+measure it again. At most `plan_max_reverses` reverses per AUTO run; otherwise,
+or when reversing would not gain room (e.g. pointing straight backward), it
+takes the least-bad turn. A full 180-degree turn needs about 4.6 m of width
+(right) or 6 m (left), so from mid-channel pointing backward the least-bad turn
+can pass a bank limit. The event log records `[TURN PLAN]` with the choice and the
 predicted sideways range; `prediction_status` shows `turn_right`, `turn_left`,
 `plan_neutral_in`, `plan_reverse` or `plan_neutral_out`. Full throttle is kept
 while turning: the measured turns are tighter at full throttle (about 2.2 m)
@@ -457,7 +463,9 @@ waypoint, measured along the course.
 | `turn_plan_deg`, `turn_exit_deg` | 60, 25 | Plan a turn when the course is further off than this; hand back to line following below this. |
 | `turn_radius_left_m`, `turn_radius_right_m` | 3.0, 2.3 | Full-lock, full-throttle turn radii (measured 2.1-2.3 m right/left on 17 Nov, left 2.9-3.5 m on 16 Nov). |
 | `turn_delay_sec` | 0.4 | Straight travel before a turn bites (servo slew and GPS delay). |
-| `plan_neutral_sec`, `plan_reverse_sec`, `plan_reverse_throttle`, `plan_max_reverses` | 0.3, 1.5, 0.5, 2 | The reverse-then-turn manoeuvre. |
+| `turn_tolerance_m` | 0.3 | Predicted overshoot of a bank limit still accepted as fitting. |
+| `plan_neutral_sec`, `plan_reverse_max_sec`, `plan_reverse_throttle`, `plan_max_reverses` | 0.3, 4.0, 0.5, 2 | The reverse-then-turn manoeuvre (reverse until a turn fits, at most 4 s). |
+| `turn_restart_lead_m` | 0.2 | Straight travel assumed before the turn bites when starting from rest after a reverse. |
 | `max_intercept_deg` | 15.0 | Largest angle off the course while merging onto the line. |
 | `recovery_intercept_deg` | 40.0 | Intercept in the bank zones and the hard-limit turn. |
 | `lookahead_time_sec`, `lookahead_min_m`, `lookahead_max_m` | 1.8, 2.4, 5.0 | Speed-dependent line-of-sight distance. |

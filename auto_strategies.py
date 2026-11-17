@@ -391,7 +391,7 @@ class StraightLineStrategy(ConstantCruiseStrategy):
         "integral_max_error_deg": 20.0,
         # Turn planner: when the course is more than turn_plan_deg off the race direction, pick the full-lock
         # turn (left or right) that stays inside the bank limits in the shortest arc, reversing first if
-        # neither fits. Radii measured from full-throttle full-lock turns on 2026-11-16/17 (right 1.9-2.2 m,
+        # neither fits (reverse until one fits, then turn at once). Radii measured from full-throttle full-lock turns on 2026-11-16/17 (right 1.9-2.2 m,
         # left 2.1-2.3 m on 11-17, 2.9-3.5 m on 11-16); turn_delay_sec covers steering and GPS delay.
         "turn_planner": True,
         "turn_plan_deg": 60.0,
@@ -400,7 +400,9 @@ class StraightLineStrategy(ConstantCruiseStrategy):
         "turn_radius_right_m": 2.3,
         "turn_delay_sec": 0.4,
         "plan_neutral_sec": 0.3,
-        "plan_reverse_sec": 1.5,
+        "plan_reverse_max_sec": 4.0,
+        "turn_tolerance_m": 0.3,
+        "turn_restart_lead_m": 0.2,
         "plan_reverse_throttle": 0.5,
         "plan_max_reverses": 2.0,
         # Test pattern: a rectangle on the bank limits, then one on the line limits, to compare where the
@@ -426,7 +428,7 @@ class StraightLineStrategy(ConstantCruiseStrategy):
                     "forward_acquire_sec", "forward_memory_sec", "bank_left_m", "bank_right_m", "max_intercept_deg",
                     "recovery_intercept_deg", "lookahead_time_sec", "lookahead_min_m", "lookahead_max_m",
                     "prediction_horizon_sec", "course_gain", "turn_plan_deg", "turn_radius_left_m",
-                    "turn_radius_right_m", "plan_reverse_sec"):
+                    "turn_radius_right_m", "plan_reverse_max_sec"):
             if resolved[key] <= 0.0:
                 raise ValueError(f"autonomous.{cls.name}.{key} must be greater than zero")
         for side in ("left", "right"):
