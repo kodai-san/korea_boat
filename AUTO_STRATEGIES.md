@@ -63,11 +63,26 @@ The calibration tool preserves the autonomous section when loading and saving.
 
 `boat.py` uses the same AUTO controller: the multipath navigator, the strategy
 selected here, the GPS-course heading selector, and `navigation.finish_margin_m`.
-It reads `autonomous`, `navigation` and `pwm.auto_throttle_ratio` from
-`calibration.json` at start-up. Without that file it uses `02_adaptive_throttle`
-and a 0.60 cruise ratio. It ignores the other sections, because boat.py keeps its
-own ports and PWM constants.
+It also uses the same hardware calibration as multipath_boat.py. At start-up it
+reads `hardware`, `rc`, `pwm`, `mode_switch`, `autonomous` and `navigation` from
+`calibration.json`, and it refuses to start without that file.
 
+- **Hardware:** the serial ports and baud rates come from `hardware`. `"auto"`
+  uses the same USB-ID detection as multipath_boat.py. The PCA9685 bus, address,
+  frequency, servo channel and ESC channel also come from `hardware`.
+- **PWM:** the web page and the controllers keep boat.py's internal scale
+  (`CENTER` 4500, `STOP` 4443, `max_GO`). Only the output to the PCA9685 is
+  converted:
+  - `CENTER`..`max_LEFT`/`max_RIGHT` becomes `servo_center_us`..`servo_left_us`/`servo_right_us`.
+  - `STOP`..4800 becomes `esc_neutral_us`..`esc_fwd_max_us`.
+  - `STOP`..`max_BACK` becomes `esc_neutral_us`..`esc_rev_max_us`.
+
+  `max_GO` presets above 4800 are capped at `esc_fwd_max_us`, so the 5000–5200
+  presets give no more thrust than 4800.
+- **RC:** the stick pulses are normalized with the `rc` neutral, end-point and
+  deadband values, so reversed channels work. The emergency override triggers on
+  85% steering either way, or on `mode_switch.full_reverse_ratio_threshold`
+  reverse.
 - **Steering:** the strategy's [-1, 1] output maps to `CENTER`..`max_RIGHT`
   (positive) or `CENTER`..`max_LEFT` (negative). `STEER_SIGN = -1` swaps sides.
 - **Throttle:** cruise is `auto_throttle_ratio` of the way from `STOP` to the web

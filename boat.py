@@ -63,7 +63,10 @@ except Exception:
     CV_AVAILABLE = False
 
 # AUTO path following uses the same navigator, strategies and heading selector as multipath_boat.py
-from multipath_boat import MultipathNavigator, ZEDF9PReceiver, resolve_navigation_params, latlon_to_enu
+from multipath_boat import (
+    MultipathNavigator, ZEDF9PReceiver, resolve_navigation_params, latlon_to_enu,
+    normalize_axis, detect_serial_ports,
+)
 from auto_strategies import create_auto_strategy
 from gps_heading import MotionHeadingSelector
 
@@ -96,18 +99,78 @@ PID_KI = 0.0
 PID_KD = 3.0
 PID_I_MAX_DEG = 15.0
 
-ST_MIN, ST_NEU, ST_MAX = 835, 1360, 1891
-TH_MIN, TH_NEU, TH_MAX = 1086, 1356, 1621
-TH_NEU_LOW, TH_NEU_HIGH = 1335, 1375
+# ---------------------------------------------------------------------------
+# Hardware calibration shared with multipath_boat.py (calibration.json):
+# serial ports/bauds, PCA9685 bus/address/frequency/channels, servo and ESC
+# microseconds, RC receiver pulses and the full-reverse override ratio.
+# boat.py keeps its logical PWM scale above (CENTER/STOP/max_GO ...) because the
+# web page uses those numbers; set_pwm()/safe_stop() convert it to calibrated
+# microseconds: CENTER..max_LEFT/max_RIGHT -> servo center..left/right,
+# STOP..DEFAULT_MAX_GO -> ESC neutral..forward max (higher max_GO presets are
+# capped at forward max), STOP..max_BACK -> ESC neutral..reverse max.
+# ---------------------------------------------------------------------------
+HW_CONFIG_FILE = "calibration.json"
 
-# RC 비상 오버라이드 임계값
-ST_OVERRIDE_LEFT = 900
-ST_OVERRIDE_RIGHT = 1820
-TH_REV_OVERRIDE = 1550
+
+def _load_hw_calibration():
+    cfg_path = resolve_path(HW_CONFIG_FILE)
+    if not os.path.exists(cfg_path):
+        raise SystemExit(f"{HW_CONFIG_FILE} not found: boat.py needs the boat's hardware calibration")
+    try:
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            cal = json.load(f)
+        hw, rc, pw = cal["hardware"], cal["rc"], cal["pwm"]
+        ms = cal.get("mode_switch", {})
+        out = {
+            "arduino_port": str(hw.get("arduino_port", "auto")),
+            "arduino_baud": int(hw.get("arduino_baud", 115200)),
+            "gps_port": str(hw.get("gps_port", "auto")),
+            "gps_baud": int(hw.get("gps_baud", 115200)),
+            "i2c_bus": int(hw["i2c_bus"]),
+            "pca_addr": int(hw["pca9685_addr"]),
+            "pca_freq": float(hw["pca9685_freq_hz"]),
+            "servo_ch": int(hw["servo_channel"]),
+            "esc_ch": int(hw["esc_channel"]),
+            "servo_center": float(pw["servo_center_us"]),
+            "servo_left": float(pw["servo_left_us"]),
+            "servo_right": float(pw["servo_right_us"]),
+            "esc_neutral": float(pw["esc_neutral_us"]),
+            "esc_fwd": float(pw["esc_fwd_max_us"]),
+            "esc_rev": float(pw["esc_rev_max_us"]),
+            "st_neu": int(rc["steer_neutral_us"]),
+            "st_left": int(rc["steer_left_us"]),
+            "st_right": int(rc["steer_right_us"]),
+            "st_db": int(rc["steer_deadband_us"]),
+            "th_neu": int(rc["throttle_neutral_us"]),
+            "th_fwd": int(rc["throttle_fwd_us"]),
+            "th_rev": int(rc["throttle_rev_us"]),
+            "th_db": int(rc["throttle_deadband_us"]),
+            "rev_ratio": float(ms.get("full_reverse_ratio_threshold", 0.75)),
+        }
+    except (KeyError, TypeError, ValueError) as e:
+        raise SystemExit(f"{HW_CONFIG_FILE}: invalid or missing hardware/rc/pwm setting ({e})")
+    pulses = [out[k] for k in ("servo_center", "servo_left", "servo_right", "esc_neutral", "esc_fwd", "esc_rev")]
+    if not all(800.0 <= us <= 2200.0 for us in pulses):
+        raise SystemExit(f"{HW_CONFIG_FILE}: servo/ESC pulses must be 800-2200 us")
+    if not (min(out["esc_fwd"], out["esc_rev"]) < out["esc_neutral"] < max(out["esc_fwd"], out["esc_rev"])):
+        raise SystemExit(f"{HW_CONFIG_FILE}: esc_neutral_us must lie between reverse and forward max")
+    if not (0 <= out["servo_ch"] <= 15 and 0 <= out["esc_ch"] <= 15 and out["servo_ch"] != out["esc_ch"]):
+        raise SystemExit(f"{HW_CONFIG_FILE}: servo/ESC channels must be different PCA9685 channels 0-15")
+    if not (0.0 < out["rev_ratio"] <= 1.0):
+        raise SystemExit(f"{HW_CONFIG_FILE}: mode_switch.full_reverse_ratio_threshold must be in (0, 1]")
+    return out
+
+
+HW = _load_hw_calibration()
+
+# RC receiver (pulses in us, read from the Arduino); channel reversal is handled by normalize_axis()
+ST_NEU, TH_NEU = HW["st_neu"], HW["th_neu"]
+# RC emergency override: full steer either way, or full reverse (fraction of each stick's travel)
+RC_OVERRIDE_STEER_RATIO = 0.85
+RC_OVERRIDE_REVERSE_RATIO = HW["rev_ratio"]
 
 RC_VALID_MIN = 750
 RC_VALID_MAX = 2050
-RC_DEADZONE = 80
 PWM_WRITE_MIN_DELTA = 15
 PWM_PERIOD = 0.05
 RC_FILTER = 0.25
@@ -131,10 +194,10 @@ STALL_MIN_MOVED_M = 0.5
 MAX_SERIAL_LINES_LOOP = 20
 SERIAL_RECONNECT_SEC = 1.5
 
-RC_PORT = "/dev/ttyUSB0"
-GPS_PORT = "/dev/ttyACM0"
-RC_BAUD = 115200
-GPS_BAUD = 460800
+RC_PORT = HW["arduino_port"]    # "auto" = detect by USB ID (same rules as multipath_boat.py)
+GPS_PORT = HW["gps_port"]
+RC_BAUD = HW["arduino_baud"]
+GPS_BAUD = HW["gps_baud"]
 
 NTRIP_ENABLE = True
 NTRIP_HOST = "rts2.ngii.go.kr"
@@ -148,8 +211,11 @@ WEB_PORT = 8080
 HTML_FILENAME = "gcs_2_usv_hud.html"
 GCS_LINK_TIMEOUT_SEC = 3.5
 
-PCA_ADDR = 0x40
-PCA_I2C_BUS = 0
+PCA_ADDR = HW["pca_addr"]
+PCA_I2C_BUS = HW["i2c_bus"]
+PCA_FREQ_HZ = HW["pca_freq"]
+SERVO_CH = HW["servo_ch"]
+ESC_CH = HW["esc_ch"]
 
 # 카메라(16:9 와이드) 및 비전 control 상수
 CAM_ENABLE = True
@@ -310,35 +376,41 @@ gps_ser = None
 pca = None
 
 # 시리얼 포트 연결 (흐름 control 비활성화 및 중복 포트 제외)
-def open_serial_with_fallback(preferred_port, baud, prefix, exclude_port=None):
-    if serial is None:
+def _open_serial_port(port_name, baud):
+    if serial is None or not port_name:
         return None
-    candidates = [preferred_port]
-    for p in sorted(glob.glob(f"/dev/{prefix}*")):
-        if p not in candidates and p != exclude_port:
-            candidates.append(p)
-    for port_name in candidates:
-        if exclude_port and port_name == exclude_port:
-            continue
+    try:
+        s = serial.Serial(
+            port_name,
+            baud,
+            timeout=0.02,
+            write_timeout=0.05,
+            xonxoff=False,
+            rtscts=False,
+            dsrdtr=False,
+        )
         try:
-            s = serial.Serial(
-                port_name,
-                baud,
-                timeout=0.02,
-                write_timeout=0.05,
-                xonxoff=False,
-                rtscts=False,
-                dsrdtr=False,
-            )
-            try:
-                s.reset_input_buffer()
-            except Exception:
-                pass
-            add_event_log("SERIAL", f"Serial port connected: {port_name} ({baud} bps)", "auto")
-            return s
+            s.reset_input_buffer()
         except Exception:
-            continue
-    return None
+            pass
+        add_event_log("SERIAL", f"Serial port connected: {port_name} ({baud} bps)", "auto")
+        return s
+    except Exception:
+        return None
+
+
+# Ports come from calibration.json; "auto" (or a missing configured port) uses
+# multipath_boat.detect_serial_ports(): u-blox by USB ID for the GPS, then the Arduino.
+def open_rc_serial():
+    other = getattr(gps_ser, "port", None)
+    ard_port, _ = detect_serial_ports(RC_PORT, GPS_PORT, excluded_ports=(other,) if other else ())
+    return _open_serial_port(ard_port, RC_BAUD)
+
+
+def open_gps_serial():
+    other = getattr(ser, "port", None)
+    _, gps_port = detect_serial_ports(RC_PORT, GPS_PORT, excluded_ports=(other,) if other else ())
+    return _open_serial_port(gps_port, GPS_BAUD)
 
 # PCA9685 초기화 및 버스 자동 탐색 (Bus 0 / Bus 1)
 def init_pca9685():
@@ -348,8 +420,8 @@ def init_pca9685():
     builders = []
     try:
         from adafruit_extended_bus import ExtendedI2C
-        builders.append(("ExtendedI2C(0)", lambda: ExtendedI2C(0)))
-        builders.append(("ExtendedI2C(1)", lambda: ExtendedI2C(1)))
+        for bus_no in sorted((0, 1), key=lambda b: b != PCA_I2C_BUS):  # configured bus first
+            builders.append((f"ExtendedI2C({bus_no})", lambda b=bus_no: ExtendedI2C(b)))
     except Exception:
         pass
     if hasattr(board, "SCL_1") and hasattr(board, "SDA_1"):
@@ -362,7 +434,7 @@ def init_pca9685():
         try:
             b = fn()
             cand = PCA9685(b, address=PCA_ADDR)
-            cand.frequency = 50.0
+            cand.frequency = PCA_FREQ_HZ
             pca = cand
             shared_state["lampSerial"] = "ok"
             add_event_log("I2C", f"PCA9685 motor driver connected ({name}, 0x{PCA_ADDR:02x})", "auto")
@@ -377,9 +449,8 @@ def init_pca9685():
 # 주변장치(RC, GPS, PCA9685) 초기화
 def init_peripherals():
     global ser, gps_ser, pca
-    ser = open_serial_with_fallback(RC_PORT, RC_BAUD, "ttyUSB", exclude_port=GPS_PORT)
-    rc_used_port = getattr(ser, "port", None) or RC_PORT
-    gps_ser = open_serial_with_fallback(GPS_PORT, GPS_BAUD, "ttyACM", exclude_port=rc_used_port)
+    gps_ser = open_gps_serial()
+    ser = open_rc_serial()
     init_pca9685()
 
 # PWM 상수 유효성 확인
@@ -404,25 +475,62 @@ def lerp(a, b, t):
     t = 0.0 if t < 0.0 else 1.0 if t > 1.0 else t
     return int(a + (b - a) * t)
 
-# RC 펄스 -> PWM 변환
-def map_pulse_to_pwm(pulse, in_min, in_max, out_min, out_max, neutral, deadzone=15, out_neutral=None):
-    if out_neutral is None:
-        out_neutral = (out_min + out_max) / 2.0
-    if (neutral - deadzone) <= pulse <= (neutral + deadzone):
-        return int(out_neutral)
-    pulse = clamp(pulse, in_min, in_max)
-    if pulse < (neutral - deadzone):
-        denom = (neutral - deadzone) - in_min
-        if denom <= 0:
-            return int(out_min)
-        t = (pulse - in_min) / float(denom)
-        return int(out_min + (out_neutral - out_min) * t)
+# Logical PWM (web/controller scale) -> calibrated microseconds -> PCA9685 16-bit duty
+def _us_to_duty(us):
+    return int(round(clamp(us, 500.0, 2500.0) * PCA_FREQ_HZ * 65535.0 / 1e6))
+
+
+def steer_us(v):
+    """CENTER -> servo center; max_LEFT/max_RIGHT -> calibrated full left/right."""
+    if v >= CENTER:
+        t = min(1.0, (v - CENTER) / float(max_LEFT - CENTER))
+        return HW["servo_center"] + t * (HW["servo_left"] - HW["servo_center"])
+    t = min(1.0, (CENTER - v) / float(CENTER - max_RIGHT))
+    return HW["servo_center"] + t * (HW["servo_right"] - HW["servo_center"])
+
+
+def drive_us(v):
+    """STOP -> ESC neutral; DEFAULT_MAX_GO (and above) -> forward max; max_BACK -> reverse max."""
+    if v >= STOP:
+        t = min(1.0, (v - STOP) / float(DEFAULT_MAX_GO - STOP))
+        return HW["esc_neutral"] + t * (HW["esc_fwd"] - HW["esc_neutral"])
+    t = min(1.0, (STOP - v) / float(STOP - max_BACK))
+    return HW["esc_neutral"] + t * (HW["esc_rev"] - HW["esc_neutral"])
+
+
+def steer_duty(v):
+    return _us_to_duty(steer_us(v))
+
+
+def drive_duty(v):
+    return _us_to_duty(drive_us(v))
+
+
+# RC pulses -> normalized sticks (-1..+1; channel reversal from calibration.json)
+def rc_steer_norm(pulse):
+    """-1 = full left, +1 = full right."""
+    return normalize_axis(pulse, HW["st_neu"], HW["st_left"], HW["st_right"], HW["st_db"])
+
+
+def rc_throttle_norm(pulse):
+    """-1 = full reverse, +1 = full forward."""
+    return normalize_axis(pulse, HW["th_neu"], HW["th_rev"], HW["th_fwd"], HW["th_db"])
+
+
+def rc_to_logical(st_pulse, th_pulse):
+    """MANUAL: transmitter sticks -> logical steer/drive (full forward stick = current max_GO)."""
+    st_n = rc_steer_norm(st_pulse)
+    th_n = rc_throttle_norm(th_pulse)
+    if st_n >= 0.0:
+        steer = CENTER + st_n * (max_RIGHT - CENTER)
     else:
-        denom = in_max - (neutral + deadzone)
-        if denom <= 0:
-            return int(out_max)
-        t = (pulse - (neutral + deadzone)) / float(denom)
-        return int(out_neutral + (out_max - out_neutral) * t)
+        steer = CENTER + (-st_n) * (max_LEFT - CENTER)
+    if th_n >= 0.0:
+        drive = STOP + th_n * (max_GO - STOP)
+    else:
+        drive = STOP + (-th_n) * (max_BACK - STOP)
+    return int(round(steer)), int(round(drive))
+
 
 # 각도 정규화 (-180 ~ +180)
 def wrap180(deg):
@@ -678,8 +786,7 @@ def read_latest_rc():
     if ser is None:
         if now - _last_rc_reconnect_t >= SERIAL_RECONNECT_SEC:
             _last_rc_reconnect_t = now
-            gps_used_port = getattr(gps_ser, "port", None) or GPS_PORT
-            ser = open_serial_with_fallback(RC_PORT, RC_BAUD, "ttyUSB", exclude_port=gps_used_port)
+            ser = open_rc_serial()
             _last_rc_valid_pkt_t = now
         return None, None
 
@@ -746,9 +853,8 @@ def read_latest_gps(is_reversing=False):
     if gps_ser is None:
         if now - _last_gps_reconnect_t >= SERIAL_RECONNECT_SEC:
             _last_gps_reconnect_t = now
-            rc_used_port = getattr(ser, "port", None) or RC_PORT
             with gps_ser_lock:
-                gps_ser = open_serial_with_fallback(GPS_PORT, GPS_BAUD, "ttyACM", exclude_port=rc_used_port)
+                gps_ser = open_gps_serial()
         return None
 
     updated = False
@@ -956,10 +1062,10 @@ def set_pwm(steer, drive, force=False):
 
     try:
         if steer_need:
-            pca.channels[0].duty_cycle = steer
+            pca.channels[SERVO_CH].duty_cycle = steer_duty(steer)
             _last_steer = steer
         if drive_need:
-            pca.channels[6].duty_cycle = target_drive
+            pca.channels[ESC_CH].duty_cycle = drive_duty(target_drive)
             _last_drive = target_drive
         _need_safe_stop_retry = False
         _pca_err_streak = 0
@@ -984,8 +1090,8 @@ def safe_stop():
 
     for _ in range(3):
         try:
-            pca.channels[0].duty_cycle = CENTER
-            pca.channels[6].duty_cycle = STOP
+            pca.channels[SERVO_CH].duty_cycle = steer_duty(CENTER)
+            pca.channels[ESC_CH].duty_cycle = drive_duty(STOP)
             _last_steer, _last_drive = CENTER, STOP
             _need_safe_stop_retry = False
             return
@@ -2723,18 +2829,23 @@ def main_loop():
 
         # RC 비상 오버라이드 감시 (웹 단독 control 시 RC 노이즈 무시)
         if current_mode in ("AUTO", "BALLOON") and rc_effective_ok and ST_V is not None and TH_V is not None:
+            def _steer_full(p):
+                return abs(rc_steer_norm(p)) >= RC_OVERRIDE_STEER_RATIO
+
+            def _rev_full(p):
+                return rc_throttle_norm(p) <= -RC_OVERRIDE_REVERSE_RATIO
+
             in_normal_zone = (
-                (ST_OVERRIDE_LEFT <= ST_V <= ST_OVERRIDE_RIGHT)
-                and (TH_V <= TH_REV_OVERRIDE)
-                and (raw_st is None or (ST_OVERRIDE_LEFT <= raw_st <= ST_OVERRIDE_RIGHT))
-                and (raw_th is None or (raw_th <= TH_REV_OVERRIDE))
+                not _steer_full(ST_V) and not _rev_full(TH_V)
+                and (raw_st is None or not _steer_full(raw_st))
+                and (raw_th is None or not _rev_full(raw_th))
             )
             if in_normal_zone:
                 override_armed = True
 
             if override_armed and (now - mode_enter_t) >= 0.50:
-                filt_steer_full = (ST_V < ST_OVERRIDE_LEFT) or (ST_V > ST_OVERRIDE_RIGHT)
-                filt_rev_full = (TH_V > TH_REV_OVERRIDE)
+                filt_steer_full = _steer_full(ST_V)
+                filt_rev_full = _rev_full(TH_V)
                 if filt_steer_full or filt_rev_full:
                     prev_mode = current_mode
                     current_mode = "MANUAL"
@@ -2785,10 +2896,7 @@ def main_loop():
             elif now < web_manual_stop_hold_t:
                 safe_stop()
             elif rc_effective_ok and ST_V is not None:
-                steer = map_pulse_to_pwm(ST_V, ST_MIN, ST_MAX, max_LEFT, max_RIGHT, ST_NEU, RC_DEADZONE, CENTER)
-                drive = map_pulse_to_pwm(TH_V, TH_MIN, TH_MAX, max_GO, max_BACK, TH_NEU, RC_DEADZONE, STOP)
-                if TH_NEU_LOW <= TH_V <= TH_NEU_HIGH:
-                    drive = STOP
+                steer, drive = rc_to_logical(ST_V, TH_V)
                 if ready and (now - last_pwm_t) >= PWM_PERIOD:
                     set_pwm(steer, drive)
                     last_pwm_t = now
