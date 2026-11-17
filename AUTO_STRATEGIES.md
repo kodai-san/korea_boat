@@ -321,10 +321,22 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_*.py' -
 
 ## 05 — Straight line (race line)
 
-Select `"05_straight_line"` in `autonomous.strategy`, or run
-`python3 multipath_boat.py --auto-strategy 05_straight_line`. Settings live in
+`calibration.json` selects `"05_straight_line"`. Settings live in
 `autonomous["05_straight_line"]`. Point the boat down the course before
 engaging AUTO: the boat has no heading until it is moving.
+
+Quick changes at the water (each also has a JSON setting):
+
+```sh
+python3 multipath_boat.py --use-04            # back to 04 control (JSON: autonomous.use_04_control)
+python3 multipath_boat.py --line-limit 1.0    # straight line within +-1.0 m of the centerline (line_max_offset_m)
+python3 multipath_boat.py --bank-limit 3.0    # bank boundary at +-3.0 m (band_half_width_m)
+python3 multipath_boat.py --test-square       # boundary test pattern (test_square)
+python3 multipath_boat.py --no-recovery       # stuck recovery off (autonomous.recovery.enabled)
+```
+
+`line limit + guard_zone_m (0.5)` must stay inside the bank limit, otherwise the
+controller refuses to start and says why.
 
 **Line.** On AUTO entry the boat's RTK position defines a line parallel to the
 course (the bearing of `center.csv`, first to last waypoint). If the entry is
@@ -382,3 +394,45 @@ line, `prediction_status` is `line`, `merging`, `bank_guard`, `hard_limit` or
 distance to the band edge. Compare strategies offline with
 `python3 benchmark.py compare` and
 `python3 simulate_boat.py auto --strategy 05_straight_line` (see `RACE_SPEED.md`).
+
+### Test square (`test_square`)
+
+With `test_square` true (or `--test-square`), AUTO does not race. From the
+entry point it drives two rectangles at `test_throttle` (0.6 = 60% forward):
+first with long sides on the bank lines (d = -band, +band), then on the line
+limits (d = -line limit, +line limit). Each rectangle starts `test_lead_m`
+ahead, runs `test_leg_length_m` forward along the left line, crosses to the
+right line, comes back along it and crosses back; every corner is a right turn
+(the hull's tighter direction). A corner counts as reached within
+`test_accept_m`. Bank protection is off in this mode because the legs are the
+limits; engage it in open water near the start of the course, pointed down the
+course, and keep the transmitter ready (full reverse returns to MANUAL).
+
+`prediction_status` names the leg (`square leg 2: +-2.50 m left line`) and the
+event log records each leg. Afterwards:
+
+```sh
+python3 analyse_square.py logs/multipath_log_YYYYMMDD_HHMMSS.csv
+```
+
+reports, per leg, where the boat actually was from the centerline and its error
+to the commanded line, using only the real log. Compare the "left line" and
+"right line" legs with where the team saw the boat relative to the banks.
+
+## Stuck recovery (all strategies)
+
+`autonomous.recovery` (default on). In AUTO, if the ESC is commanded forward but
+GPS speed stays below `stuck_speed_mps` (0.15) for `stuck_sec` (1.5 s), the
+boat goes neutral (`neutral_sec`, 0.3 s), reverses at `reverse_throttle` (60%)
+for `reverse_sec` (2 s) with the rudder centered, goes neutral again, then
+resumes normal control on the same line; heading is re-acquired from fresh
+forward motion. Detection waits `startup_grace_sec` (3 s) after AUTO entry and
+after each attempt. After `max_attempts` (3) failed attempts in one AUTO run it
+stops in neutral and returns to MANUAL. A missing GPS speed never triggers it.
+`recovery_state` in the telemetry shows `neutral_in`, `reverse`, `neutral_out`
+or `gave_up`, and the event log records `[RECOVERY]`.
+
+Before relying on it, check on land with the prop out of the water that this
+ESC goes into reverse after the neutral pause (some ESCs need a second
+neutral-reverse pulse or a longer `neutral_sec`). The transmitter override
+still works throughout.

@@ -129,3 +129,23 @@ class StraightLineGuidance:
     def lateral_rate(self, speed_mps, course_deg):
         """Rate of change of ``d`` (m/s, + = moving right) for a velocity over ground."""
         return speed_mps * math.sin(math.radians(course_deg - self.bearing_deg))
+
+
+def square_corners(s_start, half_widths, leg_length_m):
+    """Corners ``(s, d, label)`` of one rectangle per half width, in the course frame of StraightLineGuidance.
+
+    Each rectangle runs forward along the left line (-h), across to the right line (+h), back along it and
+    across to the start, so every corner is a right turn (the hull's tighter direction). Labels name the leg
+    that ends at the corner.
+    """
+    corners = []
+    for h in half_widths:
+        tag = f"+-{h:.2f} m"
+        corners += [
+            (s_start, -h, f"{tag} to start"),
+            (s_start + leg_length_m, -h, f"{tag} left line"),
+            (s_start + leg_length_m, h, f"{tag} far side"),
+            (s_start, h, f"{tag} right line"),
+            (s_start, -h, f"{tag} near side"),
+        ]
+    return corners

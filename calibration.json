@@ -38,7 +38,18 @@
     "finish_margin_m": 1.0
   },
   "autonomous": {
-    "strategy": "04_predictive_recovery",
+    "strategy": "05_straight_line",
+    "use_04_control": false,
+    "recovery": {
+      "enabled": true,
+      "stuck_speed_mps": 0.15,
+      "stuck_sec": 1.5,
+      "startup_grace_sec": 3.0,
+      "neutral_sec": 0.3,
+      "reverse_sec": 2.0,
+      "reverse_throttle": 0.6,
+      "max_attempts": 3
+    },
     "02_adaptive_throttle": {
       "full_throttle_cte_m": 0.30,
       "full_throttle_heading_deg": 11.0
@@ -93,7 +104,12 @@
       "course_integral_gain": 0.3,
       "integral_limit_deg": 20.0,
       "integral_delay_sec": 2.0,
-      "integral_max_error_deg": 20.0
+      "integral_max_error_deg": 20.0,
+      "test_square": false,
+      "test_leg_length_m": 15.0,
+      "test_lead_m": 3.0,
+      "test_throttle": 0.6,
+      "test_accept_m": 1.0
     }
   }
 }

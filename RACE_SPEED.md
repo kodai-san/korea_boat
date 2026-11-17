@@ -35,6 +35,16 @@ makes 02-04 drive at full throttle as well; 05 always does.
 Rollback: select another strategy in `calibration.json` (`autonomous.strategy`) or with
 `--auto-strategy`; `NTRIP_CONFIG["stall_timeout_sec"] = 0` disables the watchdog.
 
+## Water-day commands
+```sh
+python3 multipath_boat.py                      # 05_straight_line (calibration.json), stuck recovery on
+python3 multipath_boat.py --use-04             # back to 04
+python3 multipath_boat.py --line-limit 1.0 --bank-limit 3.0
+python3 multipath_boat.py --test-square        # drive the boundary rectangles, then stop
+python3 analyse_square.py logs/multipath_log_<stamp>.csv
+python3 multipath_boat.py --no-recovery
+```
+
 ## Race procedure
 - **Point the boat straight down the course before engaging AUTO.** The boat has no heading until it moves
   (~0.6 s); a start pointed 35 deg at the bank from 2.4 m off center overshoots the 2.5 m band by ~1.1 m in
