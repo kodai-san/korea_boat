@@ -472,6 +472,58 @@
       outline-offset: -6px;
     }
 
+    .modal-cam-pick-wrap {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      margin-top: 2px;
+    }
+    .modal-cam-pick-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .modal-cam-pick-hint {
+      font-size: 10px;
+      color: var(--text-muted);
+      letter-spacing: 0.02em;
+    }
+    .modal-cam-pick-stage {
+      position: relative;
+      width: 100%;
+      aspect-ratio: 16 / 9;
+      background-color: #0b0c0e;
+      border: 1px solid var(--line-grid);
+      overflow: hidden;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .modal-cam-pick-stage.eyedropper-active {
+      cursor: crosshair !important;
+      outline: 1px dashed var(--text-primary);
+      outline-offset: -4px;
+    }
+    .modal-cam-pick-img {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      display: block;
+      background: #0b0c0e;
+    }
+    .modal-cam-pick-empty {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 11px;
+      color: var(--text-muted);
+      pointer-events: none;
+    }
+    .modal-cam-pick-empty.hidden { display: none; }
+
     .cam-stream-img {
       width: 100%;
       height: 100%;
@@ -1186,7 +1238,7 @@
           </div>
           <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
             <label class="color-preset-chip">
-              <span>PICKER</span>
+              <span>HEX</span>
               <input id="targetColorPickerInput" type="color" value="#ff2a85" onchange="onColorPickerChanged(this.value)" style="width:20px; height:16px; border:none; background:transparent; cursor:pointer; padding:0;" />
             </label>
             <button type="button" class="color-preset-chip" onclick="selectTargetColorPreset('#ff2a85', 166, 9, 110, 80)"><span class="color-dot-preview" style="background:#ff2a85;"></span>HOT PINK</button>
@@ -1195,6 +1247,17 @@
             <button type="button" class="color-preset-chip" onclick="selectTargetColorPreset('#ffe600', 27, 8, 120, 95)"><span class="color-dot-preview" style="background:#ffe600;"></span>YELLOW</button>
             <button type="button" class="color-preset-chip" onclick="selectTargetColorPreset('#00e676', 68, 12, 100, 75)"><span class="color-dot-preview" style="background:#00e676;"></span>GREEN</button>
             <button type="button" class="color-preset-chip" onclick="selectTargetColorPreset('#00a8ff', 105, 12, 110, 80)"><span class="color-dot-preview" style="background:#00a8ff;"></span>BLUE</button>
+          </div>
+          <div class="modal-cam-pick-wrap">
+            <div class="modal-cam-pick-toolbar">
+              <button id="btnModalEyedropperPick" type="button" class="cam-mini-btn" onclick="toggleModalEyedropperMode()">PICK FROM VIDEO</button>
+              <button id="btnModalCamMaskToggle" type="button" class="cam-mini-btn" onclick="toggleCamMask()">SHOW MASK</button>
+              <span id="modalCamPickHint" class="modal-cam-pick-hint">Click target on preview to lock color</span>
+            </div>
+            <div id="modalCamPickStage" class="modal-cam-pick-stage" onclick="handleModalCamStageClick(event)">
+              <img id="modalCamPickImg" class="modal-cam-pick-img" alt="Color pick preview" />
+              <div id="modalCamPickEmpty" class="modal-cam-pick-empty">Waiting for camera…</div>
+            </div>
           </div>
           <div class="pid-param-grid" style="margin-top:2px;">
             <div class="pid-control-row mono">
@@ -1218,7 +1281,7 @@
               <input id="colorInputVal" type="number" class="pid-num-input" min="30" max="240" step="5" value="80" onchange="syncColorControl('Val', this.value)" />
             </div>
           </div>
-          <div class="pid-guide-text">HUE : 추적할 중심 색상 번호 / TOL : HUE에서 좌우로 허용할 오차 폭 / SAT MIN : 최소 채도 하한선 / VAL MIN : 최소 밝기 하한선</div>
+          <div class="pid-guide-text">PICK FROM VIDEO : 미리보기에서 목표 색 클릭 잠금 / HUE·TOL·SAT·VAL : 마스크 수동 미세조정 / SHOW MASK : HSV 마스크 오버레이</div>
         </div>
 
         <div class="pid-param-grid">
@@ -1973,6 +2036,9 @@
     };
 
     let eyedropperActive = false;
+    let modalEyedropperActive = false;
+    let modalCamPreviewTimer = null;
+    let modalCamPreviewInFlight = false;
     let modalDraftMode = "P";
     let modalDraftMaxGo = 4800;
     let modalDraftBalloonMode = "APPROACH_STOP";
@@ -3128,7 +3194,7 @@
 
     function toggleCamMask() {
       state.camShowMask = !state.camShowMask;
-      document.getElementById("btnCamMaskToggle")?.classList.toggle("active", state.camShowMask);
+      refreshModalCamMaskButton();
       if (isLiveConnected) sendBoatCommand("toggle_cam_mask", state.camShowMask);
       updateUI();
     }
@@ -3254,6 +3320,122 @@
       switchConfigSectionTab("DRIVE_VISION");
     }
 
+    function normUvFromStageClick(stageEl, imgEl, event) {
+      if (!stageEl) return null;
+      const rect = stageEl.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return null;
+
+      const iw = (imgEl && imgEl.naturalWidth) ? imgEl.naturalWidth : 640;
+      const ih = (imgEl && imgEl.naturalHeight) ? imgEl.naturalHeight : 360;
+      const scale = Math.min(rect.width / iw, rect.height / ih);
+      const rw = iw * scale, rh = ih * scale;
+      const offsetX = (rect.width - rw) / 2.0, offsetY = (rect.height - rh) / 2.0;
+      const clickX = event.clientX - rect.left, clickY = event.clientY - rect.top;
+      const u = (clickX - offsetX) / rw, v = (clickY - offsetY) / rh;
+      if (u < 0.0 || u > 1.0 || v < 0.0 || v > 1.0) return null;
+      return { u, v, clickX, clickY };
+    }
+
+    function syncModalColorControlsFromState() {
+      if (typeof state.targetColorHex === "string") {
+        const picker = document.getElementById("targetColorPickerInput");
+        if (picker) picker.value = state.targetColorHex;
+      }
+      syncColorControl("Hue", state.targetHue ?? 166, false);
+      syncColorControl("Tol", state.targetHueTol ?? 10, false);
+      syncColorControl("Sat", state.targetSatMin ?? 105, false);
+      syncColorControl("Val", state.targetValMin ?? 80, false);
+      refreshModalColorSummary();
+    }
+
+    function refreshModalCamMaskButton() {
+      document.getElementById("btnModalCamMaskToggle")?.classList.toggle("active", Boolean(state.camShowMask));
+      document.getElementById("btnCamMaskToggle")?.classList.toggle("active", Boolean(state.camShowMask));
+    }
+
+    function setModalEyedropperActive(on) {
+      modalEyedropperActive = Boolean(on);
+      document.getElementById("btnModalEyedropperPick")?.classList.toggle("active", modalEyedropperActive);
+      document.getElementById("modalCamPickStage")?.classList.toggle("eyedropper-active", modalEyedropperActive);
+      const hint = document.getElementById("modalCamPickHint");
+      if (hint) {
+        hint.textContent = modalEyedropperActive
+          ? "Click the colored target now…"
+          : "Click target on preview to lock color";
+      }
+    }
+
+    function stopModalCamPreview() {
+      if (modalCamPreviewTimer) {
+        clearInterval(modalCamPreviewTimer);
+        modalCamPreviewTimer = null;
+      }
+      modalCamPreviewInFlight = false;
+      setModalEyedropperActive(false);
+      const img = document.getElementById("modalCamPickImg");
+      if (img) {
+        img.removeAttribute("src");
+        img.dataset.lastSeq = "";
+      }
+      document.getElementById("modalCamPickEmpty")?.classList.remove("hidden");
+    }
+
+    async function refreshModalCamPreviewFrame() {
+      if (modalCamPreviewInFlight) return;
+      const overlay = document.getElementById("pidConfigOverlay");
+      const driveTab = document.getElementById("cfgSectionDriveVision");
+      if (!overlay || overlay.classList.contains("hidden")) return;
+      if (!driveTab || driveTab.classList.contains("hidden")) return;
+
+      modalCamPreviewInFlight = true;
+      try {
+        // Snapshot endpoint avoids a second MJPEG client competing with the main stream.
+        const resp = await fetch("/api/camera_frame?t=" + Date.now(), { cache: "no-store" });
+        const img = document.getElementById("modalCamPickImg");
+        const empty = document.getElementById("modalCamPickEmpty");
+        if (!img) return;
+        if (resp.status === 200) {
+          const blob = await resp.blob();
+          const url = URL.createObjectURL(blob);
+          const prev = img.dataset.objectUrl;
+          img.onload = () => {
+            if (prev) URL.revokeObjectURL(prev);
+          };
+          img.dataset.objectUrl = url;
+          img.src = url;
+          empty?.classList.add("hidden");
+        } else if (!img.naturalWidth) {
+          empty?.classList.remove("hidden");
+        }
+      } catch (_) {
+        document.getElementById("modalCamPickEmpty")?.classList.remove("hidden");
+      } finally {
+        modalCamPreviewInFlight = false;
+      }
+    }
+
+    function startModalCamPreview() {
+      if (modalCamPreviewTimer) {
+        clearInterval(modalCamPreviewTimer);
+        modalCamPreviewTimer = null;
+      }
+      refreshModalCamPreviewFrame();
+      modalCamPreviewTimer = setInterval(refreshModalCamPreviewFrame, 280);
+      refreshModalCamMaskButton();
+    }
+
+    function isDriveVisionModalVisible() {
+      const overlay = document.getElementById("pidConfigOverlay");
+      const driveTab = document.getElementById("cfgSectionDriveVision");
+      return Boolean(overlay && !overlay.classList.contains("hidden")
+        && driveTab && !driveTab.classList.contains("hidden"));
+    }
+
+    function toggleModalEyedropperMode() {
+      setModalEyedropperActive(!modalEyedropperActive);
+      if (modalEyedropperActive) addLog("VISION", "CLICK TARGET ON MODAL PREVIEW TO LOCK COLOR", "auto");
+    }
+
     function toggleEyedropperMode() {
       eyedropperActive = !eyedropperActive;
       document.getElementById("btnEyedropperPick")?.classList.toggle("active", eyedropperActive);
@@ -3261,45 +3443,59 @@
       if (eyedropperActive) addLog("VISION", "CLICK TARGET ON VIDEO TO LOCK COLOR", "auto");
     }
 
-    function handleCameraStageClick(event) {
-      if (!eyedropperActive) return;
-      const stage = document.getElementById("camStageBox");
-      if (!stage) return;
-      const rect = stage.getBoundingClientRect();
-      if (rect.width <= 0 || rect.height <= 0) return;
-
-      const imgEl = document.getElementById("globalCamLiveImg");
-      const iw = (imgEl && imgEl.naturalWidth) ? imgEl.naturalWidth : 640;
-      const ih = (imgEl && imgEl.naturalHeight) ? imgEl.naturalHeight : 360;
-
-      const scale = Math.min(rect.width / iw, rect.height / ih);
-      const rw = iw * scale, rh = ih * scale;
-      const offsetX = (rect.width - rw) / 2.0, offsetY = (rect.height - rh) / 2.0;
-
-      const clickX = event.clientX - rect.left, clickY = event.clientY - rect.top;
-      const u = (clickX - offsetX) / rw, v = (clickY - offsetY) / rh;
-      if (u < 0.0 || u > 1.0 || v < 0.0 || v > 1.0) return;
-
+    function applyColorPickAt(u, v, offlineClickX, offlineClickY) {
       if (isLiveConnected) {
         sendBoatCommand("pick_color_at", { u: Number(u.toFixed(4)), v: Number(v.toFixed(4)) });
-        setTimeout(pollBoatServer, 60);
+        setTimeout(() => {
+          Promise.resolve(pollBoatServer()).then(() => {
+            syncModalColorControlsFromState();
+            const fb = document.getElementById("pidApplyFeedback");
+            if (fb) {
+              fb.textContent = `COLOR LOCKED FROM VIDEO (H:${state.targetHue} +-` +
+                `${state.targetHueTol}) -> CLICK APPLY & SAVE`;
+            }
+          });
+        }, 80);
       } else {
         const hudCanvas = document.getElementById("globalCamHudCanvas");
-        if (hudCanvas) {
-          const px = hudCanvas.getContext("2d").getImageData(Math.floor(clickX), Math.floor(clickY), 1, 1).data;
+        if (hudCanvas && Number.isFinite(offlineClickX) && Number.isFinite(offlineClickY)) {
+          const px = hudCanvas.getContext("2d").getImageData(Math.floor(offlineClickX), Math.floor(offlineClickY), 1, 1).data;
           const hex = "#" + [px[0], px[1], px[2]].map((x) => x.toString(16).padStart(2, "0")).join("");
           const hsv = hexToOpenCvHsv(hex);
           state.targetColorHex = hex;
           state.targetHue = hsv.h;
           state.targetSatMin = Math.max(55, hsv.s - 45);
           state.targetValMin = Math.max(45, hsv.v - 55);
+          syncModalColorControlsFromState();
           addLog("VISION", `COLOR LOCKED (${hex}, H:${state.targetHue})`, "auto");
         }
       }
+    }
+
+    function handleCameraStageClick(event) {
+      if (!eyedropperActive) return;
+      const stage = document.getElementById("camStageBox");
+      const imgEl = document.getElementById("globalCamLiveImg");
+      const uv = normUvFromStageClick(stage, imgEl, event);
+      if (!uv) return;
+
+      applyColorPickAt(uv.u, uv.v, uv.clickX, uv.clickY);
 
       eyedropperActive = false;
       document.getElementById("btnEyedropperPick")?.classList.remove("active");
       stage.classList.remove("eyedropper-active");
+      updateUI();
+    }
+
+    function handleModalCamStageClick(event) {
+      if (!modalEyedropperActive) return;
+      const stage = document.getElementById("modalCamPickStage");
+      const imgEl = document.getElementById("modalCamPickImg");
+      const uv = normUvFromStageClick(stage, imgEl, event);
+      if (!uv) return;
+
+      applyColorPickAt(uv.u, uv.v, null, null);
+      setModalEyedropperActive(false);
       updateUI();
     }
 
@@ -3324,6 +3520,8 @@
       document.getElementById("cfgSectionDriveVision")?.classList.toggle("hidden", !isDrive);
       document.getElementById("cfgSectionPid")?.classList.toggle("hidden", !isPid);
       document.getElementById("cfgSectionRemote")?.classList.toggle("hidden", !isRemote);
+      if (isDriveVisionModalVisible()) startModalCamPreview();
+      else stopModalCamPreview();
     }
 
     function refreshRemoteModalUI() {
@@ -3531,9 +3729,12 @@
       refreshSpeedAndVisionModalUI();
       refreshRemoteModalUI();
       document.getElementById("pidConfigOverlay").classList.remove("hidden");
+      if (isDriveVisionModalVisible()) startModalCamPreview();
+      else stopModalCamPreview();
     }
 
     function closePidModal() {
+      stopModalCamPreview();
       document.getElementById("pidConfigOverlay").classList.add("hidden");
     }
 
@@ -4014,6 +4215,10 @@
         if (typeof data.linkPaused === "boolean") state.linkPaused = data.linkPaused;
         if (typeof data.camLteMode === "boolean") state.camLteMode = data.camLteMode;
         if (typeof data.camFlip === "number") state.camFlip = data.camFlip;
+        if (typeof data.camShowMask === "boolean") {
+          state.camShowMask = data.camShowMask;
+          if (isDriveVisionModalVisible()) refreshModalCamMaskButton();
+        }
 
         if (typeof data.balloonFinishSeq === "number" && data.balloonFinishSeq > lastShownFinishSeq) {
           lastShownFinishSeq = data.balloonFinishSeq;
