@@ -27,7 +27,7 @@
     "esc_neutral_us": 1800,
     "esc_fwd_max_us": 1990,
     "esc_rev_max_us": 1650,
-    "auto_throttle_ratio": 0.6
+    "auto_throttle_ratio": 1.0
   },
   "mode_switch": {
     "right_steer_ratio_threshold": 0.75,
@@ -35,10 +35,41 @@
     "full_reverse_ratio_threshold": 0.75
   },
   "autonomous": {
-    "strategy": "adaptive_throttle",
-    "adaptive_throttle": {
+    "strategy": "04_predictive_recovery",
+    "02_adaptive_throttle": {
       "full_throttle_cte_m": 0.30,
       "full_throttle_heading_deg": 11.0
+    },
+    "03_gps_course_progressive": {
+      "full_throttle_cte_m": 0.30,
+      "cruise_cte_m": 1.5,
+      "full_throttle_heading_deg": 11.0,
+      "cruise_heading_deg": 35.0,
+      "throttle_rise_per_sec": 0.5,
+      "min_course_speed_mps": 0.45,
+      "course_max_age_sec": 0.6,
+      "position_heading_max_age_sec": 0.8,
+      "forward_acquire_sec": 0.6,
+      "forward_memory_sec": 4.0
+    },
+    "04_predictive_recovery": {
+      "full_throttle_cte_m": 0.30,
+      "cruise_cte_m": 1.5,
+      "full_throttle_heading_deg": 11.0,
+      "cruise_heading_deg": 35.0,
+      "throttle_rise_per_sec": 0.5,
+      "min_course_speed_mps": 0.45,
+      "course_max_age_sec": 0.6,
+      "position_heading_max_age_sec": 0.8,
+      "forward_acquire_sec": 0.6,
+      "forward_memory_sec": 4.0,
+      "lookahead_time_sec": 1.8,
+      "lookahead_min_m": 2.4,
+      "lookahead_max_m": 5.0,
+      "prediction_horizon_sec": 1.0,
+      "prediction_min_convergence_mps": 0.05,
+      "prediction_max_path_turn_deg": 15.0,
+      "prediction_corridor_margin_m": 0.2
     }
   }
 }

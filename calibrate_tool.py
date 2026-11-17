@@ -21,7 +21,7 @@ import sys
 import threading
 import time
 
-from auto_strategies import default_autonomous_config
+from auto_strategies import default_autonomous_config, normalize_autonomous_config
 
 try:
     import serial
@@ -284,16 +284,23 @@ def load_config(path):
         try:
             with open(path, "r", encoding="utf-8") as f:
                 loaded = json.load(f)
-            for section in cfg:
-                if section in loaded and isinstance(loaded[section], dict):
-                    cfg[section].update(loaded[section])
-            print(f"[LOADED] Read the existing configuration file ({path}).")
         except Exception as exc:
             print(f"[WARNING] Could not read the existing configuration file ({exc}); starting with defaults.")
+            return cfg
+        # Normalize before merging so historical tuning replaces the matching
+        # defaults. Ambiguous aliases must fail rather than silently reset tuning.
+        if "autonomous" in loaded:
+            loaded["autonomous"] = normalize_autonomous_config(loaded["autonomous"])
+        for section in cfg:
+            if section in loaded and isinstance(loaded[section], dict):
+                cfg[section].update(loaded[section])
+        print(f"[LOADED] Read the existing configuration file ({path}).")
     return cfg
 
 
 def save_config(cfg, path):
+    if "autonomous" in cfg:
+        cfg = dict(cfg, autonomous=normalize_autonomous_config(cfg["autonomous"]))
     with open(path, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2, ensure_ascii=False)
     print(f"\n[SAVED] Calibration settings saved to '{os.path.abspath(path)}'.")
