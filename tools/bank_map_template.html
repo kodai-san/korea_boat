@@ -141,7 +141,7 @@ td.num { font-family: var(--font-data); font-variant-numeric: tabular-nums; }
       <span class="key"><i style="background:var(--water)"></i>Water between the estimated banks</span>
       <span class="key"><i style="background:var(--land)"></i>Land beyond the banks</span>
       <span class="key"><i class="line"></i>Bank, from where the boat hit it</span>
-      <span class="key"><i class="dash" style="border-top-color:var(--lane)"></i>Lanes centred between the banks (WP1 → WP65)</span>
+      <span class="key"><i class="dash" style="border-top-color:var(--lane)"></i><span id="laneKey">Lanes (WP1 → WP65)</span></span>
       <span class="key"><i class="dash" style="border-top:1px dashed var(--muted)"></i>Lanes in the waypoint files now</span>
       <span class="key"><i style="background:var(--manual)"></i>Under power, manual</span>
       <span class="key"><i style="background:var(--auto)"></i>Under power, AUTO</span>
@@ -153,6 +153,16 @@ td.num { font-family: var(--font-data); font-variant-numeric: tabular-nums; }
     <canvas id="map" aria-label="Course map with boat tracks and estimated banks"></canvas>
     <div class="readout" id="readout">Hover the map to read the position and the distance to each bank.</div>
     <p class="note">Drawn in course coordinates: left to right is WP1 → WP65, down is the right-hand side. Only RTK-fix positions (about 2 cm accuracy) are shown. Banks are modelled as straight lines parallel to the course, one channel width apart. Powered tracks drawn on the land are anomalies left out of the estimate.</p>
+  </section>
+
+  <section class="card" id="optCard" hidden>
+    <h2>Lane optimisation <span class="note" id="optSub"></span></h2>
+    <p class="note" id="optLead"></p>
+    <div class="tablewrap"><table>
+      <thead><tr><th>Lanes</th><th>Start lane</th><th>Lane position</th><th>Room to nearer bank</th><th id="optUnsafeH">Runs too close to a bank</th><th>Runs that hit a bank</th><th>Closest 1% of runs</th><th>Mean time to finish</th><th>Lane changes per run</th></tr></thead>
+      <tbody id="optTable"></tbody>
+    </table></div>
+    <p class="note" id="optNote"></p>
   </section>
 
   <div class="two">
@@ -204,7 +214,7 @@ const D = /*__DATA__*/null;
    [B.channel_width_m.toFixed(1) + " m", B.channel_width_range_m
       ? `Channel width, measured between the bank hits (${B.channel_width_range_m[0].toFixed(1)}–${B.channel_width_range_m[1].toFixed(1)} m from their spread; on-site estimate about ${B.channel_width_given_m} m)`
       : `Channel width (given ${B.channel_width_given_m} m; data needs ≥ ${B.min_width_from_data_m.toFixed(2)} m)`, null],
-   [(LN.left - LB).toFixed(1) + " m · " + (RB - LN.right).toFixed(1) + " m", LA && Math.abs(LA.shift_m) > 0.01 ? `Left lane to left bank · right lane to right bank (lanes moved ${sgn(LA.shift_m, 2)} m to centre them)` : "Left lane to left bank · right lane to right bank", null],
+   [(LN.left - LB).toFixed(1) + " m · " + (RB - LN.right).toFixed(1) + " m", LA && LA.changed ? `Left lane to left bank · right lane to right bank (${LA.source} lanes, ${LA.spacing_m} m apart)` : "Left lane to left bank · right lane to right bank", null],
    [PC.powered.toLocaleString(), `Positions under power used (${PC.carried.toLocaleString()} carried and ${PC.idle.toLocaleString()} idle left out)`, null]]
     .forEach(([v, k, pill]) => {
       const d = document.createElement("div"); d.className = "stat";
@@ -238,10 +248,32 @@ const D = /*__DATA__*/null;
       ? `The width is measured, not assumed: ${B.channel_width_m.toFixed(2)} m between the two banks, against an on-site estimate of about ${B.channel_width_given_m} m.`
       : `The furthest right the boat has gone under power is ${sgn(OP.right.off, 2)} m, ${B.right_bank.room_m.toFixed(2)} m inside the right bank. Without the anomalies, the data needs a channel of at least ${B.min_width_from_data_m.toFixed(2)} m.`,
     bp ? `The path the boat was carried along beside the right bank runs at ${sgn(bp.angle_deg, 2)}° to the course (${bp.scatter_m.toFixed(2)} m scatter), which supports the banks running parallel to the course.` : "",
-    LA && Math.abs(LA.shift_m) > 0.01 ? `The lanes are drawn centred between the banks: moved ${sgn(LA.shift_m, 2)} m with their ${(LN0.right - LN0.center).toFixed(2)} m spacing kept, leaving ${LA.room_to_bank_m.left.toFixed(2)} m and ${LA.room_to_bank_m.right.toFixed(2)} m to the banks. The boat still follows the lanes in left/center/right.csv (faint dashed); the centred waypoints are in course_banks.json.` : "",
+    LA && LA.changed && LA.source === "optimised" ? `The lanes drawn are the optimised ones (see Lane optimisation): ${LA.spacing_m} m apart at ${sgn(LA.off_m.left, 2)}, ${sgn(LA.off_m.center, 2)} and ${sgn(LA.off_m.right, 2)} m, leaving ${LA.room_to_bank_m.left.toFixed(2)} m and ${LA.room_to_bank_m.right.toFixed(2)} m to the banks. The boat still follows the lanes in left/center/right.csv (faint dashed); the optimised waypoints are in lanes_optimised/.` : "",
+    LA && LA.changed && LA.source === "centred" ? `The lanes are drawn centred between the banks: moved ${sgn(LA.shift_m, 2)} m with their ${(LN0.right - LN0.center).toFixed(2)} m spacing kept, leaving ${LA.room_to_bank_m.left.toFixed(2)} m and ${LA.room_to_bank_m.right.toFixed(2)} m to the banks. The boat still follows the lanes in left/center/right.csv (faint dashed); the centred waypoints are in course_banks.json.` : "",
     `Offsets are at the GPS antenna. The hull reaches about ${B.boat_half_width_m} m further out (assumed half-beam; measure it).`,
     ...B.notes,
   ].filter(Boolean).forEach((t) => { const li = document.createElement("li"); li.textContent = t; $("method").appendChild(li); });
+
+  // ---------- lane optimisation ----------
+  $("laneKey").textContent = LA && LA.changed ? (LA.source === "optimised" ? "Optimised lanes (WP1 → WP65)" : "Lanes centred between the banks (WP1 → WP65)") : "Lanes (WP1 → WP65)";
+  if (LA && LA.source === "optimised") {
+    $("optCard").hidden = false;
+    const st = LA.settings, cap = (n) => n[0].toUpperCase() + n.slice(1);
+    $("optSub").textContent = `· ${LA.runs_per_lane} simulated runs per start lane`;
+    $("optUnsafeH").textContent = `Runs within ${LA.safe_clearance_m} m of a bank`;
+    $("optLead").textContent = `Simulated with the boat's own navigator and ${st.strategy.replace(/^\d+_/, "").replace(/_/g, " ")} strategy at throttle ratio ${st.throttle_ratio}, against a boat model fitted from the logs. Each run starts the way the logged AUTO entries do: nearly stopped and pointing up to 75° off the course. Best start lane with the optimised lanes: ${LA.start_lane}.`;
+    [["Now (waypoint files)", LA.present, LN0], [`Optimised (${LA.spacing_m} m apart)`, LA.chosen, LA.off_m]].forEach(([label, e, offs]) => {
+      ["left", "center", "right"].forEach((n, i) => {
+        const v = e.lanes[n], tr = document.createElement("tr");
+        const room = Math.min(offs[n] - LB, RB - offs[n]);
+        [[i === 0 ? label : ""], [cap(n) + (label.startsWith("Opt") && n === LA.start_lane ? " ★" : "")], [sgn(offs[n], 2) + " m", 1], [room.toFixed(2) + " m", 1],
+         [v.unsafe_pct.toFixed(1) + "%", 1], [v.hit_pct.toFixed(1) + "%", 1], [v.clearance_p1_m.toFixed(2) + " m", 1], [v.mean_time_s.toFixed(1) + " s", 1], [v.lane_changes_per_run.toFixed(2), 1]]
+          .forEach(([t, num]) => { const td = document.createElement("td"); if (num) td.className = "num"; td.textContent = t; tr.appendChild(td); });
+        $("optTable").appendChild(tr);
+      });
+    });
+    $("optNote").textContent = `Over all three start lanes: ${LA.present.unsafe_pct.toFixed(1)}% of runs come within ${LA.safe_clearance_m} m of a bank with the lanes as they are now, ${LA.chosen.unsafe_pct.toFixed(1)}% with the optimised lanes. Lane position barely changes the time, because AUTO runs at full throttle on a straight course; the risk is the first seconds after AUTO starts, when the boat runs off in whatever direction it is pointing. ★ = suggested start lane. The model reads the largest start excursions 10–20% low, which the ${LA.safe_clearance_m} m margin allows for.`;
+  }
 
   // ---------- AUTO runs ----------
   const stratName = (s) => s.replace(/^\d+_/, "").replace(/_/g, " ");
@@ -383,7 +415,7 @@ const D = /*__DATA__*/null;
     for (let v = Math.ceil(y0 / gy) * gy; v <= y1; v += gy) { ctx.beginPath(); ctx.moveTo(m.l, Y(v)); ctx.lineTo(m.l + pw, Y(v)); ctx.stroke(); }
     // racing lanes: dashed lane lines with a waypoint tick every 10 waypoints
     const laneCol = css("--lane"), wpN = B.course_frame.waypoints || 65, wpStep = CL / (wpN - 1);
-    if (LA && Math.abs(LA.shift_m) > 0.01) {
+    if (LA && LA.changed) {
       ctx.setLineDash([3, 4]); ctx.strokeStyle = muted; ctx.lineWidth = 1; ctx.globalAlpha = 0.8;
       [LN0.left, LN0.center, LN0.right].forEach((o) => { ctx.beginPath(); ctx.moveTo(X(0), Y(o)); ctx.lineTo(X(CL), Y(o)); ctx.stroke(); });
       ctx.globalAlpha = 1;
@@ -533,7 +565,7 @@ const D = /*__DATA__*/null;
     ctx.globalAlpha = 1;
     ctx.strokeStyle = css("--bank"); ctx.lineWidth = 3;
     [LB, RB].forEach((o) => { ctx.beginPath(); ctx.moveTo(m.l, Y(o)); ctx.lineTo(m.l + pw, Y(o)); ctx.stroke(); });
-    if (LA && Math.abs(LA.shift_m) > 0.01) {
+    if (LA && LA.changed) {
       ctx.setLineDash([3, 4]); ctx.strokeStyle = css("--muted"); ctx.lineWidth = 1;
       [LN0.left, LN0.center, LN0.right].forEach((o) => { ctx.beginPath(); ctx.moveTo(X(0), Y(o)); ctx.lineTo(X(CL), Y(o)); ctx.stroke(); });
     }

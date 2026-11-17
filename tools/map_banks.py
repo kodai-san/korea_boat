@@ -40,6 +40,10 @@ Outputs:
   course_banks.json   bank lines in course and lat/lon coordinates, evidence, per-station envelope
   bank_map.html       interactive map (open in a browser)
 
+Lanes on the map: the lanes in left/center/right.csv are drawn faint. Beside them the map draws either the
+same lanes centred between the banks or, once tools/optimise_lanes.py has been run for these banks, the
+optimised lanes from course_lanes_optimised.json. The boat's lane CSV files are never changed.
+
 Usage (from the repo root):
   python tools/map_banks.py
   python tools/map_banks.py --channel-width 11.0 --html-out somewhere.html
@@ -508,7 +512,9 @@ def main():
     # these waypoints are only written to the JSON.
     lane_shift = round((placed["left"] + placed["right"]) / 2.0 - LANE_OFF["center"], 3)
     lanes_adj = dict(
+        source="centred",
         shift_m=lane_shift,
+        spacing_m=round(LANE_OFF["right"] - LANE_OFF["center"], 2),
         off_m={n: round(o + lane_shift, 3) for n, o in LANE_OFF.items()},
         room_to_bank_m=dict(left=round(LANE_OFF["left"] + lane_shift - placed["left"], 2),
                             right=round(placed["right"] - LANE_OFF["right"] - lane_shift, 2)),
@@ -516,6 +522,27 @@ def main():
                               for a, o in (to_course(*p) for p in LANES[n])] for n in LANES},
         note="center lane on the channel centre line, lane spacing unchanged; the boat's lane CSV files are not changed",
     )
+    # If tools/optimise_lanes.py has been run for these banks, draw its lanes instead of the centred ones.
+    opt_path = os.path.join(ROOT, "course_lanes_optimised.json")
+    if os.path.exists(opt_path):
+        with open(opt_path, encoding="utf-8") as f:
+            opt = json.load(f)
+        if abs(opt["banks"]["left"] - placed["left"]) < 0.011 and abs(opt["banks"]["right"] - placed["right"]) < 0.011:
+            ch, pr = opt["chosen"], opt["present"]
+            lanes_adj = dict(
+                source="optimised", shift_m=round(ch["center_off_m"] - LANE_OFF["center"], 3),
+                spacing_m=ch["spacing_m"], off_m=ch["lanes_off_m"], room_to_bank_m=ch["room_to_bank_m"],
+                start_lane=ch["start_lane"], safe_clearance_m=opt["safe_clearance_m"],
+                runs_per_lane=opt["runs_per_lane"], settings=opt["settings"],
+                chosen={k: ch[k] for k in ("unsafe_pct", "hit_pct", "clearance_p1_m", "mean_time_s", "lanes")},
+                present={k: pr[k] for k in ("unsafe_pct", "hit_pct", "clearance_p1_m", "mean_time_s", "lanes")},
+                waypoints_latlon=opt["waypoints_latlon"],
+                note="from tools/optimise_lanes.py (course_lanes_optimised.json, lanes_optimised/*.csv); "
+                     "the boat's lane CSV files are not changed",
+            )
+        else:
+            print("Note: course_lanes_optimised.json was made for different banks; run tools/optimise_lanes.py again.")
+    lanes_adj["changed"] = any(abs(lanes_adj["off_m"][n] - LANE_OFF[n]) > 0.01 for n in LANE_OFF)
     banks = dict(
         model=f"straight lines parallel to the course, {placed['width']} m apart",
         course_frame=dict(origin_lat=REF_LAT, origin_lon=REF_LON, bearing_deg=round(COURSE_BRG, 2),
@@ -576,7 +603,7 @@ def main():
              f"data needs at least {placed['min_width_from_data']} m") + f"). {placed['how']}.")
     if not wr:
         print(f"Room beyond the outermost powered position: left {placed['room_left_m']} m, right {placed['room_right_m']} m")
-    print(f"Lanes re-centred by {lane_shift:+.3f} m: left {lanes_adj['off_m']['left']:+.2f}, center {lanes_adj['off_m']['center']:+.2f}, "
+    print(f"Lanes drawn ({lanes_adj['source']}, spacing {lanes_adj['spacing_m']} m): left {lanes_adj['off_m']['left']:+.2f}, center {lanes_adj['off_m']['center']:+.2f}, "
           f"right {lanes_adj['off_m']['right']:+.2f} m; {lanes_adj['room_to_bank_m']['left']} m and "
           f"{lanes_adj['room_to_bank_m']['right']} m to the banks")
     for n in placed["notes"]:
