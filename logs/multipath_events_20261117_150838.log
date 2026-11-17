@@ -1,0 +1,47 @@
+2026-11-17T06:08:38 UTC INFO [LOG] Started recording diagnostic events: logs/multipath_events_20261117_150838.log
+2026-11-17T06:08:40 UTC INFO [AUTO STRATEGY] {"cruise_pwm_us": 1990, "cruise_ratio": 1.0, "full_pwm_us": 1990, "navigation": {"boundary_gain_boost": 1.45, "boundary_lookahead_m": 2.4, "drift_oppose_tol_deg": 5.0, "finish_margin_m": 1.0, "finish_radius_m": 1.8, "lookahead_dist_m": 3.5, "max_steer_angle_deg": 35.0, "min_heading_move_m": 0.25, "servo_slew_per_cycle": 0.18, "shift_cooldown_sec": 3.0, "shift_cte_m": 0.7, "shift_hold_sec": 1.2, "sog_cog_blend_mps": 0.45, "wp_reach_radius_m": 1.8}, "parameters": {"course_max_age_sec": 0.6, "cruise_cte_m": 1.5, "cruise_heading_deg": 35.0, "forward_acquire_sec": 0.6, "forward_memory_sec": 4.0, "full_throttle_cte_m": 0.3, "full_throttle_heading_deg": 11.0, "lookahead_max_m": 5.0, "lookahead_min_m": 2.4, "lookahead_time_sec": 1.8, "min_course_speed_mps": 0.45, "position_heading_max_age_sec": 0.8, "prediction_corridor_margin_m": 0.2, "prediction_horizon_sec": 1.0, "prediction_max_path_turn_deg": 15.0, "prediction_min_convergence_mps": 0.05, "throttle_rise_per_sec": 0.5}, "strategy": "04_predictive_recovery"}
+2026-11-17T06:08:42 UTC INFO [NTRIP] Connection attempt 1: rts2.ngii.go.kr:2101/VRS-RTCM32
+2026-11-17T06:08:42 UTC INFO [GPS STATE] fix_quality=0 (No Fix), valid=False, age=999.000s
+2026-11-17T06:08:42 UTC INFO [DIAGNOSTICS] mode=MANUAL, fix_quality=0, {'gps_valid': 0, 'gps_age_sec': 999.0, 'ntrip_connected': 0, 'ntrip_status': 'connecting', 'ntrip_connection_attempts': 1, 'ntrip_last_response': '', 'ntrip_last_error': '', 'rtcm_bytes_rx': 0, 'rtcm_rx_age_sec': '', 'ntrip_gga_sent': 0, 'rtcm_bytes_written': 0, 'rtcm_write_errors': 0, 'rtcm_last_write_error': '', 'gps_sog_mps': 0.0, 'gps_cog_deg': '', 'gps_diff_age_sec': '', 'gps_alt_m': '', 'gps_utc': ''}
+2026-11-17T06:08:43 UTC WARNING [SPRESENSE] No matching free USB port; waiting for Spresense. Set --spresense-port or --spresense-serial-number for a generic USB bridge.
+2026-11-17T06:08:43 UTC INFO [NTRIP] TCP connected; sending mountpoint request
+2026-11-17T06:08:43 UTC WARNING [NTRIP ERROR] Check server credentials and mountpoint: HTTP/1.1 401 Unauthorized
+2026-11-17T06:08:44 UTC INFO [GPS STATE] fix_quality=5 (RTK FLOAT), valid=True, age=0.007s
+2026-11-17T06:08:47 UTC INFO [GPS STATE] fix_quality=4 (RTK FIX (Precise)), valid=True, age=0.025s
+2026-11-17T06:08:48 UTC INFO [NTRIP] Connection attempt 2: rts2.ngii.go.kr:2101/VRS-RTCM32
+2026-11-17T06:08:48 UTC INFO [NTRIP] TCP connected; sending mountpoint request
+2026-11-17T06:08:48 UTC WARNING [NTRIP ERROR] Check server credentials and mountpoint: HTTP/1.1 401 Unauthorized
+2026-11-17T06:08:53 UTC INFO [DIAGNOSTICS] mode=MANUAL, fix_quality=4, {'gps_valid': 1, 'gps_age_sec': 0.27, 'ntrip_connected': 0, 'ntrip_status': 'rejected', 'ntrip_connection_attempts': 2, 'ntrip_last_response': 'HTTP/1.1 401 Unauthorized', 'ntrip_last_error': 'HTTP/1.1 401 Unauthorized', 'rtcm_bytes_rx': 0, 'rtcm_rx_age_sec': '', 'ntrip_gga_sent': 0, 'rtcm_bytes_written': 0, 'rtcm_write_errors': 0, 'rtcm_last_write_error': '', 'gps_sog_mps': 1.405, 'gps_cog_deg': 61.66, 'gps_diff_age_sec': 1.6, 'gps_alt_m': 7.471, 'gps_utc': '060852.60'}
+2026-11-17T06:08:53 UTC INFO [NTRIP] Connection attempt 3: rts2.ngii.go.kr:2101/VRS-RTCM32
+2026-11-17T06:08:53 UTC INFO [NTRIP] TCP connected; sending mountpoint request
+2026-11-17T06:08:53 UTC WARNING [NTRIP ERROR] Check server credentials and mountpoint: HTTP/1.1 401 Unauthorized
+2026-11-17T06:08:58 UTC INFO [NTRIP] Connection attempt 4: rts2.ngii.go.kr:2101/VRS-RTCM32
+2026-11-17T06:08:58 UTC INFO [NTRIP] TCP connected; sending mountpoint request
+2026-11-17T06:08:58 UTC WARNING [NTRIP ERROR] Check server credentials and mountpoint: HTTP/1.1 401 Unauthorized
+2026-11-17T06:09:03 UTC INFO [DIAGNOSTICS] mode=MANUAL, fix_quality=4, {'gps_valid': 1, 'gps_age_sec': 0.084, 'ntrip_connected': 0, 'ntrip_status': 'rejected', 'ntrip_connection_attempts': 4, 'ntrip_last_response': 'HTTP/1.1 401 Unauthorized', 'ntrip_last_error': 'HTTP/1.1 401 Unauthorized', 'rtcm_bytes_rx': 0, 'rtcm_rx_age_sec': '', 'ntrip_gga_sent': 0, 'rtcm_bytes_written': 0, 'rtcm_write_errors': 0, 'rtcm_last_write_error': '', 'gps_sog_mps': 1.162, 'gps_cog_deg': 59.65, 'gps_diff_age_sec': 0.8, 'gps_alt_m': 7.519, 'gps_utc': '060902.80'}
+2026-11-17T06:09:03 UTC INFO [NTRIP] Connection attempt 5: rts2.ngii.go.kr:2101/VRS-RTCM32
+2026-11-17T06:09:03 UTC INFO [NTRIP] TCP connected; sending mountpoint request
+2026-11-17T06:09:03 UTC WARNING [NTRIP ERROR] Check server credentials and mountpoint: HTTP/1.1 401 Unauthorized
+2026-11-17T06:09:06 UTC INFO [GPS STATE] fix_quality=2 (DGPS (Differential)), valid=True, age=0.009s
+2026-11-17T06:09:08 UTC INFO [GPS STATE] fix_quality=5 (RTK FLOAT), valid=True, age=0.003s
+2026-11-17T06:09:08 UTC INFO [NTRIP] Connection attempt 6: rts2.ngii.go.kr:2101/VRS-RTCM32
+2026-11-17T06:09:08 UTC INFO [NTRIP] TCP connected; sending mountpoint request
+2026-11-17T06:09:09 UTC WARNING [NTRIP ERROR] Check server credentials and mountpoint: HTTP/1.1 401 Unauthorized
+2026-11-17T06:09:11 UTC INFO [GPS STATE] fix_quality=2 (DGPS (Differential)), valid=True, age=0.046s
+2026-11-17T06:09:13 UTC INFO [DIAGNOSTICS] mode=MANUAL, fix_quality=2, {'gps_valid': 1, 'gps_age_sec': 0.565, 'ntrip_connected': 0, 'ntrip_status': 'rejected', 'ntrip_connection_attempts': 6, 'ntrip_last_response': 'HTTP/1.1 401 Unauthorized', 'ntrip_last_error': 'HTTP/1.1 401 Unauthorized', 'rtcm_bytes_rx': 0, 'rtcm_rx_age_sec': '', 'ntrip_gga_sent': 0, 'rtcm_bytes_written': 0, 'rtcm_write_errors': 0, 'rtcm_last_write_error': '', 'gps_sog_mps': 0.369, 'gps_cog_deg': 47.49, 'gps_diff_age_sec': 1.4, 'gps_alt_m': 8.091, 'gps_utc': '060912.40'}
+2026-11-17T06:09:13 UTC WARNING [SPRESENSE] No matching free USB port; waiting for Spresense. Set --spresense-port or --spresense-serial-number for a generic USB bridge.
+2026-11-17T06:09:13 UTC INFO [GPS STATE] fix_quality=5 (RTK FLOAT), valid=True, age=0.040s
+2026-11-17T06:09:14 UTC INFO [NTRIP] Connection attempt 7: rts2.ngii.go.kr:2101/VRS-RTCM32
+2026-11-17T06:09:14 UTC INFO [NTRIP] TCP connected; sending mountpoint request
+2026-11-17T06:09:14 UTC WARNING [NTRIP ERROR] Check server credentials and mountpoint: HTTP/1.1 401 Unauthorized
+2026-11-17T06:09:14 UTC INFO [GPS STATE] fix_quality=2 (DGPS (Differential)), valid=True, age=0.002s
+2026-11-17T06:09:15 UTC INFO [GPS STATE] fix_quality=5 (RTK FLOAT), valid=True, age=0.009s
+2026-11-17T06:09:19 UTC INFO [NTRIP] Connection attempt 8: rts2.ngii.go.kr:2101/VRS-RTCM32
+2026-11-17T06:09:19 UTC INFO [NTRIP] TCP connected; sending mountpoint request
+2026-11-17T06:09:19 UTC WARNING [NTRIP ERROR] Check server credentials and mountpoint: HTTP/1.1 401 Unauthorized
+2026-11-17T06:09:23 UTC INFO [DIAGNOSTICS] mode=MANUAL, fix_quality=5, {'gps_valid': 1, 'gps_age_sec': 0.137, 'ntrip_connected': 0, 'ntrip_status': 'rejected', 'ntrip_connection_attempts': 8, 'ntrip_last_response': 'HTTP/1.1 401 Unauthorized', 'ntrip_last_error': 'HTTP/1.1 401 Unauthorized', 'rtcm_bytes_rx': 0, 'rtcm_rx_age_sec': '', 'ntrip_gga_sent': 0, 'rtcm_bytes_written': 0, 'rtcm_write_errors': 0, 'rtcm_last_write_error': '', 'gps_sog_mps': 0.726, 'gps_cog_deg': 70.06, 'gps_diff_age_sec': 0.8, 'gps_alt_m': 7.977, 'gps_utc': '060922.80'}
+2026-11-17T06:09:24 UTC INFO [NTRIP] Connection attempt 9: rts2.ngii.go.kr:2101/VRS-RTCM32
+2026-11-17T06:09:24 UTC INFO [NTRIP] TCP connected; sending mountpoint request
+2026-11-17T06:09:24 UTC WARNING [NTRIP ERROR] Check server credentials and mountpoint: HTTP/1.1 401 Unauthorized
+2026-11-17T06:09:27 UTC INFO [NTRIP STOP] {'connected': False, 'status': 'stopping', 'connection_attempts': 9, 'last_response': 'HTTP/1.1 401 Unauthorized', 'last_error': 'HTTP/1.1 401 Unauthorized', 'rtcm_bytes_rx': 0, 'rtcm_rx_age_sec': None, 'gga_sent': 0}
+2026-11-17T06:09:27 UTC INFO [SESSION END]
