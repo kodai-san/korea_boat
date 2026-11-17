@@ -175,16 +175,50 @@ class AutoDriver:
     """Call the navigator the way multipath_boat.py's main loop does in AUTO, including the GPS-course
     heading selector (MotionHeadingSelector) used by strategies with uses_gps_course."""
 
-    def __init__(self, nav):
+    def __init__(self, nav, snapshot_filter=None):
         self.nav = nav
+        self.snapshot_filter = snapshot_filter
+        self.last_snapshot = None
         strategy = getattr(nav, "strategy", None)
+        self.guard = mb.GpsAwareController(nav) if getattr(strategy, "uses_gps_guard", False) is True else None
         self.selector = (MotionHeadingSelector(strategy.options)
-                         if getattr(strategy, "uses_gps_course", False) else None)
+                         if getattr(strategy, "uses_gps_course", False) and self.guard is None else None)
         self.heading_info = None
+
+    def _snapshot(self, gps, t):
+        snap = gps.snapshot(t)
+        self.last_snapshot = self.snapshot_filter(snap, t) if self.snapshot_filter is not None else snap
+        return self.last_snapshot
 
     def enter(self, gps, t, moving=False):
         """AUTO entry. moving=True emulates recent forward driving in MANUAL (the course is reused)."""
-        snap = gps.snapshot(t)
+        snap = self._snapshot(gps, t)
+        if self.guard is not None:
+            if moving:
+                # The supplied initial velocity represents an already moving
+                # boat. Give the guard the preceding MANUAL history at valid
+                # source epochs, not several copies of the current observation.
+                duration = self.guard.options["forward_acquire_sec"] + 0.2
+                steps = max(2, int(math.ceil(duration / 0.2)))
+                for index in range(steps, 0, -1):
+                    offset = 0.2 * index
+                    past = dict(snap)
+                    observed = past.get("course_time_mono")
+                    if observed is not None:
+                        past["course_time_mono"] = observed - offset
+                    centiseconds = round((t - offset - past.get("age_sec", 0.0)) * 100) % 8640000
+                    hours, remainder = divmod(centiseconds, 360000)
+                    minutes, seconds = divmod(remainder, 6000)
+                    past["gps_utc"] = f"{hours:02d}{minutes:02d}{seconds / 100:05.2f}"
+                    speed, course = past.get("course_speed_mps"), past.get("course_deg")
+                    if speed is not None and course is not None:
+                        angle = math.radians(course)
+                        past["lat"] -= math.degrees(speed * math.cos(angle) * offset / 6378137.0)
+                        past["lon"] -= math.degrees(speed * math.sin(angle) * offset /
+                                                    (6378137.0 * math.cos(math.radians(past["lat"]))))
+                    self.guard.observe_manual(past, 1.0, t - offset)
+                self.guard.observe_manual(snap, 1.0, t)
+            return self.guard.enter_auto(snap, t)
         if self.selector is not None:
             if moving:
                 self.selector.observe_manual(snap, 1.0, t - 1.0)
@@ -195,7 +229,11 @@ class AutoDriver:
         return self.nav.enter_auto_mode(snap["lat"], snap["lon"], now_mono=t)
 
     def update(self, gps, t):
-        snap = gps.snapshot(t)
+        snap = self._snapshot(gps, t)
+        if self.guard is not None:
+            command = self.guard.update(snap, t)
+            self.heading_info = self.guard.heading_info
+            return command
         if self.selector is not None:
             info = self.selector.select(snap, t)
         else:
@@ -216,7 +254,9 @@ def load_controller_class(spec):
     return getattr(importlib.import_module(module_name), class_name)
 
 
-def simulate_auto_once(args, model, env, cal, nav_cls, seed, log_path=None, init_state=None):
+def simulate_auto_once(args, model, env, cal, nav_cls, seed, log_path=None, init_state=None,
+                       snapshot_filter=None):
+    """Closed-loop dynamics; optional observation faults never change the true boat state."""
     drift, scale, bias = env
     paths = {lane: mb.load_waypoints_csv(p) for lane, p in mb.PATH_FILES.items()}
     nav = make_navigator(nav_cls, paths, cal)
@@ -225,7 +265,7 @@ def simulate_auto_once(args, model, env, cal, nav_cls, seed, log_path=None, init
     cruise_us = int(round(pwm["esc_neutral_us"] + ratio * (pwm["esc_fwd_max_us"] - pwm["esc_neutral_us"])))
     rng = np.random.default_rng(seed)
 
-    # Initial pose: start of the chosen lane, pointing along the first segment, at rest.
+    # Initial pose: start of the chosen lane, optionally already moving from MANUAL.
     lane_pts = nav.enu_paths[args.start_lane]
     (ax_, ay_), (bx_, by_) = lane_pts[0], lane_pts[1]
     seg_psi = math.atan2(bx_ - ax_, by_ - ay_)
@@ -233,14 +273,15 @@ def simulate_auto_once(args, model, env, cal, nav_cls, seed, log_path=None, init
     x = ax_ + off * math.cos(seg_psi)
     y = ay_ - off * math.sin(seg_psi)
     psi = seg_psi + math.radians(args.start_heading)
-    state = (x, y, psi, 0.0, 0.0) if init_state is None else tuple(init_state)
+    state = (x, y, psi, getattr(args, "start_speed", 0.0), 0.0) if init_state is None else tuple(init_state)
     x, y = state[0], state[1]
 
     gps = GPSEmulator(noise_m=args.gps_noise, bias_walk_m=args.gps_bias_walk, seed=seed,
                       heading_source=getattr(args, "heading_source", None))
-    gps.update(0.0, x, y, 0.0, 0.0)
+    v0 = (state[3] * math.sin(state[2]) + drift[0], state[3] * math.cos(state[2]) + drift[1])
+    gps.update(0.0, x, y, *v0)
     gps.reset_heading_anchor()
-    driver = AutoDriver(nav)
+    driver = AutoDriver(nav, snapshot_filter=snapshot_filter)
     driver.enter(gps, 0.0, moving=state[3] >= 0.45)
 
     gust = 0.0
@@ -248,10 +289,10 @@ def simulate_auto_once(args, model, env, cal, nav_cls, seed, log_path=None, init
     servo_hist = [pwm["servo_center_us"]] * (model.servo_delay + 1)
     esc_hist = [pwm["esc_neutral_us"]] * (model.esc_delay + 1)
     # The controller sees each fix ~GPS_LATENCY_SEC after it was measured (gps_utc vs log time).
-    v0 = (state[3] * math.sin(state[2]) + drift[0], state[3] * math.cos(state[2]) + drift[1])
     gps_hist = [(x, y) + v0] * (int(round(GPS_LATENCY_SEC / DT)) + 1)
 
     rows = []
+    guard_states, guard_reasons, throttle_norms = [], [], []
     nav_info = None
     t = 0.0
     finished = False
@@ -273,18 +314,28 @@ def simulate_auto_once(args, model, env, cal, nav_cls, seed, log_path=None, init
             servo_us, esc_us = pwm["servo_center_us"], pwm["esc_neutral_us"]
         else:
             servo_us = mb.map_norm_to_pwm(nav_info["steer_norm"], pwm["servo_center_us"], pwm["servo_left_us"], pwm["servo_right_us"])
-            blend = max(0.0, min(1.0, nav_info.get("throttle_blend", 0.0)))
-            esc_us = int(round(cruise_us + blend * (pwm["esc_fwd_max_us"] - cruise_us)))
+            if nav_info.get("throttle_norm") is not None:
+                esc_us = mb.map_norm_to_pwm(nav_info["throttle_norm"], pwm["esc_neutral_us"],
+                                           pwm["esc_rev_max_us"], pwm["esc_fwd_max_us"])
+            else:
+                blend = max(0.0, min(1.0, nav_info.get("throttle_blend", 0.0)))
+                esc_us = int(round(cruise_us + blend * (pwm["esc_fwd_max_us"] - cruise_us)))
 
         if finish_t is not None and t > finish_t:
             if line_t is not None or t > finish_t + 15.0:
                 break
         else:
-            rows.append([f"{t:.3f}", "AUTO", nav_info["active_lane"], nav_info["wp_number"], 4,
-                         f"{lat:.8f}", f"{lon:.8f}", f"{nav_info['cte_right_m']:.3f}",
+            guard_states.append(nav_info.get("gps_guard_state"))
+            guard_reasons.append(nav_info.get("gps_guard_reason"))
+            throttle_norms.append(nav_info.get("throttle_norm"))
+            observed = driver.last_snapshot
+            lat, lon = observed["lat"], observed["lon"]
+            rows.append([f"{t:.3f}", "AUTO", nav_info["active_lane"], nav_info["wp_number"], observed["fix_quality"],
+                         f"{lat:.8f}", f"{lon:.8f}",
+                         (f"{nav_info['cte_right_m']:.3f}" if nav_info.get("cte_right_m") is not None else ""),
                          (f"{driver.heading_info['heading_deg']:.1f}"
                           if driver.heading_info["heading_deg"] is not None else ""),
-                         f"{nav_info['target_bearing_deg']:.1f}", servo_us, esc_us,
+                         (f"{nav_info['target_bearing_deg']:.1f}" if nav_info.get("target_bearing_deg") is not None else ""), servo_us, esc_us,
                          f"{state[0]:.3f}", f"{state[1]:.3f}", int(nav_info["shifted_to"] is not None),
                          int(nav_info["boundary_guard"])])
 
@@ -312,14 +363,18 @@ def simulate_auto_once(args, model, env, cal, nav_cls, seed, log_path=None, init
                         "true_x_m", "true_y_m", "lane_shift", "boundary_guard"])
             w.writerows(rows)
 
-    arr = np.array([[float(r[12]), float(r[13]), float(r[7]), float(r[10])] for r in rows])
+    arr = np.array([[float(r[12]), float(r[13]), float(r[7]) if r[7] else np.nan, float(r[10])]
+                    for r in rows]).reshape((-1, 4))
     lanes = [r[2] for r in rows]
+    finite_cte = np.abs(arr[np.isfinite(arr[:, 2]), 2])
     return {
         "finished": finished and line_t is not None,
         "time_s": line_t if line_t is not None else t,     # Finish-line crossing (race time)
         "auto_end_s": finish_t,
         "true_xy": arr[:, :2],
         "cte": arr[:, 2],
+        "mean_abs_cte_m": float(finite_cte.mean()) if len(finite_cte) else float("nan"),
+        "max_abs_cte_m": float(finite_cte.max()) if len(finite_cte) else float("nan"),
         "servo": arr[:, 3],
         "lanes": lanes,
         "lane_shifts": sum(r[14] for r in rows),
@@ -327,6 +382,10 @@ def simulate_auto_once(args, model, env, cal, nav_cls, seed, log_path=None, init
         "outside_lanes_m": outside_corridor(nav, arr[:, :2]),
         "max_abs_lateral_m": max_abs_lateral(nav, arr[:, :2]),
         "esc": np.array([float(r[11]) for r in rows]),
+        "sample_time_s": np.array([float(r[0]) for r in rows]),
+        "guard_states": guard_states,
+        "guard_reasons": guard_reasons,
+        "throttle_norm": throttle_norms,
     }
 
 
@@ -366,14 +425,15 @@ def run_auto(args):
         res = simulate_auto_once(args, model, env, cal, nav_cls, seed=args.seed + k, log_path=log_path)
         results.append(res)
         print(f"  run {k:02d}: {'finished' if res['finished'] else 'TIMEOUT '} in {res['time_s']:6.1f}s | "
-              f"mean|CTE| {np.mean(np.abs(res['cte'])):.2f} m | max|CTE| {np.max(np.abs(res['cte'])):.2f} m | "
+              f"mean|CTE| {res['mean_abs_cte_m']:.2f} m | max|CTE| {res['max_abs_cte_m']:.2f} m | "
               f"lane shifts {res['lane_shifts']} | wall guard {100 * res['guard_frac']:.0f}% | "
               f"beyond outer lanes {res['outside_lanes_m']:.2f} m | max|lateral| {res['max_abs_lateral_m']:.2f} m")
 
     fin = [r for r in results if r["finished"]]
+    measured_cte = [r["mean_abs_cte_m"] for r in results if math.isfinite(r["mean_abs_cte_m"])]
     print(f"\n[SUMMARY] finished {len(fin)}/{len(results)} | "
           f"time {np.mean([r['time_s'] for r in fin]) if fin else float('nan'):.1f}s | "
-          f"mean|CTE| {np.mean([np.mean(np.abs(r['cte'])) for r in results]):.2f} m | "
+          f"mean|CTE| {np.mean(measured_cte) if measured_cte else float('nan'):.2f} m | "
           f"lane shifts/run {np.mean([r['lane_shifts'] for r in results]):.1f} | "
           f"worst excursion beyond outer lanes {max(r['outside_lanes_m'] for r in results):.2f} m | "
           f"worst |lateral| from centerline {max(r['max_abs_lateral_m'] for r in results):.2f} m")
@@ -532,6 +592,8 @@ def main():
     p_auto.add_argument("--start-lane", default="center", choices=["left", "center", "right"])
     p_auto.add_argument("--start-offset", type=float, default=0.0, help="Lateral start offset, + = right of the lane (m)")
     p_auto.add_argument("--start-heading", type=float, default=0.0, help="Start heading offset from the path (deg)")
+    p_auto.add_argument("--start-speed", type=float, default=0.0,
+                        help="Forward speed at AUTO entry (m/s); >=0.45 emulates recent MANUAL driving")
     p_auto.add_argument("--max-time", type=float, default=300.0)
     add_strategy_args(p_auto)
 

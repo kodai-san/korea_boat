@@ -16,6 +16,8 @@ import multipath_boat as boat
 class CourseAutoIntegrationTests(unittest.TestCase):
     def run_controller(self, launch="forward", disturbance=None, strategy="gps_course_progressive"):
         cal = boat.load_calibration(Path(boat.__file__).parent / "calibration.json")
+        cal["pwm"]["auto_throttle_ratio"] = .60
+        cal["navigation"] = {"finish_margin_m": 0.0}
         cal["autonomous"]["strategy"] = strategy
         cal["mode_switch"]["right_steer_hold_sec"] = .05
         clock, cycle = [100.0], [0]

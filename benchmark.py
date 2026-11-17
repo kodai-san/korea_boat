@@ -315,6 +315,8 @@ class NavigatorController(Controller):
         info = self.driver.update(obs["gps"], obs["t"])
         if info["finished"]:
             return 0.0, 0.0
+        if info.get("throttle_norm") is not None:
+            return info["steer_norm"], info["throttle_norm"]
         blend = max(0.0, min(1.0, info.get("throttle_blend", 0.0)))
         return info["steer_norm"], self.cruise + blend * (1.0 - self.cruise)
 
@@ -328,6 +330,7 @@ def builtin_controllers():
         NavigatorController("03_gps_course_progressive @1.0", "03_gps_course_progressive", cruise_ratio=1.0),
         NavigatorController("04_predictive_recovery @1.0", "04_predictive_recovery", cruise_ratio=1.0),
         NavigatorController("05_straight_line", "05_straight_line"),
+        NavigatorController("06_gps_aware", "06_gps_aware"),
         NavigatorController("05_straight_line no integral", "05_straight_line", {"course_integral_gain": 0.0}),
         PursuitController("cruise_60 (constant 60%)", throttle="cruise"),
         PursuitController("adaptive (full if |CTE|<=0.3 & |herr|<=11)", throttle="adaptive"),
