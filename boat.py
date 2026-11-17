@@ -5,6 +5,7 @@ import math
 import time
 import json
 import glob
+import logging
 import signal
 import socket
 import base64
@@ -32,24 +33,6 @@ def safe_print(*args, **kwargs):
     except Exception:
         pass
 
-try:
-    import serial
-    SERIAL_ERR_TYPES = (serial.SerialException, OSError)
-except Exception:
-    serial = None
-    SERIAL_ERR_TYPES = (OSError,)
-
-try:
-    import board
-    import busio
-    from adafruit_pca9685 import PCA9685
-    HW_AVAILABLE = True
-except Exception:
-    board = None
-    busio = None
-    PCA9685 = None
-    HW_AVAILABLE = False
-
 import subprocess
 import shutil
 
@@ -66,6 +49,7 @@ except Exception:
 from multipath_boat import (
     MultipathNavigator, ZEDF9PReceiver, resolve_navigation_params, latlon_to_enu,
     normalize_axis, detect_serial_ports,
+    PCA9685Driver, ArduinoRCReader, NGII_NtripClient, NTRIP_CONFIG, SESSION_LOG,
 )
 from auto_strategies import create_auto_strategy
 from gps_heading import MotionHeadingSelector
@@ -169,8 +153,6 @@ ST_NEU, TH_NEU = HW["st_neu"], HW["th_neu"]
 RC_OVERRIDE_STEER_RATIO = 0.85
 RC_OVERRIDE_REVERSE_RATIO = HW["rev_ratio"]
 
-RC_VALID_MIN = 750
-RC_VALID_MAX = 2050
 PWM_WRITE_MIN_DELTA = 15
 PWM_PERIOD = 0.05
 RC_FILTER = 0.25
@@ -191,20 +173,13 @@ MAX_GPS_GLITCH_MPS = 8.0
 HEADING_INIT_MAX_SEC = 5.0
 STALL_TIMEOUT_SEC = 5.0
 STALL_MIN_MOVED_M = 0.5
-MAX_SERIAL_LINES_LOOP = 20
-SERIAL_RECONNECT_SEC = 1.5
+SERIAL_RECONNECT_SEC = 1.5     # how often the hardware supervisor retries a missing RC/GPS port
+GPS_SILENT_RESTART_SEC = 5.0   # reopen the GPS port if no NMEA line arrives for this long
 
 RC_PORT = HW["arduino_port"]    # "auto" = detect by USB ID (same rules as multipath_boat.py)
 GPS_PORT = HW["gps_port"]
 RC_BAUD = HW["arduino_baud"]
 GPS_BAUD = HW["gps_baud"]
-
-NTRIP_ENABLE = True
-NTRIP_HOST = "rts2.ngii.go.kr"
-NTRIP_PORT = 2101
-NTRIP_MOUNT = "VRS-RTCM32"
-NTRIP_USER = "lim6246"
-NTRIP_PASS = "ngii"
 
 WEB_ENABLE = True
 WEB_PORT = 8080
@@ -269,7 +244,6 @@ TARGET_SAT_MIN = 105      # 최소 채도 (0~255)
 TARGET_VAL_MIN = 80       # 최소 밝기 (0~255)
 TARGET_COLOR_HEX = "#ff2a85"
 
-gps_ser_lock = threading.Lock()
 state_lock = threading.Lock()
 event_logs = deque(maxlen=40)
 
@@ -371,87 +345,137 @@ _last_gcs_hb_mono = 0.0
 _gcs_hb_streak = 0
 _gcs_ever_connected = False
 
-ser = None
-gps_ser = None
-pca = None
+# ---------------------------------------------------------------------------
+# Hardware communication: the same drivers as multipath_boat.py
+#   PCA9685Driver     direct I2C (smbus2); set_pwm_us(channel, microseconds)
+#   ArduinoRCReader   reader thread for the "CH1,CH2" lines sent by the RC Arduino
+#   ZEDF9PReceiver    reader thread for the ZED-F9P: NMEA in, RTCM out, one write lock
+#   NGII_NtripClient  RTCM3 corrections injected into that same receiver
+# A background supervisor opens the ports and reopens them after an unplug, so a
+# reconnect never blocks the 50 Hz control loop.
+# ---------------------------------------------------------------------------
+pca = None          # PCA9685Driver
+rc_reader = None    # ArduinoRCReader
 
-# 시리얼 포트 연결 (흐름 control 비활성화 및 중복 포트 제외)
-def _open_serial_port(port_name, baud):
-    if serial is None or not port_name:
-        return None
-    try:
-        s = serial.Serial(
-            port_name,
-            baud,
-            timeout=0.02,
-            write_timeout=0.05,
-            xonxoff=False,
-            rtscts=False,
-            dsrdtr=False,
-        )
+
+def init_pca9685():
+    """Open the PCA9685 and hold the servo at centre and the ESC at neutral so the ESC can arm."""
+    global pca
+    if pca is not None:
         try:
-            s.reset_input_buffer()
+            pca.close()
         except Exception:
             pass
-        add_event_log("SERIAL", f"Serial port connected: {port_name} ({baud} bps)", "auto")
-        return s
-    except Exception:
-        return None
-
-
-# Ports come from calibration.json; "auto" (or a missing configured port) uses
-# multipath_boat.detect_serial_ports(): u-blox by USB ID for the GPS, then the Arduino.
-def open_rc_serial():
-    other = getattr(gps_ser, "port", None)
-    ard_port, _ = detect_serial_ports(RC_PORT, GPS_PORT, excluded_ports=(other,) if other else ())
-    return _open_serial_port(ard_port, RC_BAUD)
-
-
-def open_gps_serial():
-    other = getattr(ser, "port", None)
-    _, gps_port = detect_serial_ports(RC_PORT, GPS_PORT, excluded_ports=(other,) if other else ())
-    return _open_serial_port(gps_port, GPS_BAUD)
-
-# PCA9685 초기화 및 버스 자동 탐색 (Bus 0 / Bus 1)
-def init_pca9685():
-    global pca
-    if not HW_AVAILABLE:
-        return False
-    builders = []
+        pca = None
     try:
-        from adafruit_extended_bus import ExtendedI2C
-        for bus_no in sorted((0, 1), key=lambda b: b != PCA_I2C_BUS):  # configured bus first
-            builders.append((f"ExtendedI2C({bus_no})", lambda b=bus_no: ExtendedI2C(b)))
+        drv = PCA9685Driver(bus_num=PCA_I2C_BUS, address=PCA_ADDR, freq_hz=PCA_FREQ_HZ)
+        drv.set_pwm_us(SERVO_CH, HW["servo_center"])
+        drv.set_pwm_us(ESC_CH, HW["esc_neutral"])
+    except Exception as e:
+        shared_state["lampSerial"] = "err"
+        add_event_log("I2C", f"PCA9685 not responding (bus {PCA_I2C_BUS}, 0x{PCA_ADDR:02x}: {e}) "
+                             "-> check I2C wiring, power and 'pip3 install smbus2'", "warn")
+        return False
+    pca = drv
+    shared_state["lampSerial"] = "ok"
+    add_event_log("I2C", f"PCA9685 connected (bus {PCA_I2C_BUS}, 0x{PCA_ADDR:02x}, {drv.actual_freq_hz:.1f} Hz, "
+                         f"servo ch{SERVO_CH}, ESC ch{ESC_CH})", "auto")
+    return True
+
+
+_hw_last_warn = {}
+
+
+def _hw_warn(key, msg, every=10.0):
+    now = time.time()
+    if now - _hw_last_warn.get(key, 0.0) >= every:
+        _hw_last_warn[key] = now
+        add_event_log("SERIAL", msg, "warn")
+
+
+def _port_gone(port, ser_obj):
+    return (not port) or ser_obj is None or (not ser_obj.is_open) or (not os.path.exists(port))
+
+
+def rc_link_ok():
+    r = rc_reader
+    return r is not None and r.running and not _port_gone(r.port, r.ser)
+
+
+def gps_link_ok():
+    g = NAV_GPS
+    if not g.running or _port_gone(g.port, g.ser):
+        return False
+    return not (g.last_rx_mono > 0.0 and (time.monotonic() - g.last_rx_mono) > GPS_SILENT_RESTART_SEC)
+
+
+def _connect_rc(port):
+    global rc_reader
+    old = rc_reader
+    rc_reader = None
+    if old is not None:
+        try:
+            old.stop()
+        except Exception:
+            pass
+    if not port:
+        _hw_warn("rc", "RC Arduino port not found: check the USB cable and hardware.arduino_port in calibration.json")
+        return
+    reader = ArduinoRCReader(port, RC_BAUD)
+    try:
+        reader.start()          # opens the port and waits 2 s for the Arduino to reset
+    except Exception as e:
+        _hw_warn("rc", f"RC Arduino connect failed ({port}): {e}")
+        return
+    rc_reader = reader
+    add_event_log("SERIAL", f"RC Arduino connected: {port} ({RC_BAUD} bps)", "auto")
+
+
+def _connect_gps(port):
+    gps = NAV_GPS
+    try:
+        gps.stop()
     except Exception:
         pass
-    if hasattr(board, "SCL_1") and hasattr(board, "SDA_1"):
-        builders.append(("board.SCL_1/SDA_1(Bus0)", lambda: busio.I2C(board.SCL_1, board.SDA_1)))
-    if hasattr(board, "SCL") and hasattr(board, "SDA"):
-        builders.append(("board.SCL/SDA(Bus1)", lambda: busio.I2C(board.SCL, board.SDA)))
+    if not port:
+        _hw_warn("gps", "ZED-F9P port not found: check the USB cable and hardware.gps_port in calibration.json")
+        return
+    gps.port, gps.baud = port, GPS_BAUD
+    try:
+        gps.start()
+    except Exception as e:
+        _hw_warn("gps", f"ZED-F9P connect failed ({port}): {e}")
+        return
+    gps.last_rx_mono = time.monotonic()      # grace period before the silence watchdog applies
+    add_event_log("SERIAL", f"ZED-F9P connected: {port} ({GPS_BAUD} bps)", "auto")
 
-    last_err = None
-    for name, fn in builders:
+
+def hw_supervisor():
+    """Connect the RC Arduino and the ZED-F9P, and reconnect either one after it drops out."""
+    while True:
         try:
-            b = fn()
-            cand = PCA9685(b, address=PCA_ADDR)
-            cand.frequency = PCA_FREQ_HZ
-            pca = cand
-            shared_state["lampSerial"] = "ok"
-            add_event_log("I2C", f"PCA9685 motor driver connected ({name}, 0x{PCA_ADDR:02x})", "auto")
-            return True
+            need_rc = not rc_link_ok()
+            need_gps = not gps_link_ok()
+            if need_rc or need_gps:
+                busy = []
+                if not need_rc:
+                    busy.append(rc_reader.port)
+                if not need_gps:
+                    busy.append(NAV_GPS.port)
+                ard_port, gps_port = detect_serial_ports(RC_PORT, GPS_PORT, excluded_ports=tuple(busy))
+                if need_rc:
+                    _connect_rc(ard_port)
+                if need_gps:
+                    _connect_gps(gps_port)
         except Exception as e:
-            last_err = e
-    pca = None
-    shared_state["lampSerial"] = "err"
-    add_event_log("I2C", f"PCA9685 not responding (bus 0/1 failed: {last_err}) -> check I2C wiring/power!", "warn")
-    return False
+            _hw_warn("supervisor", f"Hardware supervisor error: {type(e).__name__}: {e}")
+        time.sleep(SERIAL_RECONNECT_SEC)
 
-# 주변장치(RC, GPS, PCA9685) 초기화
+
+# Peripherals: PCA9685 now, RC and GPS from the supervisor thread
 def init_peripherals():
-    global ser, gps_ser, pca
-    gps_ser = open_gps_serial()
-    ser = open_rc_serial()
     init_pca9685()
+    threading.Thread(target=hw_supervisor, daemon=True).start()
 
 # PWM 상수 유효성 확인
 def pwm_ready():
@@ -475,11 +499,7 @@ def lerp(a, b, t):
     t = 0.0 if t < 0.0 else 1.0 if t > 1.0 else t
     return int(a + (b - a) * t)
 
-# Logical PWM (web/controller scale) -> calibrated microseconds -> PCA9685 16-bit duty
-def _us_to_duty(us):
-    return int(round(clamp(us, 500.0, 2500.0) * PCA_FREQ_HZ * 65535.0 / 1e6))
-
-
+# Logical PWM (web/controller scale) -> calibrated microseconds for PCA9685Driver.set_pwm_us()
 def steer_us(v):
     """CENTER -> servo center; max_LEFT/max_RIGHT -> calibrated full left/right."""
     if v >= CENTER:
@@ -496,14 +516,6 @@ def drive_us(v):
         return HW["esc_neutral"] + t * (HW["esc_fwd"] - HW["esc_neutral"])
     t = min(1.0, (STOP - v) / float(STOP - max_BACK))
     return HW["esc_neutral"] + t * (HW["esc_rev"] - HW["esc_neutral"])
-
-
-def steer_duty(v):
-    return _us_to_duty(steer_us(v))
-
-
-def drive_duty(v):
-    return _us_to_duty(drive_us(v))
 
 
 # RC pulses -> normalized sticks (-1..+1; channel reversal from calibration.json)
@@ -676,8 +688,28 @@ try:
 except Exception as e:
     raise SystemExit(f"AUTO controller config error ({AUTO_CONFIG_FILE}): {e}")
 
-# Parser copy for the controller: read_latest_gps() hands it every NMEA sentence (boat.py owns the port)
-NAV_GPS = ZEDF9PReceiver(port=None)
+# The ZED-F9P receiver (reader thread started by hw_supervisor) and its NTRIP corrections
+NAV_GPS = ZEDF9PReceiver(port=None, baud=GPS_BAUD)
+NTRIP = NGII_NtripClient(NTRIP_CONFIG, NAV_GPS)
+
+
+class _EventLogBridge(logging.Handler):
+    """Show the status lines of the shared GPS/NTRIP classes in the web event log."""
+
+    def emit(self, record):
+        try:
+            msg = record.getMessage()
+            tag = "NTRIP" if "NTRIP" in msg else ("GPS" if "GPS" in msg else "HW")
+            level = "warn" if record.levelno >= logging.WARNING else "auto"
+            now_str = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+            with state_lock:
+                event_logs.append({"time": now_str, "tag": tag, "msg": msg, "level": level})
+        except Exception:
+            pass
+
+
+SESSION_LOG.setLevel(logging.INFO)
+SESSION_LOG.addHandler(_EventLogBridge())
 
 
 def nav_steer_to_pwm(steer_norm):
@@ -696,335 +728,78 @@ def nav_throttle_to_pwm(blend):
     b = clamp(float(blend), 0.0, 1.0)
     return int(round(cruise + b * (max_GO - cruise)))
 
-# NMEA XOR 체크섬 검증
-def verify_nmea_checksum(line):
-    if not line or not line.startswith("$") or "*" not in line:
-        return False
-    body, _, chk_str = line[1:].partition("*")
-    chk_str = chk_str.strip()[:2]
-    if len(chk_str) != 2:
-        return False
-    try:
-        expected = int(chk_str, 16)
-    except ValueError:
-        return False
-    calc = 0
-    for ch in body:
-        calc ^= ord(ch)
-    return calc == expected
-
-# NMEA GGA 파싱
-def parse_gga(line):
-    if not (line.startswith("$GNGGA") or line.startswith("$GPGGA")) or not verify_nmea_checksum(line):
-        return None
-    parts = line.split(",")
-    if len(parts) < 10 or not parts[6]:
-        return None
-    try:
-        fix = int(parts[6])
-        sats = int(parts[7]) if parts[7] else 0
-        hdop = float(parts[8]) if parts[8] else 99.9
-        if not parts[2] or not parts[4]:
-            return None, None, fix, sats, hdop
-        lat = float(parts[2][:2]) + float(parts[2][2:]) / 60.0
-        if parts[3] == "S":
-            lat = -lat
-        lon = float(parts[4][:3]) + float(parts[4][3:]) / 60.0
-        if parts[5] == "W":
-            lon = -lon
-        return lat, lon, fix, sats, hdop
-    except (ValueError, IndexError):
-        return None
-
-# NMEA RMC 파싱
-def parse_rmc(line):
-    if not (line.startswith("$GNRMC") or line.startswith("$GPRMC")) or not verify_nmea_checksum(line):
-        return None
-    parts = line.split(",")
-    if len(parts) < 10 or parts[2] != "A" or not parts[3] or not parts[5]:
-        return None
-    try:
-        lat = float(parts[3][:2]) + float(parts[3][2:]) / 60.0
-        if parts[4] == "S":
-            lat = -lat
-        lon = float(parts[5][:3]) + float(parts[5][3:]) / 60.0
-        if parts[6] == "W":
-            lon = -lon
-        cog = float(parts[8]) if parts[8] else None
-        spd_kn = float(parts[7]) if parts[7] else 0.0
-        return lat, lon, cog, spd_kn
-    except (ValueError, IndexError):
-        return None
-
-# 아두이노 RC 펄스 파싱
-def get_arduino_data(data_str):
-    if not data_str:
-        return None, None
-    try:
-        s = data_str.replace("ST:", "").replace("TH:", "")
-        parts = s.split(",")
-        if len(parts) >= 2:
-            st = int(float(parts[0].strip()))
-            th = int(float(parts[1].strip()))
-            if not (RC_VALID_MIN <= st <= RC_VALID_MAX and RC_VALID_MIN <= th <= RC_VALID_MAX):
-                return None, None
-            return st, th
-    except (ValueError, TypeError):
-        pass
-    return None, None
-
-_last_rc_reconnect_t = 0.0
-_last_gps_reconnect_t = 0.0
+_rc_last_pkt_mono = 0.0
 _rc_read_count = 0
-_last_rc_valid_pkt_t = 0.0
-_rc_silent_reset_count = 0
 
-# 최신 RC 신호 읽기 및 무응답 시 자동 복구
+
 def read_latest_rc():
-    global ser, _last_rc_reconnect_t, _rc_read_count, _last_rc_valid_pkt_t, _rc_silent_reset_count
-    now = time.time()
-    if ser is None:
-        if now - _last_rc_reconnect_t >= SERIAL_RECONNECT_SEC:
-            _last_rc_reconnect_t = now
-            ser = open_rc_serial()
-            _last_rc_valid_pkt_t = now
+    """Newest RC pulses (ch1, ch2) in microseconds when a new packet arrived, else (None, None)."""
+    global _rc_last_pkt_mono, _rc_read_count
+    reader = rc_reader
+    if reader is None:
         return None, None
-
-    lines = []
-    lines_read = 0
-    try:
-        while ser.in_waiting > 0 and lines_read < MAX_SERIAL_LINES_LOOP:
-            line = ser.readline().decode("utf-8", errors="ignore").strip()
-            lines_read += 1
-            if line:
-                lines.append(line)
-    except SERIAL_ERR_TYPES as e:
-        add_event_log("SERIAL", f"RC serial disconnect detected ({e})", "warn")
-        shared_state["lampSerial"] = "err"
-        try:
-            ser.close()
-        except Exception:
-            pass
-        ser = None
+    ch1, ch2, alive = reader.get_latest()
+    if not alive or reader.last_rx_time == _rc_last_pkt_mono:
         return None, None
+    _rc_last_pkt_mono = reader.last_rx_time
+    _rc_read_count += 1
+    return ch1, ch2
 
-    for candidate in reversed(lines):
-        st, th = get_arduino_data(candidate)
-        if st is not None and th is not None:
-            _rc_read_count += 1
-            _last_rc_valid_pkt_t = now
-            _rc_silent_reset_count = 0
-            return st, th
-
-    # 유효 패킷 장기 미수신 시 백오프 기반 버퍼 정리 (조종기 OFF 시 무한 리셋·로그 스팸 방지)
-    if _last_rc_valid_pkt_t == 0.0:
-        _last_rc_valid_pkt_t = now
-    else:
-        backoff_sec = 6.0 if _rc_silent_reset_count == 0 else (20.0 if _rc_silent_reset_count == 1 else 60.0)
-        if (now - _last_rc_valid_pkt_t) >= backoff_sec:
-            _last_rc_valid_pkt_t = now
-            _rc_silent_reset_count += 1
-            if _rc_silent_reset_count <= 2:
-                cur_port = getattr(ser, "port", RC_PORT)
-                add_event_log("SERIAL", f"RC silent ({int(backoff_sec)}s) -> flush serial buffer #{_rc_silent_reset_count}", "warn")
-                try:
-                    ser.reset_input_buffer()
-                    ser.close()
-                except Exception:
-                    pass
-                ser = None
-
-    return None, None
 
 _last_lat, _last_lon, _last_cog, _last_spd_kn = None, None, None, 0.0
 _last_fix, _last_sats, _last_hdop = 0, 0, 99.9
-_last_gga_line = None
 _last_valid_gps_t = 0.0
+_last_gps_fix_mono = 0.0
 _glitch_reject_count = 0
 _glitch_cand_lat, _glitch_cand_lon = None, None
 
-# 최신 GPS 읽기 및 Glitch 필터링
+
 def read_latest_gps(is_reversing=False):
-    global gps_ser, _last_gps_reconnect_t
+    """New position from the ZED-F9P reader thread (None when no new fix), with the wall-reflection glitch filter."""
     global _last_lat, _last_lon, _last_cog, _last_spd_kn, _last_fix, _last_sats, _last_hdop
-    global _last_gga_line, _last_valid_gps_t, _glitch_reject_count, _glitch_cand_lat, _glitch_cand_lon
+    global _last_valid_gps_t, _last_gps_fix_mono, _glitch_reject_count, _glitch_cand_lat, _glitch_cand_lon
 
     now = time.time()
-    if gps_ser is None:
-        if now - _last_gps_reconnect_t >= SERIAL_RECONNECT_SEC:
-            _last_gps_reconnect_t = now
-            with gps_ser_lock:
-                gps_ser = open_gps_serial()
+    snap = NAV_GPS.get_snapshot()
+    _last_fix, _last_sats, _last_hdop = snap["fix_quality"], snap["num_sats"], snap["hdop"]
+    fix_t = NAV_GPS.last_fix_time
+    if fix_t <= _last_gps_fix_mono or snap["lat"] is None or snap["lon"] is None:
         return None
+    _last_gps_fix_mono = fix_t
 
-    updated = False
-    cand_lat, cand_lon = None, None
-    cand_cog = None
-    cand_spd_kn = _last_spd_kn
-    cand_fix, cand_sats, cand_hdop = _last_fix, _last_sats, _last_hdop
+    cand_lat, cand_lon = snap["lat"], snap["lon"]
+    cand_spd_kn = snap["sog_mps"] / 0.514444
+    cand_cog = snap["cog_deg"]
 
-    lines_read = 0
-    try:
-        with gps_ser_lock:
-            while gps_ser is not None and gps_ser.in_waiting > 0 and lines_read < MAX_SERIAL_LINES_LOOP:
-                line = gps_ser.readline().decode("ascii", errors="ignore").strip()
-                lines_read += 1
-                if line.startswith(("$GNGGA", "$GPGGA", "$GNRMC", "$GPRMC")):
-                    try:
-                        NAV_GPS.ingest_nmea_line(line)
-                    except (ValueError, IndexError):
-                        pass
-                if line.startswith("$GNGGA") or line.startswith("$GPGGA"):
-                    gga = parse_gga(line)
-                    if gga:
-                        g_lat, g_lon, cand_fix, cand_sats, cand_hdop = gga
-                        _last_fix, _last_sats, _last_hdop = cand_fix, cand_sats, cand_hdop
-                        if g_lat is not None and g_lon is not None:
-                            cand_lat, cand_lon = g_lat, g_lon
-                            _last_gga_line = line
-                            updated = True
-                elif line.startswith("$GNRMC") or line.startswith("$GPRMC"):
-                    rmc = parse_rmc(line)
-                    if rmc:
-                        r_lat, r_lon, r_cog, r_spd = rmc
-                        cand_lat, cand_lon = r_lat, r_lon
-                        if r_cog is not None:
-                            cand_cog = r_cog
-                        cand_spd_kn = r_spd
-                        updated = True
-    except SERIAL_ERR_TYPES as e:
-        add_event_log("SERIAL", f"GPS serial disconnect detected ({e})", "warn")
-        shared_state["lampSerial"] = "err"
-        with gps_ser_lock:
-            try:
-                gps_ser.close()
-            except Exception:
-                pass
-            gps_ser = None
-        return None
+    if _last_lat is not None and _last_lon is not None and _last_valid_gps_t > 0:
+        dt = max(0.1, now - _last_valid_gps_t)
+        jump_dist = haversine(_last_lat, _last_lon, cand_lat, cand_lon)
+        jump_mps = jump_dist / dt
+        if jump_dist > MAX_GPS_GLITCH_DIST_M and jump_mps > MAX_GPS_GLITCH_MPS:
+            # Accept a persistent jump: several consistent outliers in a row mean the boat really moved
+            consistent_with_cand = (
+                _glitch_cand_lat is not None
+                and haversine(_glitch_cand_lat, _glitch_cand_lon, cand_lat, cand_lon) <= MAX_GPS_GLITCH_DIST_M
+            )
+            _glitch_cand_lat, _glitch_cand_lon = cand_lat, cand_lon
+            if _glitch_reject_count < 3 or (not consistent_with_cand and _glitch_reject_count < 8):
+                _glitch_reject_count += 1
+                shared_state["lampGlitch"] = "warn"
+                add_event_log("GLITCH", f"Ignoring wall-reflection outlier #{_glitch_reject_count} ({jump_dist:.1f}m / {jump_mps:.1f}m/s)", "warn")
+                return None
 
-    if updated and cand_lat is not None and cand_lon is not None:
-        if _last_lat is not None and _last_lon is not None and _last_valid_gps_t > 0:
-            dt = max(0.1, now - _last_valid_gps_t)
-            jump_dist = haversine(_last_lat, _last_lon, cand_lat, cand_lon)
-            jump_mps = jump_dist / dt
-            if jump_dist > MAX_GPS_GLITCH_DIST_M and jump_mps > MAX_GPS_GLITCH_MPS:
-                # 연속 이상치 일관성 확인
-                consistent_with_cand = (
-                    _glitch_cand_lat is not None
-                    and haversine(_glitch_cand_lat, _glitch_cand_lon, cand_lat, cand_lon) <= MAX_GPS_GLITCH_DIST_M
-                )
-                _glitch_cand_lat, _glitch_cand_lon = cand_lat, cand_lon
-                if _glitch_reject_count < 3 or (not consistent_with_cand and _glitch_reject_count < 8):
-                    _glitch_reject_count += 1
-                    shared_state["lampGlitch"] = "warn"
-                    add_event_log("GLITCH", f"Reject wall-reflection GPS glitch #{_glitch_reject_count} ({jump_dist:.1f}m / {jump_mps:.1f}m/s)", "warn")
-                    return None
+    _glitch_reject_count = 0
+    _glitch_cand_lat, _glitch_cand_lon = None, None
+    shared_state["lampGlitch"] = "ok"
+    _last_lat, _last_lon = cand_lat, cand_lon
+    _last_spd_kn = cand_spd_kn
+    if is_reversing:
+        _last_cog = None
+    elif cand_cog is not None:
+        _last_cog = cand_cog
+    _last_valid_gps_t = now
+    return _last_lat, _last_lon, _last_cog, _last_spd_kn, _last_fix, _last_sats, _last_hdop
 
-        _glitch_reject_count = 0
-        _glitch_cand_lat, _glitch_cand_lon = None, None
-        shared_state["lampGlitch"] = "ok"
-        _last_lat, _last_lon = cand_lat, cand_lon
-        _last_spd_kn = cand_spd_kn
-
-        if is_reversing:
-            _last_cog = None
-        elif cand_cog is not None:
-            _last_cog = cand_cog
-
-        _last_valid_gps_t = now
-        return _last_lat, _last_lon, _last_cog, _last_spd_kn, _last_fix, _last_sats, _last_hdop
-
-    return None
-
-# NTRIP RTCM3 보정 신호 수신 워커
-def ntrip_worker():
-    auth = base64.b64encode(f"{NTRIP_USER}:{NTRIP_PASS}".encode("utf-8")).decode("utf-8")
-    req_header = (
-        f"GET /{NTRIP_MOUNT} HTTP/1.0\r\n"
-        f"User-Agent: NTRIP PythonClient/1.0\r\n"
-        f"Accept: */*\r\n"
-        f"Connection: close\r\n"
-        f"Authorization: Basic {auth}\r\n"
-        f"\r\n"
-    ).encode("utf-8")
-
-    total_bytes = 0
-
-    while True:
-        if not NTRIP_ENABLE or NTRIP_USER in ("", "YOUR_ID") or _last_gga_line is None:
-            time.sleep(1.0)
-            continue
-
-        sock = None
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(5.0)
-            sock.connect((NTRIP_HOST, NTRIP_PORT))
-            sock.sendall(req_header)
-
-            resp = sock.recv(4096)
-            resp_text = resp.decode("latin1", errors="ignore")
-
-            if "200 OK" not in resp_text:
-                shared_state["ntripConnected"] = False
-                sock.close()
-                time.sleep(5.0)
-                continue
-
-            shared_state["ntripConnected"] = True
-            add_event_log("NTRIP", f"RTCM3 corrections started ({NTRIP_MOUNT})", "ntrip")
-
-            if b"\r\n\r\n" in resp:
-                body = resp.split(b"\r\n\r\n", 1)[1]
-                if body:
-                    with gps_ser_lock:
-                        if gps_ser is not None:
-                            try:
-                                gps_ser.write(body)
-                                total_bytes += len(body)
-                            except Exception:
-                                pass
-
-            sock.settimeout(1.0)
-            last_gga_sent = 0.0
-            last_rtcm_t = time.time()
-
-            while True:
-                now_t = time.time()
-                gga_to_send = _last_gga_line
-                if gga_to_send and (now_t - last_gga_sent >= 5.0):
-                    sock.sendall((gga_to_send + "\r\n").encode("ascii"))
-                    last_gga_sent = now_t
-
-                try:
-                    data = sock.recv(4096)
-                    if not data:
-                        shared_state["ntripConnected"] = False
-                        break
-                    with gps_ser_lock:
-                        if gps_ser is not None:
-                            try:
-                                gps_ser.write(data)
-                                total_bytes += len(data)
-                            except Exception:
-                                pass
-                    shared_state["ntripKb"] = round(total_bytes / 1024.0, 1)
-                    last_rtcm_t = now_t
-                except socket.timeout:
-                    if now_t - last_rtcm_t > 15.0:
-                        shared_state["ntripConnected"] = False
-                        break
-                    continue
-        except Exception:
-            shared_state["ntripConnected"] = False
-        finally:
-            if sock:
-                try:
-                    sock.close()
-                except Exception:
-                    pass
-        time.sleep(3.0)
 
 _last_steer = None
 _last_drive = None
@@ -1062,10 +837,10 @@ def set_pwm(steer, drive, force=False):
 
     try:
         if steer_need:
-            pca.channels[SERVO_CH].duty_cycle = steer_duty(steer)
+            pca.set_pwm_us(SERVO_CH, steer_us(steer))
             _last_steer = steer
         if drive_need:
-            pca.channels[ESC_CH].duty_cycle = drive_duty(target_drive)
+            pca.set_pwm_us(ESC_CH, drive_us(target_drive))
             _last_drive = target_drive
         _need_safe_stop_retry = False
         _pca_err_streak = 0
@@ -1076,6 +851,10 @@ def set_pwm(steer, drive, force=False):
         shared_state["lampSerial"] = "warn"
         if _pca_err_streak >= 5:
             shared_state["lampSerial"] = "err"
+            try:
+                pca.close()
+            except Exception:
+                pass
             pca = None
             _pca_err_streak = 0
 
@@ -1090,8 +869,8 @@ def safe_stop():
 
     for _ in range(3):
         try:
-            pca.channels[SERVO_CH].duty_cycle = steer_duty(CENTER)
-            pca.channels[ESC_CH].duty_cycle = drive_duty(STOP)
+            pca.set_pwm_us(SERVO_CH, steer_us(CENTER))
+            pca.set_pwm_us(ESC_CH, drive_us(STOP))
             _last_steer, _last_drive = CENTER, STOP
             _need_safe_stop_retry = False
             return
@@ -2271,8 +2050,7 @@ def main_loop():
         "auto",
     )
 
-    if NTRIP_ENABLE:
-        threading.Thread(target=ntrip_worker, daemon=True).start()
+    NTRIP.start()
 
     if WEB_ENABLE:
         threading.Thread(target=web_server_worker, daemon=True).start()
@@ -2302,7 +2080,7 @@ def main_loop():
             temp_c, load_pct = read_jetson_health()
             shared_state["jetsonCpuTemp"] = temp_c
             shared_state["jetsonLoad"] = load_pct
-            if pca is None and HW_AVAILABLE and (now - last_pca_retry_t) >= 10.0:
+            if pca is None and (now - last_pca_retry_t) >= 10.0:
                 last_pca_retry_t = now
                 init_pca9685()
             if (now - last_csv_flush_t) >= 5.0:
@@ -2311,10 +2089,10 @@ def main_loop():
                     log_file.flush()
                 except Exception:
                     pass
-            if ser is not None and gps_ser is not None and pca is not None:
-                shared_state["lampSerial"] = "ok"
-            elif pca is None:
-                shared_state["lampSerial"] = "err"
+            shared_state["lampSerial"] = "ok" if (pca is not None and rc_link_ok() and gps_link_ok()) else "err"
+            ntrip_snap = NTRIP.get_snapshot()
+            shared_state["ntripConnected"] = ntrip_snap["connected"]
+            shared_state["ntripKb"] = round(ntrip_snap["rtcm_bytes_rx"] / 1024.0, 1)
 
         # 1. RC 수신 (웹 단독 모드 시 불필요한 시리얼 재연결 폴링 생략)
         raw_st, raw_th = (None, None) if rc_ignore_mode else read_latest_rc()
@@ -2913,7 +2691,7 @@ def main_loop():
             else:
                 safe_stop()
                 if now - last_dbg > 1.5:
-                    safe_print(f"MANUAL [RC signal missing!] ser={getattr(ser, 'port', None)} pca={'OK' if pca else 'FAIL'} [RTK:{fix_status}]")
+                    safe_print(f"MANUAL [RC signal missing!] rc={getattr(rc_reader, 'port', None)} pca={'OK' if pca else 'FAIL'} [RTK:{fix_status}]")
                     last_dbg = now
 
         # BALLOON(비전) 모드 control
@@ -3288,18 +3066,14 @@ if __name__ == "__main__":
             log_file.close()
         except Exception:
             pass
+        for stop_fn in (NTRIP.stop, NAV_GPS.stop, (rc_reader.stop if rc_reader is not None else None)):
+            if stop_fn is not None:
+                try:
+                    stop_fn()
+                except Exception:
+                    pass
         if pca is not None:
             try:
-                pca.deinit()
-            except Exception:
-                pass
-        if ser is not None:
-            try:
-                ser.close()
-            except Exception:
-                pass
-        if gps_ser is not None:
-            try:
-                gps_ser.close()
+                pca.close()
             except Exception:
                 pass
