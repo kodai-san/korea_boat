@@ -58,6 +58,8 @@ class ObservationFault:
 
 
 class GpsGuardSimulationTests(unittest.TestCase):
+    strategy_name = "06_gps_aware"
+
     @classmethod
     def setUpClass(cls):
         cls.calibration = mb.load_calibration(ROOT / "calibration.json")
@@ -68,10 +70,10 @@ class GpsGuardSimulationTests(unittest.TestCase):
         cls.paths = {lane: str(ROOT / filename) for lane, filename in mb.PATH_FILES.items()}
 
     def run_boat(self, *, speed=1.4, fault=None, max_time=110.0,
-                 strategy="06_gps_aware", model_file="boat_model_params.json", disturbed=False,
+                 strategy=None, model_file="boat_model_params.json", disturbed=False,
                  gust=0.0, environment=None, seed=2):
         cal = copy.deepcopy(self.calibration)
-        cal["autonomous"]["strategy"] = strategy
+        cal["autonomous"]["strategy"] = strategy or self.strategy_name
         cal["autonomous"]["use_04_control"] = False
         args = SimpleNamespace(throttle_ratio=None, start_lane="center", start_offset=0.0,
                                start_heading=0.0, gps_noise=0.02, gps_bias_walk=0.0,
@@ -119,7 +121,7 @@ class GpsGuardSimulationTests(unittest.TestCase):
     def run_neutral_gesture(self, quality=4, max_time=110.0, snapshot_filter=None):
         """Exercise real manual/coast dynamics before AUTO, at one receiver quality."""
         cal = copy.deepcopy(self.calibration)
-        cal["autonomous"]["strategy"] = "06_gps_aware"
+        cal["autonomous"]["strategy"] = self.strategy_name
         paths = {lane: mb.load_waypoints_csv(path) for lane, path in self.paths.items()}
         nav = make_navigator(mb.MultipathNavigator, paths, cal)
         driver = AutoDriver(nav, snapshot_filter=snapshot_filter)

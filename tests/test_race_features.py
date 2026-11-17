@@ -167,14 +167,17 @@ class TestSquareNavigatorTest(unittest.TestCase):
 class AutoLoopFeatureTest(unittest.TestCase):
     """Real main loop with mocked hardware; the boat stays put while AUTO commands forward."""
 
-    def run_loop(self, argv=(), speed=0.0, cycles=200, recovery=None, test_square=False):
+    def run_loop(self, argv=(), speed=0.0, cycles=200, recovery=None, test_square=False, course_deg=0.0,
+                 offset_m=0.0):
         cal = mb.load_calibration(Path(mb.__file__).parent / "calibration.json")
         cal["mode_switch"]["right_steer_hold_sec"] = .05
         cal["autonomous"]["recovery"] = dict(cal["autonomous"]["recovery"], **(recovery or {}))
         cal["autonomous"][LINE]["test_square"] = test_square
         clock, cycle = [100.0], [0]
         gps = mb.ZEDF9PReceiver("unused")
-        gps.lat, gps.lon, gps.fix_quality = 35.0001, 129., 4
+        # The harness course runs due north along longitude 129; offset_m moves the boat east (right).
+        gps.lat, gps.lon, gps.fix_quality = 35.0001, 129. + math.degrees(
+            offset_m / (mb.EARTH_RADIUS_M * math.cos(math.radians(35.)))), 4
         gps.last_fix_time = 100.
         with patch.object(mb.time, "monotonic", return_value=100.):
             base = gps.get_snapshot()
@@ -182,9 +185,9 @@ class AutoLoopFeatureTest(unittest.TestCase):
         ntrip = mb.NGII_NtripClient({"enabled": False}, gps)
 
         def snapshot():
-            return dict(base, valid=True, age_sec=0., course_valid=True, course_deg=0., course_speed_mps=speed,
-                        course_age_sec=0., course_time_mono=clock[0], course_gga_skew_sec=0.,
-                        course_utc="2026-11-16T12:00:00Z", sog_mps=speed, cog_deg=0.)
+            return dict(base, valid=True, age_sec=0., course_valid=True, course_deg=course_deg,
+                        course_speed_mps=speed, course_age_sec=0., course_time_mono=clock[0], course_gga_skew_sec=0.,
+                        course_utc="2026-11-16T12:00:00Z", sog_mps=speed, cog_deg=course_deg)
 
         def receiver():
             cycle[0] += 1

@@ -1,4 +1,4 @@
-"""Position integrity and absolute-power governor for mode 06, without hardware I/O.
+"""Position integrity and absolute-power governor for modes 06/08, without hardware I/O.
 
 The uncertainty allowance is a conservative policy, not a measured accuracy bound.
 Only accepted observations reach navigation. The existing modes do not use this
@@ -47,6 +47,7 @@ class GpsAwareController:
     def __init__(self, navigator):
         self.navigator = navigator
         self.options = navigator.strategy.options
+        self._planner = getattr(navigator.strategy, "side_limit_labels", False)
         self.reset()
 
     @staticmethod
@@ -83,6 +84,10 @@ class GpsAwareController:
         self._innovation = None
         self._position_age = None
         self._retained_hacc = None
+        self._maneuver_heading = None
+        self._turn_acquire_start = None
+        if self._planner:
+            self.navigator.cancel_turn_plan()
         self.navigator.strategy.reset()
 
     def _course(self, snap, now):
@@ -185,7 +190,14 @@ class GpsAwareController:
         self._power = 0.0
         self.heading_info = self._missing_heading("suspended")
         self.navigator.strategy.reset()
+        self._cancel_maneuver()
         self.state = "HOLD"
+
+    def _cancel_maneuver(self):
+        if self._planner:
+            self.navigator.cancel_turn_plan()
+        self._maneuver_heading = None
+        self._turn_acquire_start = None
 
     def _xy(self, lat, lon):
         return (EARTH_RADIUS_M * math.radians(lon - self.navigator.ref_lon)
@@ -370,6 +382,10 @@ class GpsAwareController:
 
     def _hold(self, reason, invalidate=True):
         if invalidate:
+            if self._maneuver_heading is not None:
+                # A reverse velocity must never become forward handover evidence.
+                self._last_forward_course = None
+            self._cancel_maneuver()
             if self._qualified and not self.options["auto_resume"]:
                 self._resume_blocked = True
             self._qualified = False
@@ -423,12 +439,31 @@ class GpsAwareController:
         future = d
         if course is not None:
             future += line.lateral_rate(course["speed_mps"], course["heading_deg"]) * self.options["prediction_horizon_sec"]
-        self._clearance = (self.options["band_half_width_m"] - max(abs(d), abs(future))
+        left, right, _, _ = self.navigator.strategy.limits()
+        self._clearance = (min(d + left, right - d, future + left, right - future)
                            - self._uncertainty - self.options["hull_margin_m"])
         if self._clearance < self.options["min_clearance_m"]:
             return self._hold("insufficient_clearance")
         steering_course = self._steering_course(course, now)
-        if steering_course is None and self.state in ("RACE", "CAUTION"):
+        reversing = self._planner and self.navigator.rev_phase is not None
+        acquiring_turn = self._turn_acquire_start is not None
+        if reversing:
+            steering_course = None
+        elif acquiring_turn:
+            # Even after forward thrust resumes, lingering reverse Doppler is
+            # not the bow heading. Require movement into the saved forward half-plane.
+            if (steering_course is not None and
+                    abs(_angle(steering_course["heading_deg"] - self._maneuver_heading)) >= 90):
+                steering_course = None
+            if steering_course is not None:
+                self._turn_acquire_start = None
+                self._maneuver_heading = None
+                acquiring_turn = False
+            elif now - self._turn_acquire_start >= self.options["launch_timeout_sec"]:
+                return self._hold("turn_acquisition_timeout")
+        if (reversing or acquiring_turn) and course is None and not self._known_low_speed(snap, now):
+            return self._hold("maneuver_motion_unavailable")
+        if steering_course is None and not (reversing or acquiring_turn) and self.state in ("RACE", "CAUTION"):
             # Loss of course while driving always stops first. Any later bounded
             # reacquisition must earn a new position-qualification interval.
             return self._hold("heading_unavailable")
@@ -452,7 +487,10 @@ class GpsAwareController:
         if not self._route_started:
             self.navigator.enter_auto_mode(self._anchor["lat"], self._anchor["lon"], now_mono=now)
             self._route_started = True
-        if steering_course is None:
+        if self._planner:
+            self.navigator.guard_turn_margin_m = (self._uncertainty + self.options["hull_margin_m"]
+                                                  + self.options["min_clearance_m"])
+        if steering_course is None and not (reversing or acquiring_turn):
             evidence = self._last_forward_course
             direction_ok = (self._launch_start is not None or
                             (evidence is not None and 0 <= now - evidence[0] <= self.options["launch_heading_memory_sec"]
@@ -479,7 +517,7 @@ class GpsAwareController:
             self._record_power(course, now)
             info.update(self._diagnostics("acquiring_course", cap))
             return info
-        self.heading_info = steering_course
+        self.heading_info = steering_course or self._missing_heading("planned_maneuver")
         self._launch_start = None
         if self._tracking_since is None:
             self._tracking_since = now
@@ -487,15 +525,24 @@ class GpsAwareController:
             self._launch_used = False
         stable_fixed = (self._fixed_since is not None and now - self._fixed_since >= self.options["qualification_sec"]
                         and self._fixed_fixes >= self.options["qualification_fixes"])
-        self.heading_info["confident"] = snap["fix_quality"] == 4 and stable_fixed
-        info = self.navigator.update(self._anchor["lat"], self._anchor["lon"], course["heading_deg"],
-                                     now_mono=now, heading_confident=self.heading_info["confident"], motion=course)
+        self.heading_info["confident"] = steering_course is not None and snap["fix_quality"] == 4 and stable_fixed
+        info = self.navigator.update(self._anchor["lat"], self._anchor["lon"],
+                                     steering_course["heading_deg"] if steering_course else None,
+                                     now_mono=now, heading_confident=self.heading_info["confident"],
+                                     motion=steering_course)
         if info["finished"]:
             self.state = "HOLD"
             self._power = 0.0
+            self._cancel_maneuver()
             info.update(steer_norm=0.0, throttle_norm=0.0, throttle_blend=0.0)
             info.update(self._diagnostics("finished", 0.0))
             return info
+        if self._planner:
+            if info.get("planner_hold_reason"):
+                return self._hold(info["planner_hold_reason"])
+            requested = info.get("planner_throttle_norm", 0.0)
+            if requested <= 0 or info.get("reacquire_heading") or acquiring_turn:
+                return self._maneuver_power(info, snap, course, steering_course, d, now, previous_update)
         heading_error = abs(_angle(info["target_bearing_deg"] - course["heading_deg"]))
         race = (snap["fix_quality"] == 4 and stable_fixed and not info["boundary_guard"]
                 and self._clearance >= self.options["race_clearance_m"]
@@ -509,4 +556,46 @@ class GpsAwareController:
         info["throttle_norm"] = self._power_for(cap, now, previous_update)
         self._record_power(course, now)
         info.update(self._diagnostics("qualified_fix" if race else "conservative_tracking", cap))
+        return info
+
+    def _maneuver_power(self, info, snap, course, steering_course, d, now, previous_update):
+        """Authorize the planner's signed request without turning neutral into forward."""
+        requested = info["planner_throttle_norm"]
+        phase = info.get("planner_state", "hold")
+        quality_cap = self.options[{4: "race_throttle", 5: "float_throttle", 2: "dgps_throttle",
+                                    1: "gps_throttle"}[snap["fix_quality"]]]
+        if self._maneuver_heading is None and steering_course is not None:
+            self._maneuver_heading = steering_course["heading_deg"]
+        if self._maneuver_heading is None:
+            return self._hold("maneuver_heading_unavailable")
+        self._last_forward_course = None
+        self._tracking_since = None
+        if requested <= 0:
+            self._forward_thrust_since = None
+            self._power = 0.0
+            cap = 0.0
+            if requested < 0:
+                # Check the intended reverse direction as well as measured drift.
+                line = self.navigator.line_guidance
+                future = d + line.lateral_rate(self.options["plan_reverse_mps"],
+                                               (self._maneuver_heading + 180.) % 360.) * self.options["prediction_horizon_sec"]
+                left, right, _, _ = self.navigator.strategy.limits()
+                reverse_clearance = min(future + left, right - future) - self._uncertainty - self.options["hull_margin_m"]
+                if reverse_clearance < self.options["min_clearance_m"]:
+                    return self._hold("reverse_clearance")
+                cap = min(abs(requested), quality_cap, self.options["boundary_throttle"])
+            info["throttle_norm"] = -cap if requested < 0 else 0.0
+            self.state = "MANEUVER"
+        else:
+            if info.get("reacquire_heading"):
+                self._turn_acquire_start = now
+                self._forward_thrust_since = None
+                self._power = 0.0
+            cap = min(requested, quality_cap, self.options["launch_throttle"])
+            info["throttle_norm"] = self._power_for(cap, now, previous_update)
+            # Keep the saved bow separate; reverse course cannot renew heading evidence.
+            self._record_power(None, now)
+            self.state = "ACQUIRE"
+        info["throttle_blend"] = 0.0
+        info.update(self._diagnostics(phase, cap))
         return info

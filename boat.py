@@ -1,3 +1,19 @@
+"""Boat dashboard controller with persistent RC takeover.
+
+MANUAL: move either RC stick to take ownership from the dashboard. Hold
+neutral throttle + right steering for the calibrated duration (default 2 s)
+to enter AUTO with valid GPS. RC-started AUTO requires a live receiver and
+can run without the dashboard. Release the entry steering before another
+right-steering takeover; full reverse and full left always remain available.
+AUTO/BALLOON: full steering either way (85%) or full reverse (calibrated
+threshold) takes ownership without an arming delay. Web-only mode and GCS
+link hold do not disable takeover. Ownership persists at neutral and after
+RC loss (which commands stop after 0.5 s). To hand back to the dashboard,
+center the sticks and explicitly select a mode, or use the RC AUTO gesture.
+E-stop remains authoritative.
+This software path requires a running controller and working RC/I2C hardware.
+"""
+
 import os
 import sys
 import csv
@@ -5,6 +21,7 @@ import math
 import time
 import json
 import glob
+import logging
 import signal
 import socket
 import base64
@@ -32,24 +49,6 @@ def safe_print(*args, **kwargs):
     except Exception:
         pass
 
-try:
-    import serial
-    SERIAL_ERR_TYPES = (serial.SerialException, OSError)
-except Exception:
-    serial = None
-    SERIAL_ERR_TYPES = (OSError,)
-
-try:
-    import board
-    import busio
-    from adafruit_pca9685 import PCA9685
-    HW_AVAILABLE = True
-except Exception:
-    board = None
-    busio = None
-    PCA9685 = None
-    HW_AVAILABLE = False
-
 import subprocess
 import shutil
 
@@ -61,6 +60,16 @@ except Exception:
     cv2 = None
     np = None
     CV_AVAILABLE = False
+
+# AUTO path following uses the same navigator, strategies and heading selector as multipath_boat.py
+from multipath_boat import (
+    MultipathNavigator, ZEDF9PReceiver, resolve_navigation_params, latlon_to_enu,
+    normalize_axis, detect_serial_ports,
+    PCA9685Driver, ArduinoRCReader, NGII_NtripClient, NTRIP_CONFIG, SESSION_LOG,
+)
+from auto_strategies import create_auto_strategy
+from gps_heading import MotionHeadingSelector
+from gps_guard import GpsAwareController
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -91,18 +100,80 @@ PID_KI = 0.0
 PID_KD = 3.0
 PID_I_MAX_DEG = 15.0
 
-ST_MIN, ST_NEU, ST_MAX = 835, 1360, 1891
-TH_MIN, TH_NEU, TH_MAX = 1086, 1356, 1621
-TH_NEU_LOW, TH_NEU_HIGH = 1335, 1375
+# ---------------------------------------------------------------------------
+# Hardware calibration shared with multipath_boat.py (calibration.json):
+# serial ports/bauds, PCA9685 bus/address/frequency/channels, servo and ESC
+# microseconds, RC receiver pulses and the full-reverse override ratio.
+# boat.py keeps its logical PWM scale above (CENTER/STOP/max_GO ...) because the
+# web page uses those numbers; set_pwm()/safe_stop() convert it to calibrated
+# microseconds: CENTER..max_LEFT/max_RIGHT -> servo center..left/right,
+# STOP..DEFAULT_MAX_GO -> ESC neutral..forward max (higher max_GO presets are
+# capped at forward max), STOP..max_BACK -> ESC neutral..reverse max.
+# ---------------------------------------------------------------------------
+HW_CONFIG_FILE = "calibration.json"
 
-# RC 비상 오버라이드 임계값
-ST_OVERRIDE_LEFT = 900
-ST_OVERRIDE_RIGHT = 1820
-TH_REV_OVERRIDE = 1550
 
-RC_VALID_MIN = 750
-RC_VALID_MAX = 2050
-RC_DEADZONE = 80
+def _load_hw_calibration():
+    cfg_path = resolve_path(HW_CONFIG_FILE)
+    if not os.path.exists(cfg_path):
+        raise SystemExit(f"{HW_CONFIG_FILE} not found: boat.py needs the boat's hardware calibration")
+    try:
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            cal = json.load(f)
+        hw, rc, pw = cal["hardware"], cal["rc"], cal["pwm"]
+        ms = cal.get("mode_switch", {})
+        out = {
+            "arduino_port": str(hw.get("arduino_port", "auto")),
+            "arduino_baud": int(hw.get("arduino_baud", 115200)),
+            "gps_port": str(hw.get("gps_port", "auto")),
+            "gps_baud": int(hw.get("gps_baud", 115200)),
+            "i2c_bus": int(hw["i2c_bus"]),
+            "pca_addr": int(hw["pca9685_addr"]),
+            "pca_freq": float(hw["pca9685_freq_hz"]),
+            "servo_ch": int(hw["servo_channel"]),
+            "esc_ch": int(hw["esc_channel"]),
+            "servo_center": float(pw["servo_center_us"]),
+            "servo_left": float(pw["servo_left_us"]),
+            "servo_right": float(pw["servo_right_us"]),
+            "esc_neutral": float(pw["esc_neutral_us"]),
+            "esc_fwd": float(pw["esc_fwd_max_us"]),
+            "esc_rev": float(pw["esc_rev_max_us"]),
+            "st_neu": int(rc["steer_neutral_us"]),
+            "st_left": int(rc["steer_left_us"]),
+            "st_right": int(rc["steer_right_us"]),
+            "st_db": int(rc["steer_deadband_us"]),
+            "th_neu": int(rc["throttle_neutral_us"]),
+            "th_fwd": int(rc["throttle_fwd_us"]),
+            "th_rev": int(rc["throttle_rev_us"]),
+            "th_db": int(rc["throttle_deadband_us"]),
+            "rev_ratio": float(ms.get("full_reverse_ratio_threshold", 0.75)),
+            "auto_right_ratio": float(ms.get("right_steer_ratio_threshold", 0.75)),
+            "auto_hold_sec": float(ms.get("right_steer_hold_sec", 2.0)),
+        }
+    except (KeyError, TypeError, ValueError) as e:
+        raise SystemExit(f"{HW_CONFIG_FILE}: invalid or missing hardware/rc/pwm setting ({e})")
+    pulses = [out[k] for k in ("servo_center", "servo_left", "servo_right", "esc_neutral", "esc_fwd", "esc_rev")]
+    if not all(800.0 <= us <= 2200.0 for us in pulses):
+        raise SystemExit(f"{HW_CONFIG_FILE}: servo/ESC pulses must be 800-2200 us")
+    if not (min(out["esc_fwd"], out["esc_rev"]) < out["esc_neutral"] < max(out["esc_fwd"], out["esc_rev"])):
+        raise SystemExit(f"{HW_CONFIG_FILE}: esc_neutral_us must lie between reverse and forward max")
+    if not (0 <= out["servo_ch"] <= 15 and 0 <= out["esc_ch"] <= 15 and out["servo_ch"] != out["esc_ch"]):
+        raise SystemExit(f"{HW_CONFIG_FILE}: servo/ESC channels must be different PCA9685 channels 0-15")
+    if not (0.0 < out["rev_ratio"] <= 1.0):
+        raise SystemExit(f"{HW_CONFIG_FILE}: mode_switch.full_reverse_ratio_threshold must be in (0, 1]")
+    if not (0.0 < out["auto_right_ratio"] <= 1.0) or not (math.isfinite(out["auto_hold_sec"]) and out["auto_hold_sec"] > 0):
+        raise SystemExit(f"{HW_CONFIG_FILE}: invalid RC AUTO gesture threshold/duration")
+    return out
+
+
+HW = _load_hw_calibration()
+
+# RC receiver (pulses in us, read from the Arduino); channel reversal is handled by normalize_axis()
+ST_NEU, TH_NEU = HW["st_neu"], HW["th_neu"]
+# RC emergency override: full steer either way, or full reverse (fraction of each stick's travel)
+RC_OVERRIDE_STEER_RATIO = 0.85
+RC_OVERRIDE_REVERSE_RATIO = HW["rev_ratio"]
+
 PWM_WRITE_MIN_DELTA = 15
 PWM_PERIOD = 0.05
 RC_FILTER = 0.25
@@ -115,7 +186,7 @@ ARRIVE_DIST_M = 1.5
 LOOKAHEAD_MIN_M = 1.5
 HEADING_INIT_MOVE_M = 0.35
 
-RC_TIMEOUT = 1.0
+RC_TIMEOUT = 0.5
 GPS_TIMEOUT = 1.0
 BAD_FIX_TIMEOUT = 1.0
 MAX_GPS_GLITCH_DIST_M = 2.5
@@ -123,28 +194,24 @@ MAX_GPS_GLITCH_MPS = 8.0
 HEADING_INIT_MAX_SEC = 5.0
 STALL_TIMEOUT_SEC = 5.0
 STALL_MIN_MOVED_M = 0.5
-MAX_SERIAL_LINES_LOOP = 20
-SERIAL_RECONNECT_SEC = 1.5
+SERIAL_RECONNECT_SEC = 1.5     # how often the hardware supervisor retries a missing RC/GPS port
+GPS_SILENT_RESTART_SEC = 5.0   # reopen the GPS port if no NMEA line arrives for this long
 
-RC_PORT = "/dev/ttyUSB0"
-GPS_PORT = "/dev/ttyACM0"
-RC_BAUD = 115200
-GPS_BAUD = 460800
-
-NTRIP_ENABLE = True
-NTRIP_HOST = "rts2.ngii.go.kr"
-NTRIP_PORT = 2101
-NTRIP_MOUNT = "VRS-RTCM32"
-NTRIP_USER = "lim6246"
-NTRIP_PASS = "ngii"
+RC_PORT = HW["arduino_port"]    # "auto" = detect by USB ID (same rules as multipath_boat.py)
+GPS_PORT = HW["gps_port"]
+RC_BAUD = HW["arduino_baud"]
+GPS_BAUD = HW["gps_baud"]
 
 WEB_ENABLE = True
 WEB_PORT = 8080
 HTML_FILENAME = "gcs_2_usv_hud.html"
 GCS_LINK_TIMEOUT_SEC = 3.5
 
-PCA_ADDR = 0x40
-PCA_I2C_BUS = 0
+PCA_ADDR = HW["pca_addr"]
+PCA_I2C_BUS = HW["i2c_bus"]
+PCA_FREQ_HZ = HW["pca_freq"]
+SERVO_CH = HW["servo_ch"]
+ESC_CH = HW["esc_ch"]
 
 # 카메라(16:9 와이드) 및 비전 control 상수
 CAM_ENABLE = True
@@ -158,11 +225,11 @@ CAM_HFOV_DEG = 62.2
 CAM_RECONNECT_SEC = 2.0
 CAM_TIMEOUT = 2.5
 
-BALLOON_STEER_GAIN = 18.0
+BALLOON_STEER_GAIN = 50.0
 BALLOON_STEER_KD = 3.5
 BALLOON_MIN_AREA = 110
 BALLOON_CHARGE_ANGLE_DEG = 18.0
-BALLOON_MEMORY_SEC = 1.0
+BALLOON_MEMORY_SEC = 5.0              # balloon lost: hold course straight this long (wave dropouts) before the search turn
 BALLOON_POP_FOLLOW_SEC = 1.2
 BALLOON_SEARCH_TIMEOUT_SEC = 25.0
 
@@ -198,7 +265,6 @@ TARGET_SAT_MIN = 105      # 최소 채도 (0~255)
 TARGET_VAL_MIN = 80       # 최소 밝기 (0~255)
 TARGET_COLOR_HEX = "#ff2a85"
 
-gps_ser_lock = threading.Lock()
 state_lock = threading.Lock()
 event_logs = deque(maxlen=40)
 
@@ -300,91 +366,158 @@ _last_gcs_hb_mono = 0.0
 _gcs_hb_streak = 0
 _gcs_ever_connected = False
 
-ser = None
-gps_ser = None
-pca = None
+# ---------------------------------------------------------------------------
+# Hardware communication: the same drivers as multipath_boat.py
+#   PCA9685Driver     direct I2C (smbus2); set_pwm_us(channel, microseconds)
+#   ArduinoRCReader   reader thread for the "CH1,CH2" lines sent by the RC Arduino
+#   ZEDF9PReceiver    reader thread for the ZED-F9P: NMEA in, RTCM out, one write lock
+#   NGII_NtripClient  RTCM3 corrections injected into that same receiver
+# A background supervisor opens the ports and reopens them after an unplug, so a
+# reconnect never blocks the 50 Hz control loop.
+# ---------------------------------------------------------------------------
+pca = None          # PCA9685Driver
+rc_reader = None    # ArduinoRCReader
 
-# 시리얼 포트 연결 (흐름 control 비활성화 및 중복 포트 제외)
-def open_serial_with_fallback(preferred_port, baud, prefix, exclude_port=None):
-    if serial is None:
-        return None
-    candidates = [preferred_port]
-    for p in sorted(glob.glob(f"/dev/{prefix}*")):
-        if p not in candidates and p != exclude_port:
-            candidates.append(p)
-    for port_name in candidates:
-        if exclude_port and port_name == exclude_port:
-            continue
+
+def init_pca9685():
+    """Open the PCA9685 and hold the servo at centre and the ESC at neutral so the ESC can arm."""
+    global pca, _last_steer, _last_drive, _need_safe_stop_retry
+    if pca is not None:
         try:
-            s = serial.Serial(
-                port_name,
-                baud,
-                timeout=0.02,
-                write_timeout=0.05,
-                xonxoff=False,
-                rtscts=False,
-                dsrdtr=False,
-            )
+            pca.close()
+        except Exception:
+            pass
+        pca = None
+    _last_steer = _last_drive = None
+    _need_safe_stop_retry = True
+    drv = None
+    try:
+        drv = PCA9685Driver(bus_num=PCA_I2C_BUS, address=PCA_ADDR, freq_hz=PCA_FREQ_HZ)
+        drv.set_pwm_us(SERVO_CH, HW["servo_center"])
+        drv.set_pwm_us(ESC_CH, HW["esc_neutral"])
+    except Exception as e:
+        if drv is not None:
             try:
-                s.reset_input_buffer()
+                drv.close()
             except Exception:
                 pass
-            add_event_log("SERIAL", f"Serial port connected: {port_name} ({baud} bps)", "auto")
-            return s
-        except Exception:
-            continue
-    return None
-
-# PCA9685 초기화 및 버스 자동 탐색 (Bus 0 / Bus 1)
-def init_pca9685():
-    global pca
-    if not HW_AVAILABLE:
+        shared_state["lampSerial"] = "err"
+        add_event_log("I2C", f"PCA9685 not responding (bus {PCA_I2C_BUS}, 0x{PCA_ADDR:02x}: {e}) "
+                             "-> check I2C wiring, power and 'pip3 install smbus2'", "warn")
         return False
-    builders = []
+    pca = drv
+    shared_state["lampSerial"] = "ok"
+    add_event_log("I2C", f"PCA9685 connected (bus {PCA_I2C_BUS}, 0x{PCA_ADDR:02x}, {drv.actual_freq_hz:.1f} Hz, "
+                         f"servo ch{SERVO_CH}, ESC ch{ESC_CH})", "auto")
+    return True
+
+
+_hw_last_warn = {}
+
+
+def _hw_warn(key, msg, every=10.0):
+    now = time.time()
+    if now - _hw_last_warn.get(key, 0.0) >= every:
+        _hw_last_warn[key] = now
+        add_event_log("SERIAL", msg, "warn")
+
+
+def _port_gone(port, ser_obj):
+    return (not port) or ser_obj is None or (not ser_obj.is_open) or (not os.path.exists(port))
+
+
+def rc_link_ok():
+    r = rc_reader
+    return r is not None and r.running and not _port_gone(r.port, r.ser)
+
+
+def gps_link_ok():
+    g = NAV_GPS
+    if not g.running or _port_gone(g.port, g.ser):
+        return False
+    return not (g.last_rx_mono > 0.0 and (time.monotonic() - g.last_rx_mono) > GPS_SILENT_RESTART_SEC)
+
+
+def _connect_rc(port):
+    global rc_reader
+    old = rc_reader
+    rc_reader = None
+    if old is not None:
+        try:
+            old.stop()
+        except Exception:
+            pass
+    if not port:
+        _hw_warn("rc", "RC Arduino port not found: check the USB cable and hardware.arduino_port in calibration.json")
+        return
+    reader = ArduinoRCReader(port, RC_BAUD)
     try:
-        from adafruit_extended_bus import ExtendedI2C
-        builders.append(("ExtendedI2C(0)", lambda: ExtendedI2C(0)))
-        builders.append(("ExtendedI2C(1)", lambda: ExtendedI2C(1)))
+        reader.start()          # opens the port and waits 2 s for the Arduino to reset
+    except Exception as e:
+        _hw_warn("rc", f"RC Arduino connect failed ({port}): {e}")
+        return
+    rc_reader = reader
+    add_event_log("SERIAL", f"RC Arduino connected: {port} ({RC_BAUD} bps)", "auto")
+
+
+def _connect_gps(port):
+    gps = NAV_GPS
+    try:
+        gps.stop()
     except Exception:
         pass
-    if hasattr(board, "SCL_1") and hasattr(board, "SDA_1"):
-        builders.append(("board.SCL_1/SDA_1(Bus0)", lambda: busio.I2C(board.SCL_1, board.SDA_1)))
-    if hasattr(board, "SCL") and hasattr(board, "SDA"):
-        builders.append(("board.SCL/SDA(Bus1)", lambda: busio.I2C(board.SCL, board.SDA)))
+    if not port:
+        _hw_warn("gps", "ZED-F9P port not found: check the USB cable and hardware.gps_port in calibration.json")
+        return
+    gps.port, gps.baud = port, GPS_BAUD
+    try:
+        gps.start()
+    except Exception as e:
+        _hw_warn("gps", f"ZED-F9P connect failed ({port}): {e}")
+        return
+    gps.last_rx_mono = time.monotonic()      # grace period before the silence watchdog applies
+    add_event_log("SERIAL", f"ZED-F9P connected: {port} ({GPS_BAUD} bps)", "auto")
 
-    last_err = None
-    for name, fn in builders:
+
+def hw_supervisor():
+    """Connect the RC Arduino and the ZED-F9P, and reconnect either one after it drops out."""
+    while True:
         try:
-            b = fn()
-            cand = PCA9685(b, address=PCA_ADDR)
-            cand.frequency = 50.0
-            pca = cand
-            shared_state["lampSerial"] = "ok"
-            add_event_log("I2C", f"PCA9685 motor driver connected ({name}, 0x{PCA_ADDR:02x})", "auto")
-            return True
+            need_rc = not rc_link_ok()
+            need_gps = not gps_link_ok()
+            if need_rc or need_gps:
+                busy = []
+                if not need_rc:
+                    busy.append(rc_reader.port)
+                if not need_gps:
+                    busy.append(NAV_GPS.port)
+                ard_port, gps_port = detect_serial_ports(RC_PORT, GPS_PORT, excluded_ports=tuple(busy))
+                if need_rc:
+                    _connect_rc(ard_port)
+                if need_gps:
+                    _connect_gps(gps_port)
         except Exception as e:
-            last_err = e
-    pca = None
-    shared_state["lampSerial"] = "err"
-    add_event_log("I2C", f"PCA9685 not responding (bus 0/1 failed: {last_err}) -> check I2C wiring/power!", "warn")
-    return False
+            _hw_warn("supervisor", f"Hardware supervisor error: {type(e).__name__}: {e}")
+        time.sleep(SERIAL_RECONNECT_SEC)
 
-# 주변장치(RC, GPS, PCA9685) 초기화
+
+# Peripherals: PCA9685 now, RC and GPS from the supervisor thread
 def init_peripherals():
-    global ser, gps_ser, pca
-    ser = open_serial_with_fallback(RC_PORT, RC_BAUD, "ttyUSB", exclude_port=GPS_PORT)
-    rc_used_port = getattr(ser, "port", None) or RC_PORT
-    gps_ser = open_serial_with_fallback(GPS_PORT, GPS_BAUD, "ttyACM", exclude_port=rc_used_port)
     init_pca9685()
+    threading.Thread(target=hw_supervisor, daemon=True).start()
 
 # PWM 상수 유효성 확인
 def pwm_ready():
     vals = (CENTER, max_LEFT, max_RIGHT, STOP, max_GO, max_BACK)
     return not any(v <= 0 for v in vals)
 
-log_filename = os.path.join(BASE_DIR, f"auto_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+log_dir = os.path.join(BASE_DIR, "logs")
+os.makedirs(log_dir, exist_ok=True)
+log_filename = os.path.join(log_dir, f"auto_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
 log_file = open(log_filename, "w", encoding="utf-8", buffering=8192)
-log_file.write("Time,Mode,Path,WP,Distance,Error,Lat,Lon,RTK,Speed_mps,PWM_Steer,PWM_Thr\n")
+log_file.write("Time,Mode,Path,WP,Distance,Error,Lat,Lon,RTK,Speed_mps,PWM_Steer,PWM_Thr,"
+               "CTE_m,Strategy,ThrottleBlend,HeadingSrc,WallGuard\n")
+LOG_NAV_BLANK = ",,,,,"  # MANUAL/BALLOON rows leave the AUTO-only columns blank
 
 # 범위 제한
 def clamp(v, lo, hi):
@@ -397,25 +530,59 @@ def lerp(a, b, t):
     t = 0.0 if t < 0.0 else 1.0 if t > 1.0 else t
     return int(a + (b - a) * t)
 
-# RC 펄스 -> PWM 변환
-def map_pulse_to_pwm(pulse, in_min, in_max, out_min, out_max, neutral, deadzone=15, out_neutral=None):
-    if out_neutral is None:
-        out_neutral = (out_min + out_max) / 2.0
-    if (neutral - deadzone) <= pulse <= (neutral + deadzone):
-        return int(out_neutral)
-    pulse = clamp(pulse, in_min, in_max)
-    if pulse < (neutral - deadzone):
-        denom = (neutral - deadzone) - in_min
-        if denom <= 0:
-            return int(out_min)
-        t = (pulse - in_min) / float(denom)
-        return int(out_min + (out_neutral - out_min) * t)
+# Logical PWM (web/controller scale) -> calibrated microseconds for PCA9685Driver.set_pwm_us()
+def steer_us(v):
+    """CENTER -> servo center; max_LEFT/max_RIGHT -> calibrated full left/right."""
+    if v >= CENTER:
+        t = min(1.0, (v - CENTER) / float(max_LEFT - CENTER))
+        return HW["servo_center"] + t * (HW["servo_left"] - HW["servo_center"])
+    t = min(1.0, (CENTER - v) / float(CENTER - max_RIGHT))
+    return HW["servo_center"] + t * (HW["servo_right"] - HW["servo_center"])
+
+
+def drive_us(v):
+    """STOP -> ESC neutral; DEFAULT_MAX_GO (and above) -> forward max; max_BACK -> reverse max."""
+    if v >= STOP:
+        t = min(1.0, (v - STOP) / float(DEFAULT_MAX_GO - STOP))
+        return HW["esc_neutral"] + t * (HW["esc_fwd"] - HW["esc_neutral"])
+    t = min(1.0, (STOP - v) / float(STOP - max_BACK))
+    return HW["esc_neutral"] + t * (HW["esc_rev"] - HW["esc_neutral"])
+
+
+# RC pulses -> normalized sticks (-1..+1; channel reversal from calibration.json)
+def rc_steer_norm(pulse):
+    """-1 = full left, +1 = full right."""
+    return normalize_axis(pulse, HW["st_neu"], HW["st_left"], HW["st_right"], HW["st_db"])
+
+
+def rc_throttle_norm(pulse):
+    """-1 = full reverse, +1 = full forward."""
+    return normalize_axis(pulse, HW["th_neu"], HW["th_rev"], HW["th_fwd"], HW["th_db"])
+
+
+def rc_to_logical(st_pulse, th_pulse):
+    """MANUAL: transmitter sticks -> logical steer/drive (full forward stick = current max_GO)."""
+    st_n = rc_steer_norm(st_pulse)
+    th_n = rc_throttle_norm(th_pulse)
+    if st_n >= 0.0:
+        steer = CENTER + st_n * (max_RIGHT - CENTER)
     else:
-        denom = in_max - (neutral + deadzone)
-        if denom <= 0:
-            return int(out_max)
-        t = (pulse - (neutral + deadzone)) / float(denom)
-        return int(out_neutral + (out_max - out_neutral) * t)
+        steer = CENTER + (-st_n) * (max_LEFT - CENTER)
+    if th_n >= 0.0:
+        drive = STOP + th_n * (max_GO - STOP)
+    else:
+        drive = STOP + (-th_n) * (max_BACK - STOP)
+    return int(round(steer)), int(round(drive))
+
+
+def rc_takeover_requested(mode, steer_pulse, throttle_pulse):
+    """Any stick in MANUAL; full steering or reverse in autonomous modes."""
+    steer = rc_steer_norm(steer_pulse)
+    throttle = rc_throttle_norm(throttle_pulse)
+    if mode == "MANUAL":
+        return steer != 0.0 or throttle != 0.0
+    return abs(steer) >= RC_OVERRIDE_STEER_RATIO or throttle <= -RC_OVERRIDE_REVERSE_RATIO
+
 
 # 각도 정규화 (-180 ~ +180)
 def wrap180(deg):
@@ -523,332 +690,169 @@ try:
 except Exception as e:
     raise SystemExit(f"CSV load error: {e}")
 
-# NMEA XOR 체크섬 검증
-def verify_nmea_checksum(line):
-    if not line or not line.startswith("$") or "*" not in line:
-        return False
-    body, _, chk_str = line[1:].partition("*")
-    chk_str = chk_str.strip()[:2]
-    if len(chk_str) != 2:
-        return False
-    try:
-        expected = int(chk_str, 16)
-    except ValueError:
-        return False
-    calc = 0
-    for ch in body:
-        calc ^= ord(ch)
-    return calc == expected
+# ---------------------------------------------------------------------------
+# AUTO controller (shared with multipath_boat.py). Uses the autonomous / navigation /
+# pwm.auto_throttle_ratio settings in calibration.json; without that file the defaults
+# apply (02_adaptive_throttle, cruise ratio 0.60). Steering [-1, 1] maps to
+# CENTER..max_LEFT/max_RIGHT; throttle blend [0, 1] maps from cruise (that ratio of
+# STOP..max_GO) up to max_GO.
+# ---------------------------------------------------------------------------
+AUTO_CONFIG_FILE = "calibration.json"
+LANE_KEYS = {"Left": "left", "Center": "center", "Right": "right"}
+LANE_NAMES = {v: k for k, v in LANE_KEYS.items()}
 
-# NMEA GGA 파싱
-def parse_gga(line):
-    if not (line.startswith("$GNGGA") or line.startswith("$GPGGA")) or not verify_nmea_checksum(line):
-        return None
-    parts = line.split(",")
-    if len(parts) < 10 or not parts[6]:
-        return None
-    try:
-        fix = int(parts[6])
-        sats = int(parts[7]) if parts[7] else 0
-        hdop = float(parts[8]) if parts[8] else 99.9
-        if not parts[2] or not parts[4]:
-            return None, None, fix, sats, hdop
-        lat = float(parts[2][:2]) + float(parts[2][2:]) / 60.0
-        if parts[3] == "S":
-            lat = -lat
-        lon = float(parts[4][:3]) + float(parts[4][3:]) / 60.0
-        if parts[5] == "W":
-            lon = -lon
-        return lat, lon, fix, sats, hdop
-    except (ValueError, IndexError):
-        return None
 
-# NMEA RMC 파싱
-def parse_rmc(line):
-    if not (line.startswith("$GNRMC") or line.startswith("$GPRMC")) or not verify_nmea_checksum(line):
-        return None
-    parts = line.split(",")
-    if len(parts) < 10 or parts[2] != "A" or not parts[3] or not parts[5]:
-        return None
-    try:
-        lat = float(parts[3][:2]) + float(parts[3][2:]) / 60.0
-        if parts[4] == "S":
-            lat = -lat
-        lon = float(parts[5][:3]) + float(parts[5][3:]) / 60.0
-        if parts[6] == "W":
-            lon = -lon
-        cog = float(parts[8]) if parts[8] else None
-        spd_kn = float(parts[7]) if parts[7] else 0.0
-        return lat, lon, cog, spd_kn
-    except (ValueError, IndexError):
-        return None
+def load_auto_controller():
+    cfg = {}
+    cfg_path = resolve_path(AUTO_CONFIG_FILE)
+    found = os.path.exists(cfg_path)
+    if found:
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+    nav_params = resolve_navigation_params(cfg.get("navigation", {}))
+    strategy = create_auto_strategy(cfg.get("autonomous", {}), nav_params)
+    ratio = cfg.get("pwm", {}).get("auto_throttle_ratio", 0.60)
+    if isinstance(ratio, bool) or not isinstance(ratio, (int, float)) or not math.isfinite(ratio):
+        raise ValueError("pwm.auto_throttle_ratio must be a finite number")
+    nav_paths = {
+        LANE_KEYS[name]: [(i + 1, lat, lon) for i, (lat, lon) in enumerate(pts)]
+        for name, pts in PATHS.items()
+    }
+    navigator = MultipathNavigator(nav_paths, nav_params, strategy=strategy)
+    selector = (MotionHeadingSelector(strategy.options)
+                if strategy.uses_gps_course and not getattr(strategy, "uses_gps_guard", False) else None)
+    return navigator, strategy, selector, clamp(float(ratio), 0.20, 1.00), found
 
-# 아두이노 RC 펄스 파싱
-def get_arduino_data(data_str):
-    if not data_str:
-        return None, None
-    try:
-        s = data_str.replace("ST:", "").replace("TH:", "")
-        parts = s.split(",")
-        if len(parts) >= 2:
-            st = int(float(parts[0].strip()))
-            th = int(float(parts[1].strip()))
-            if not (RC_VALID_MIN <= st <= RC_VALID_MAX and RC_VALID_MIN <= th <= RC_VALID_MAX):
-                return None, None
-            return st, th
-    except (ValueError, TypeError):
-        pass
-    return None, None
 
-_last_rc_reconnect_t = 0.0
-_last_gps_reconnect_t = 0.0
-_rc_read_count = 0
-_last_rc_valid_pkt_t = 0.0
-_rc_silent_reset_count = 0
+try:
+    NAVIGATOR, AUTO_STRATEGY, HEADING_SELECTOR, AUTO_CRUISE_RATIO, AUTO_CONFIG_FOUND = load_auto_controller()
+    GPS_GUARD = GpsAwareController(NAVIGATOR) if getattr(AUTO_STRATEGY, "uses_gps_guard", False) else None
+except Exception as e:
+    raise SystemExit(f"AUTO controller config error ({AUTO_CONFIG_FILE}): {e}")
 
-# 최신 RC 신호 읽기 및 무응답 시 자동 복구
-def read_latest_rc():
-    global ser, _last_rc_reconnect_t, _rc_read_count, _last_rc_valid_pkt_t, _rc_silent_reset_count
-    now = time.time()
-    if ser is None:
-        if now - _last_rc_reconnect_t >= SERIAL_RECONNECT_SEC:
-            _last_rc_reconnect_t = now
-            gps_used_port = getattr(gps_ser, "port", None) or GPS_PORT
-            ser = open_serial_with_fallback(RC_PORT, RC_BAUD, "ttyUSB", exclude_port=gps_used_port)
-            _last_rc_valid_pkt_t = now
-        return None, None
+# The ZED-F9P receiver (reader thread started by hw_supervisor) and its NTRIP corrections
+NAV_GPS = ZEDF9PReceiver(port=None, baud=GPS_BAUD)
+NTRIP = NGII_NtripClient(NTRIP_CONFIG, NAV_GPS)
 
-    lines = []
-    lines_read = 0
-    try:
-        while ser.in_waiting > 0 and lines_read < MAX_SERIAL_LINES_LOOP:
-            line = ser.readline().decode("utf-8", errors="ignore").strip()
-            lines_read += 1
-            if line:
-                lines.append(line)
-    except SERIAL_ERR_TYPES as e:
-        add_event_log("SERIAL", f"RC serial disconnect detected ({e})", "warn")
-        shared_state["lampSerial"] = "err"
+
+class _EventLogBridge(logging.Handler):
+    """Show the status lines of the shared GPS/NTRIP classes in the web event log."""
+
+    def emit(self, record):
         try:
-            ser.close()
+            msg = record.getMessage()
+            tag = "NTRIP" if "NTRIP" in msg else ("GPS" if "GPS" in msg else "HW")
+            level = "warn" if record.levelno >= logging.WARNING else "auto"
+            now_str = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+            with state_lock:
+                event_logs.append({"time": now_str, "tag": tag, "msg": msg, "level": level})
         except Exception:
             pass
-        ser = None
-        return None, None
 
-    for candidate in reversed(lines):
-        st, th = get_arduino_data(candidate)
-        if st is not None and th is not None:
-            _rc_read_count += 1
-            _last_rc_valid_pkt_t = now
-            _rc_silent_reset_count = 0
-            return st, th
 
-    # 유효 패킷 장기 미수신 시 백오프 기반 버퍼 정리 (조종기 OFF 시 무한 리셋·로그 스팸 방지)
-    if _last_rc_valid_pkt_t == 0.0:
-        _last_rc_valid_pkt_t = now
+SESSION_LOG.setLevel(logging.INFO)
+SESSION_LOG.addHandler(_EventLogBridge())
+
+
+def nav_steer_to_pwm(steer_norm):
+    """+1 = full right rudder; STEER_SIGN = -1 swaps sides."""
+    n = clamp(float(steer_norm), -1.0, 1.0) * STEER_SIGN
+    if n >= 0.0:
+        raw = CENTER + n * (max_RIGHT - CENTER)
     else:
-        backoff_sec = 6.0 if _rc_silent_reset_count == 0 else (20.0 if _rc_silent_reset_count == 1 else 60.0)
-        if (now - _last_rc_valid_pkt_t) >= backoff_sec:
-            _last_rc_valid_pkt_t = now
-            _rc_silent_reset_count += 1
-            if _rc_silent_reset_count <= 2:
-                cur_port = getattr(ser, "port", RC_PORT)
-                add_event_log("SERIAL", f"RC silent ({int(backoff_sec)}s) -> flush serial buffer #{_rc_silent_reset_count}", "warn")
-                try:
-                    ser.reset_input_buffer()
-                    ser.close()
-                except Exception:
-                    pass
-                ser = None
+        raw = CENTER + (-n) * (max_LEFT - CENTER)
+    return int(round(clamp(raw, max_LEFT, max_RIGHT)))
 
-    return None, None
+
+def nav_throttle_to_pwm(blend):
+    """Blend 0 = cruise, 1 = max_GO (the web max-forward setting)."""
+    cruise = lerp(STOP, max_GO, AUTO_CRUISE_RATIO)
+    b = clamp(float(blend), 0.0, 1.0)
+    return int(round(cruise + b * (max_GO - cruise)))
+
+
+def nav_absolute_throttle_to_pwm(throttle, guarded=False):
+    """Signed absolute power, with guard caps measured against calibrated ESC range."""
+    n = clamp(float(throttle), -1.0, 1.0)
+    if n < 0.0:
+        if guarded:
+            return int(math.ceil(STOP + (-n) * (max_BACK - STOP)))
+        return lerp(STOP, max_BACK, -n)
+    forward_limit = min(max_GO, DEFAULT_MAX_GO) if guarded else max_GO
+    return lerp(STOP, forward_limit, n)
+
+_rc_last_pkt_mono = 0.0
+_rc_read_count = 0
+
+
+def read_latest_rc():
+    """Newest RC pulses (ch1, ch2) in microseconds when a new packet arrived, else (None, None)."""
+    global _rc_last_pkt_mono, _rc_read_count
+    reader = rc_reader
+    if reader is None:
+        return None, None
+    ch1, ch2, alive = reader.get_latest()
+    if not alive or reader.last_rx_time == _rc_last_pkt_mono:
+        return None, None
+    _rc_last_pkt_mono = reader.last_rx_time
+    _rc_read_count += 1
+    return ch1, ch2
+
 
 _last_lat, _last_lon, _last_cog, _last_spd_kn = None, None, None, 0.0
 _last_fix, _last_sats, _last_hdop = 0, 0, 99.9
-_last_gga_line = None
 _last_valid_gps_t = 0.0
+_last_gps_fix_mono = 0.0
 _glitch_reject_count = 0
 _glitch_cand_lat, _glitch_cand_lon = None, None
 
-# 최신 GPS 읽기 및 Glitch 필터링
+
 def read_latest_gps(is_reversing=False):
-    global gps_ser, _last_gps_reconnect_t
+    """New position from the ZED-F9P reader thread (None when no new fix), with the wall-reflection glitch filter."""
     global _last_lat, _last_lon, _last_cog, _last_spd_kn, _last_fix, _last_sats, _last_hdop
-    global _last_gga_line, _last_valid_gps_t, _glitch_reject_count, _glitch_cand_lat, _glitch_cand_lon
+    global _last_valid_gps_t, _last_gps_fix_mono, _glitch_reject_count, _glitch_cand_lat, _glitch_cand_lon
 
     now = time.time()
-    if gps_ser is None:
-        if now - _last_gps_reconnect_t >= SERIAL_RECONNECT_SEC:
-            _last_gps_reconnect_t = now
-            rc_used_port = getattr(ser, "port", None) or RC_PORT
-            with gps_ser_lock:
-                gps_ser = open_serial_with_fallback(GPS_PORT, GPS_BAUD, "ttyACM", exclude_port=rc_used_port)
+    snap = NAV_GPS.get_snapshot()
+    _last_fix, _last_sats, _last_hdop = snap["fix_quality"], snap["num_sats"], snap["hdop"]
+    fix_t = NAV_GPS.last_fix_time
+    if fix_t <= _last_gps_fix_mono or snap["lat"] is None or snap["lon"] is None:
         return None
+    _last_gps_fix_mono = fix_t
 
-    updated = False
-    cand_lat, cand_lon = None, None
-    cand_cog = None
-    cand_spd_kn = _last_spd_kn
-    cand_fix, cand_sats, cand_hdop = _last_fix, _last_sats, _last_hdop
+    cand_lat, cand_lon = snap["lat"], snap["lon"]
+    cand_spd_kn = snap["sog_mps"] / 0.514444
+    cand_cog = snap["cog_deg"]
 
-    lines_read = 0
-    try:
-        with gps_ser_lock:
-            while gps_ser is not None and gps_ser.in_waiting > 0 and lines_read < MAX_SERIAL_LINES_LOOP:
-                line = gps_ser.readline().decode("ascii", errors="ignore").strip()
-                lines_read += 1
-                if line.startswith("$GNGGA") or line.startswith("$GPGGA"):
-                    gga = parse_gga(line)
-                    if gga:
-                        g_lat, g_lon, cand_fix, cand_sats, cand_hdop = gga
-                        _last_fix, _last_sats, _last_hdop = cand_fix, cand_sats, cand_hdop
-                        if g_lat is not None and g_lon is not None:
-                            cand_lat, cand_lon = g_lat, g_lon
-                            _last_gga_line = line
-                            updated = True
-                elif line.startswith("$GNRMC") or line.startswith("$GPRMC"):
-                    rmc = parse_rmc(line)
-                    if rmc:
-                        r_lat, r_lon, r_cog, r_spd = rmc
-                        cand_lat, cand_lon = r_lat, r_lon
-                        if r_cog is not None:
-                            cand_cog = r_cog
-                        cand_spd_kn = r_spd
-                        updated = True
-    except SERIAL_ERR_TYPES as e:
-        add_event_log("SERIAL", f"GPS serial disconnect detected ({e})", "warn")
-        shared_state["lampSerial"] = "err"
-        with gps_ser_lock:
-            try:
-                gps_ser.close()
-            except Exception:
-                pass
-            gps_ser = None
-        return None
+    if _last_lat is not None and _last_lon is not None and _last_valid_gps_t > 0:
+        dt = max(0.1, now - _last_valid_gps_t)
+        jump_dist = haversine(_last_lat, _last_lon, cand_lat, cand_lon)
+        jump_mps = jump_dist / dt
+        if jump_dist > MAX_GPS_GLITCH_DIST_M and jump_mps > MAX_GPS_GLITCH_MPS:
+            # Accept a persistent jump: several consistent outliers in a row mean the boat really moved
+            consistent_with_cand = (
+                _glitch_cand_lat is not None
+                and haversine(_glitch_cand_lat, _glitch_cand_lon, cand_lat, cand_lon) <= MAX_GPS_GLITCH_DIST_M
+            )
+            _glitch_cand_lat, _glitch_cand_lon = cand_lat, cand_lon
+            if _glitch_reject_count < 3 or (not consistent_with_cand and _glitch_reject_count < 8):
+                _glitch_reject_count += 1
+                shared_state["lampGlitch"] = "warn"
+                add_event_log("GLITCH", f"Ignoring wall-reflection outlier #{_glitch_reject_count} ({jump_dist:.1f}m / {jump_mps:.1f}m/s)", "warn")
+                return None
 
-    if updated and cand_lat is not None and cand_lon is not None:
-        if _last_lat is not None and _last_lon is not None and _last_valid_gps_t > 0:
-            dt = max(0.1, now - _last_valid_gps_t)
-            jump_dist = haversine(_last_lat, _last_lon, cand_lat, cand_lon)
-            jump_mps = jump_dist / dt
-            if jump_dist > MAX_GPS_GLITCH_DIST_M and jump_mps > MAX_GPS_GLITCH_MPS:
-                # 연속 이상치 일관성 확인
-                consistent_with_cand = (
-                    _glitch_cand_lat is not None
-                    and haversine(_glitch_cand_lat, _glitch_cand_lon, cand_lat, cand_lon) <= MAX_GPS_GLITCH_DIST_M
-                )
-                _glitch_cand_lat, _glitch_cand_lon = cand_lat, cand_lon
-                if _glitch_reject_count < 3 or (not consistent_with_cand and _glitch_reject_count < 8):
-                    _glitch_reject_count += 1
-                    shared_state["lampGlitch"] = "warn"
-                    add_event_log("GLITCH", f"Reject wall-reflection GPS glitch #{_glitch_reject_count} ({jump_dist:.1f}m / {jump_mps:.1f}m/s)", "warn")
-                    return None
+    _glitch_reject_count = 0
+    _glitch_cand_lat, _glitch_cand_lon = None, None
+    shared_state["lampGlitch"] = "ok"
+    _last_lat, _last_lon = cand_lat, cand_lon
+    _last_spd_kn = cand_spd_kn
+    if is_reversing:
+        _last_cog = None
+    elif cand_cog is not None:
+        _last_cog = cand_cog
+    _last_valid_gps_t = now
+    return _last_lat, _last_lon, _last_cog, _last_spd_kn, _last_fix, _last_sats, _last_hdop
 
-        _glitch_reject_count = 0
-        _glitch_cand_lat, _glitch_cand_lon = None, None
-        shared_state["lampGlitch"] = "ok"
-        _last_lat, _last_lon = cand_lat, cand_lon
-        _last_spd_kn = cand_spd_kn
-
-        if is_reversing:
-            _last_cog = None
-        elif cand_cog is not None:
-            _last_cog = cand_cog
-
-        _last_valid_gps_t = now
-        return _last_lat, _last_lon, _last_cog, _last_spd_kn, _last_fix, _last_sats, _last_hdop
-
-    return None
-
-# NTRIP RTCM3 보정 신호 수신 워커
-def ntrip_worker():
-    auth = base64.b64encode(f"{NTRIP_USER}:{NTRIP_PASS}".encode("utf-8")).decode("utf-8")
-    req_header = (
-        f"GET /{NTRIP_MOUNT} HTTP/1.0\r\n"
-        f"User-Agent: NTRIP PythonClient/1.0\r\n"
-        f"Accept: */*\r\n"
-        f"Connection: close\r\n"
-        f"Authorization: Basic {auth}\r\n"
-        f"\r\n"
-    ).encode("utf-8")
-
-    total_bytes = 0
-
-    while True:
-        if not NTRIP_ENABLE or NTRIP_USER in ("", "YOUR_ID") or _last_gga_line is None:
-            time.sleep(1.0)
-            continue
-
-        sock = None
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(5.0)
-            sock.connect((NTRIP_HOST, NTRIP_PORT))
-            sock.sendall(req_header)
-
-            resp = sock.recv(4096)
-            resp_text = resp.decode("latin1", errors="ignore")
-
-            if "200 OK" not in resp_text:
-                shared_state["ntripConnected"] = False
-                sock.close()
-                time.sleep(5.0)
-                continue
-
-            shared_state["ntripConnected"] = True
-            add_event_log("NTRIP", f"RTCM3 corrections started ({NTRIP_MOUNT})", "ntrip")
-
-            if b"\r\n\r\n" in resp:
-                body = resp.split(b"\r\n\r\n", 1)[1]
-                if body:
-                    with gps_ser_lock:
-                        if gps_ser is not None:
-                            try:
-                                gps_ser.write(body)
-                                total_bytes += len(body)
-                            except Exception:
-                                pass
-
-            sock.settimeout(1.0)
-            last_gga_sent = 0.0
-            last_rtcm_t = time.time()
-
-            while True:
-                now_t = time.time()
-                gga_to_send = _last_gga_line
-                if gga_to_send and (now_t - last_gga_sent >= 5.0):
-                    sock.sendall((gga_to_send + "\r\n").encode("ascii"))
-                    last_gga_sent = now_t
-
-                try:
-                    data = sock.recv(4096)
-                    if not data:
-                        shared_state["ntripConnected"] = False
-                        break
-                    with gps_ser_lock:
-                        if gps_ser is not None:
-                            try:
-                                gps_ser.write(data)
-                                total_bytes += len(data)
-                            except Exception:
-                                pass
-                    shared_state["ntripKb"] = round(total_bytes / 1024.0, 1)
-                    last_rtcm_t = now_t
-                except socket.timeout:
-                    if now_t - last_rtcm_t > 15.0:
-                        shared_state["ntripConnected"] = False
-                        break
-                    continue
-        except Exception:
-            shared_state["ntripConnected"] = False
-        finally:
-            if sock:
-                try:
-                    sock.close()
-                except Exception:
-                    pass
-        time.sleep(3.0)
 
 _last_steer = None
 _last_drive = None
@@ -878,18 +882,17 @@ def set_pwm(steer, drive, force=False):
     )
 
     if pca is None:
-        _last_steer = steer
-        _last_drive = target_drive
-        shared_state["steerPwm"] = _last_steer
-        shared_state["drivePwm"] = _last_drive
+        _last_steer = _last_drive = None
+        _need_safe_stop_retry = True
+        shared_state["lampSerial"] = "err"
         return
 
     try:
         if steer_need:
-            pca.channels[0].duty_cycle = steer
+            pca.set_pwm_us(SERVO_CH, steer_us(steer))
             _last_steer = steer
         if drive_need:
-            pca.channels[6].duty_cycle = target_drive
+            pca.set_pwm_us(ESC_CH, drive_us(target_drive))
             _last_drive = target_drive
         _need_safe_stop_retry = False
         _pca_err_streak = 0
@@ -900,6 +903,10 @@ def set_pwm(steer, drive, force=False):
         shared_state["lampSerial"] = "warn"
         if _pca_err_streak >= 5:
             shared_state["lampSerial"] = "err"
+            try:
+                pca.close()
+            except Exception:
+                pass
             pca = None
             _pca_err_streak = 0
 
@@ -914,8 +921,8 @@ def safe_stop():
 
     for _ in range(3):
         try:
-            pca.channels[0].duty_cycle = CENTER
-            pca.channels[6].duty_cycle = STOP
+            pca.set_pwm_us(SERVO_CH, steer_us(CENTER))
+            pca.set_pwm_us(ESC_CH, drive_us(STOP))
             _last_steer, _last_drive = CENTER, STOP
             _need_safe_stop_retry = False
             return
@@ -925,17 +932,6 @@ def safe_stop():
     _last_steer = None
     _last_drive = None
     _need_safe_stop_retry = True
-
-# AUTO 전진 출력 계산
-def auto_drive(angle_err):
-    a = abs(angle_err)
-    if a >= 70:
-        t = 0.15
-    elif a <= 15:
-        t = 1.0
-    else:
-        t = 0.15 + 0.85 * (70.0 - a) / 55.0
-    return lerp(STOP, max_GO, t)
 
 _pid_integral = 0.0
 _pid_prev_err = None
@@ -1085,69 +1081,6 @@ def reset_pid_state():
         shared_state["pidITerm"] = 0.0
         shared_state["pidDTerm"] = 0.0
 
-# AUTO 조향 출력 계산 (P / PID)
-def auto_steer(angle_err, now_t=None, spd_mps=0.0, gps_updated=True, wp_changed=False):
-    global _pid_integral, _pid_prev_err, _pid_prev_t, _pid_prev_err_t, _pid_d_filt
-    global _pid_last_p, _pid_last_i, _pid_last_d
-
-    if now_t is None:
-        now_t = time.time()
-
-    if STEER_CTRL_MODE != "PID":
-        p_term = angle_err * PID_KP
-        _pid_last_p, _pid_last_i, _pid_last_d = p_term, 0.0, 0.0
-        raw = CENTER - int(STEER_SIGN * p_term)
-        return clamp(raw, max_LEFT, max_RIGHT)
-
-    dt_loop = (now_t - _pid_prev_t) if (_pid_prev_t > 0.0 and (now_t - _pid_prev_t) <= 0.5) else 0.02
-    dt_loop = max(0.005, dt_loop)
-    _pid_prev_t = now_t
-
-    # P항
-    p_term = angle_err * PID_KP
-
-    # I항 (저속 잠금 및 Anti-Windup)
-    if PID_KI <= 0.0:
-        _pid_integral = 0.0
-        i_term = 0.0
-    else:
-        if _pid_prev_err is not None and not wp_changed and (angle_err * _pid_prev_err) < 0.0:
-            _pid_integral *= 0.5
-        if spd_mps >= 0.35 and abs(angle_err) < 60.0:
-            _pid_integral = clamp(_pid_integral + angle_err * dt_loop, -PID_I_MAX_DEG, PID_I_MAX_DEG)
-        i_term = _pid_integral * PID_KI
-
-    # D항 (GPS 주기 기준 변화율 및 LPF)
-    if PID_KD <= 0.0:
-        _pid_d_filt = 0.0
-        d_term = 0.0
-        _pid_prev_err = angle_err
-        _pid_prev_err_t = now_t
-    elif _pid_prev_err is None or wp_changed:
-        was_none = (_pid_prev_err is None)
-        _pid_prev_err = angle_err
-        _pid_prev_err_t = now_t
-        if was_none:
-            _pid_d_filt = 0.0
-        d_term = _pid_d_filt * PID_KD
-    else:
-        if gps_updated or abs(wrap180(angle_err - _pid_prev_err)) > 1e-4:
-            dt_gps = max(0.02, min(0.5, now_t - _pid_prev_err_t)) if _pid_prev_err_t > 0.0 else dt_loop
-            delta_err = wrap180(angle_err - _pid_prev_err)
-            raw_rate = clamp(delta_err / dt_gps, -45.0, 45.0)
-            _pid_d_filt = 0.60 * _pid_d_filt + 0.40 * raw_rate
-            _pid_prev_err = angle_err
-            _pid_prev_err_t = now_t
-        elif _pid_prev_err_t > 0.0 and (now_t - _pid_prev_err_t) > 0.5:
-            _pid_d_filt *= 0.9
-        d_term = _pid_d_filt * PID_KD
-
-    _pid_last_p, _pid_last_i, _pid_last_d = p_term, i_term, d_term
-
-    total_term = p_term + i_term + d_term
-    raw = CENTER - int(STEER_SIGN * total_term)
-    return clamp(raw, max_LEFT, max_RIGHT)
-
 # WP 좌표 조회
 def wp_coord(path_list, idx):
     return path_list[idx]
@@ -1166,23 +1099,6 @@ def pick_path(c_lat, c_lon, idx, current_name):
     if cur_d > SWITCH_DIST_M and (cur_d - best_d) >= SWITCH_MARGIN_M:
         return best_name, dists
     return current_name, dists
-
-# WP 도달 판정 및 인덱스 갱신
-def advance_index(c_lat, c_lon, path_name, idx):
-    path_list = PATHS[path_name]
-    while idx < total_waypoints:
-        lat, lon = path_list[idx]
-        d_cur = haversine(c_lat, c_lon, lat, lon)
-        if d_cur <= ARRIVE_DIST_M:
-            idx += 1
-            continue
-        if idx + 1 < total_waypoints and d_cur <= ARRIVE_DIST_M * 2.5:
-            nlat, nlon = path_list[idx + 1]
-            d_next = haversine(c_lat, c_lon, nlat, nlon)
-            if d_next + 0.3 < d_cur:
-                idx += 1
-        break
-    return idx
 
 # 전방 주시 좌표(Lookahead) 계산
 def get_lookahead_target(c_lat, c_lon, path_list, idx):
@@ -1208,23 +1124,6 @@ def get_lookahead_target(c_lat, c_lon, path_list, idx):
             )
         curr_i += 1
     return path_list[-1]
-
-# 전방 최근접 WP 탐색
-def find_forward_waypoint(c_lat, c_lon, path_name, current_idx):
-    if c_lat is None or c_lon is None:
-        return current_idx if current_idx < total_waypoints else 0
-    path_list = PATHS[path_name]
-    start_i = 0 if current_idx >= total_waypoints else max(0, current_idx)
-
-    best_idx = start_i
-    best_dist = float("inf")
-    for i in range(start_i, total_waypoints):
-        lat, lon = path_list[i]
-        d = haversine(c_lat, c_lon, lat, lon)
-        if d < best_dist:
-            best_dist = d
-            best_idx = i
-    return best_idx
 
 # 시스템 온도·부하 조회
 def read_jetson_health():
@@ -2166,19 +2065,27 @@ def main_loop():
     high_power_warn_8m = False
     prev_loop_t = time.time()
 
+    nav_info = None
+    heading_info = None
+    last_nav_t = 0.0
+    was_auto = False
+
     balloon_last_seen_t = 0.0
     balloon_mode_start_t = 0.0
     balloon_last_angle_err = 0.0
     balloon_substate = "IDLE"
     balloon_arrive_count = 0
-    mode_enter_t = 0.0
-    override_armed = False
     web_manual_steer = CENTER
     web_manual_drive = STOP
     web_manual_until_t = 0.0
     web_manual_active = False
     web_manual_stop_hold_t = 0.0
     rc_ignore_mode = False
+    rc_manual_latched = False
+    rc_auto_active = False
+    rc_entry_steer_held = False
+    rc_auto_hold_start = None
+    rc_auto_gesture_consumed = False
     gcs_watchdog_enabled = True
     gcs_link_paused = False
 
@@ -2189,9 +2096,19 @@ def main_loop():
 
     load_pid_config()
     gcs_watchdog_enabled = bool(shared_state.get("linkWatchdog", True))
+    line_guidance = NAVIGATOR.line_guidance is not None
+    guidance_label = ("TEST SQUARE" if AUTO_STRATEGY.options.get("test_square") else "STRAIGHT LINE") if line_guidance else ""
+    shared_state["autoStrategy"] = AUTO_STRATEGY.name
+    shared_state["autoGuidance"] = guidance_label
+    add_event_log(
+        "AUTO",
+        f"AUTO controller: {AUTO_STRATEGY.name} | cruise ratio {AUTO_CRUISE_RATIO:.2f} | "
+        f"finish margin {NAVIGATOR.finish_margin_m:g} m | settings: "
+        + (AUTO_CONFIG_FILE if AUTO_CONFIG_FOUND else "defaults (no calibration.json)"),
+        "auto",
+    )
 
-    if NTRIP_ENABLE:
-        threading.Thread(target=ntrip_worker, daemon=True).start()
+    NTRIP.start()
 
     if WEB_ENABLE:
         threading.Thread(target=web_server_worker, daemon=True).start()
@@ -2205,6 +2122,7 @@ def main_loop():
 
     while True:
         now = time.time()
+        now_mono = time.monotonic()
         loop_counter += 1
 
         if now - loop_rate_t >= 1.0:
@@ -2220,7 +2138,7 @@ def main_loop():
             temp_c, load_pct = read_jetson_health()
             shared_state["jetsonCpuTemp"] = temp_c
             shared_state["jetsonLoad"] = load_pct
-            if pca is None and HW_AVAILABLE and (now - last_pca_retry_t) >= 10.0:
+            if pca is None and (now - last_pca_retry_t) >= 10.0:
                 last_pca_retry_t = now
                 init_pca9685()
             if (now - last_csv_flush_t) >= 5.0:
@@ -2229,13 +2147,13 @@ def main_loop():
                     log_file.flush()
                 except Exception:
                     pass
-            if ser is not None and gps_ser is not None and pca is not None:
-                shared_state["lampSerial"] = "ok"
-            elif pca is None:
-                shared_state["lampSerial"] = "err"
+            shared_state["lampSerial"] = "ok" if (pca is not None and rc_link_ok() and gps_link_ok()) else "err"
+            ntrip_snap = NTRIP.get_snapshot()
+            shared_state["ntripConnected"] = ntrip_snap["connected"]
+            shared_state["ntripKb"] = round(ntrip_snap["rtcm_bytes_rx"] / 1024.0, 1)
 
-        # 1. RC 수신 (웹 단독 모드 시 불필요한 시리얼 재연결 폴링 생략)
-        raw_st, raw_th = (None, None) if rc_ignore_mode else read_latest_rc()
+        # Always receive RC, including web-only operation.
+        raw_st, raw_th = read_latest_rc()
         if raw_st is not None and raw_th is not None:
             last_rc_t = now
             last_raw_st, last_raw_th = raw_st, raw_th
@@ -2301,9 +2219,28 @@ def main_loop():
             pending_web_cmd["cmd"] = None
             pending_web_cmd["value"] = None
 
+        # A deliberate RC gesture uses the same AUTO initialization as the dashboard.
+        rc_auto_gesture_input = (
+            rc_ok and rc_throttle_norm(last_raw_th) == 0.0
+            and rc_steer_norm(last_raw_st) >= HW["auto_right_ratio"]
+        )
+        rc_auto_gesture = current_mode == "MANUAL" and not estop_active and rc_auto_gesture_input
+        if not rc_auto_gesture:
+            rc_auto_hold_start = None
+            # A held entry gesture cannot restart AUTO after a finish/failsafe.
+            if not rc_auto_gesture_input:
+                rc_auto_gesture_consumed = False
+        elif not rc_auto_gesture_consumed:
+            if rc_auto_hold_start is None:
+                rc_auto_hold_start = now_mono
+            elif now_mono - rc_auto_hold_start >= HW["auto_hold_sec"]:
+                rc_auto_gesture_consumed = True
+                cmds_to_process.append({"cmd": "set_mode", "value": "AUTO", "source": "rc"})
+
         for _cmd_item in cmds_to_process:
           cmd = _cmd_item["cmd"]
           cmd_val = _cmd_item["value"]
+          from_rc = _cmd_item.get("source") == "rc"
           if cmd == "estop_on":
               estop_active = True
               current_mode = "MANUAL"
@@ -2318,15 +2255,28 @@ def main_loop():
               reset_pid_state()
               safe_stop()
               add_event_log("E-STOP", "E-STOP cleared -> MANUAL idle", "auto")
-          elif cmd == "set_mode" and not estop_active:
+          elif cmd == "set_mode" and cmd_val in ("MANUAL", "AUTO", "BALLOON") and not estop_active:
+              # A takeover is released only by an explicit mode selection at neutral.
+              if not from_rc and rc_manual_latched and rc_ok and (rc_steer_norm(last_raw_st) != 0 or rc_throttle_norm(last_raw_th) != 0):
+                  continue
+              if not from_rc:
+                  rc_manual_latched = False
+                  rc_auto_active = False
+                  rc_entry_steer_held = False
               if cmd_val == "AUTO" and current_mode != "AUTO":
-                  if not gps_ok or not (2 <= fix_status <= 5):
+                  entry_snap = NAV_GPS.get_snapshot() if GPS_GUARD is not None else None
+                  entry_ready = (entry_snap.get("valid") and entry_snap.get("fix_quality") in (1, 2, 4, 5)
+                                 if entry_snap is not None else gps_ok and 2 <= fix_status <= 5)
+                  if not entry_ready:
                       safe_stop()
                       add_event_log("FAILSAFE", f"GPS not ready (fix={fix_status}) -> AUTO entry rejected", "warn")
                   else:
                       current_mode = "AUTO"
-                      mode_enter_t = now
-                      override_armed = False
+                      rc_manual_latched = False
+                      rc_auto_active = from_rc
+                      rc_entry_steer_held = from_rc
+                      web_manual_until_t = web_manual_stop_hold_t = 0.0
+                      web_manual_active = False
                       reset_pid_state()
                       heading_none_start_t = now
                       stall_check_start_t = 0.0
@@ -2334,25 +2284,53 @@ def main_loop():
                       auto_start_time = now
                       # 진입 직후 오버라이드 오작동 방지
                       filt_st, filt_th = float(ST_NEU), float(TH_NEU)
-                      last_raw_st, last_raw_th = ST_NEU, TH_NEU
                       ST_V, TH_V = ST_NEU, TH_NEU
-                      raw_st, raw_th = None, None
                       # 저속 진입 시 COG만 초기화
                       if spd_mps < 0.5:
                           _last_cog = None
                           last_lat, last_lon = c_lat, c_lon
-                      current_point = find_forward_waypoint(c_lat, c_lon, target_path, current_point)
-                      if path_auto_switch and current_point < total_waypoints:
-                          init_cand, _ = pick_path(c_lat, c_lon, current_point, target_path)
-                          if init_cand != target_path:
-                              target_path = init_cand
-                              current_point = find_forward_waypoint(c_lat, c_lon, target_path, current_point)
+                      # Shared navigator entry: nearest lane (or the locked lane) and a waypoint ahead
+                      NAV_GPS.reset_heading_anchor()
+                      heading_reused = False
+                      if HEADING_SELECTOR is not None:
+                          entry_snap = dict(
+                              NAV_GPS.get_snapshot(), heading_deg=None, position_heading_deg=None,
+                              position_heading_age_sec=None, position_heading_time_mono=None,
+                              position_speed_mps=None,
+                          )
+                          heading_reused = HEADING_SELECTOR.enter_auto(entry_snap, now_mono)
+                      NAVIGATOR.allow_lane_shift = path_auto_switch
+                      if GPS_GUARD is not None:
+                          # The guard qualifies observations before drawing a route or detecting finish.
+                          nav_info = GPS_GUARD.enter_auto(entry_snap, now_mono)
+                          heading_info = GPS_GUARD.heading_info
+                          nav_lane, nav_wp, nav_dist = "line", nav_info["wp_number"], 0.0
+                      else:
+                          nav_lane, nav_wp, nav_dist = NAVIGATOR.enter_auto_mode(
+                              c_lat, c_lon, now_mono=now_mono,
+                              lane=None if path_auto_switch else LANE_KEYS[target_path],
+                          )
+                          nav_info = None
+                      if not line_guidance:
+                          target_path = LANE_NAMES[nav_lane]
+                      current_point = min(total_waypoints - 1, max(0, nav_wp - 1)) if line_guidance else NAVIGATOR.target_idx
+                      last_nav_t = 0.0
                       with state_lock:
                           shared_state["mode"] = current_mode
                           shared_state["targetPath"] = target_path
-                      mode_tag = "AUTO-LANE" if path_auto_switch else f"{target_path}-LOCKED"
-                      add_event_log("MODE", f"Web command -> AUTO (WP {current_point + 1}, {target_path} [{mode_tag}])", "auto")
+                      mode_tag = guidance_label or ("AUTO-LANE" if path_auto_switch else f"{target_path}-LOCKED")
+                      hdg_tag = " | heading: reusing recent GPS course" if heading_reused else ""
+                      add_event_log(
+                          "MODE",
+                          f"{'RC gesture' if from_rc else 'Web command'} -> AUTO (WP {nav_wp}, {target_path} [{mode_tag}], {nav_dist:.2f} m from lane, "
+                          f"{AUTO_STRATEGY.name}){hdg_tag}",
+                          "auto",
+                      )
+                      if line_guidance:
+                          add_event_log("PATH", NAVIGATOR.describe_line(), "auto")
               elif cmd_val == "MANUAL" and current_mode != "MANUAL":
+                  if GPS_GUARD is not None:
+                      GPS_GUARD.reset()
                   current_mode = "MANUAL"
                   balloon_substate = "IDLE"
                   with state_lock:
@@ -2367,18 +2345,16 @@ def main_loop():
                       safe_stop()
                       add_event_log("FAILSAFE", "Pi camera not ready -> BALLOON entry rejected", "warn")
                   else:
+                      if GPS_GUARD is not None:
+                          GPS_GUARD.reset()
                       current_mode = "BALLOON"
-                      mode_enter_t = now
-                      override_armed = False
                       stall_check_start_t = 0.0
                       balloon_arrive_count = 0
                       balloon_mode_start_t = now
                       balloon_last_seen_t = now if b_det_now else 0.0
                       balloon_substate = "TRACKING" if b_det_now else "SEARCHING"
                       filt_st, filt_th = float(ST_NEU), float(TH_NEU)
-                      last_raw_st, last_raw_th = ST_NEU, TH_NEU
                       ST_V, TH_V = ST_NEU, TH_NEU
-                      raw_st, raw_th = None, None
                       with state_lock:
                           shared_state["mode"] = current_mode
                       add_event_log("BALLOON", "Web command -> VISION (optical target tracking)", "auto")
@@ -2389,6 +2365,9 @@ def main_loop():
               reset_pid_state()
               add_event_log("WP_RESET", "Waypoint reset to WP 1", "auto")
           elif cmd == "set_path":
+              if line_guidance:
+                  add_event_log("PATH", f"{guidance_label} uses the course drawn at AUTO entry; lane selection does not apply", "auto")
+                  continue
               if cmd_val == "AUTO":
                   path_auto_switch = True
                   path_switch_candidate = None
@@ -2429,6 +2408,18 @@ def main_loop():
                       shared_state["targetPath"] = target_path
                       shared_state["pathAutoSwitch"] = False
                   add_event_log("PATH", f"Follow lane '{target_path}' locked manually (AUTO disturbance switch off)", "auto")
+              # Apply to the shared navigator (re-enter on that lane when already in AUTO)
+              NAVIGATOR.allow_lane_shift = path_auto_switch
+              if current_mode == "AUTO" and c_lat is not None and c_lon is not None:
+                  nav_lane, _, _ = NAVIGATOR.enter_auto_mode(
+                      c_lat, c_lon, now_mono=now_mono,
+                      lane=None if path_auto_switch else LANE_KEYS[target_path],
+                  )
+                  target_path = LANE_NAMES[nav_lane]
+                  current_point = NAVIGATOR.target_idx
+                  last_nav_t = 0.0
+                  with state_lock:
+                      shared_state["targetPath"] = target_path
           elif cmd == "set_ctrl_mode" and cmd_val in ("P", "PID"):
               STEER_CTRL_MODE = cmd_val
               reset_pid_state()
@@ -2593,7 +2584,7 @@ def main_loop():
               with state_lock:
                   shared_state["rcIgnore"] = rc_ignore_mode
               if rc_ignore_mode:
-                  add_event_log("REMOTE", "Web-only control ON -> ignore RC interference/override", "warn")
+                  add_event_log("REMOTE", "Web-only control ON -> idle RC suppressed; RC takeover remains active", "warn")
               else:
                   add_event_log("REMOTE", "RC link restored -> RC manual and emergency override active", "auto")
           elif cmd == "set_link_watchdog":
@@ -2637,7 +2628,7 @@ def main_loop():
                   )
               except (ValueError, TypeError) as e:
                   add_event_log("REMOTE", f"Remote settings format error ignored ({e})", "warn")
-          elif cmd == "web_manual_drive" and isinstance(cmd_val, dict) and not estop_active:
+          elif cmd == "web_manual_drive" and isinstance(cmd_val, dict) and not estop_active and not rc_manual_latched:
               try:
                   current_mode = "MANUAL"
                   balloon_substate = "IDLE"
@@ -2649,12 +2640,9 @@ def main_loop():
                   web_manual_until_t = now + dur_s
                   web_manual_stop_hold_t = 0.0
                   web_manual_active = True
-                  if ready:
-                      set_pwm(web_manual_steer, web_manual_drive, force=True)
-                      last_pwm_t = now
               except Exception:
                   pass
-          elif cmd == "web_manual_stop":
+          elif cmd == "web_manual_stop" and not rc_manual_latched:
               web_manual_until_t = 0.0
               web_manual_active = False
               web_manual_steer = CENTER
@@ -2703,8 +2691,11 @@ def main_loop():
         shared_state["linkWatchdog"] = gcs_watchdog_enabled
         shared_state["linkTimeoutSec"] = GCS_LINK_TIMEOUT_SEC
         shared_state["rcIgnore"] = rc_ignore_mode
+        shared_state["rcManualActive"] = rc_manual_latched
 
         if estop_active:
+            if GPS_GUARD is not None:
+                GPS_GUARD.reset()
             safe_stop()
             with state_lock:
                 shared_state["mode"] = "MANUAL"
@@ -2714,37 +2705,63 @@ def main_loop():
             time.sleep(max(0.001, 0.02 - elapsed))
             continue
 
-        # RC 비상 오버라이드 감시 (웹 단독 control 시 RC 노이즈 무시)
-        if current_mode in ("AUTO", "BALLOON") and rc_effective_ok and ST_V is not None and TH_V is not None:
-            in_normal_zone = (
-                (ST_OVERRIDE_LEFT <= ST_V <= ST_OVERRIDE_RIGHT)
-                and (TH_V <= TH_REV_OVERRIDE)
-                and (raw_st is None or (ST_OVERRIDE_LEFT <= raw_st <= ST_OVERRIDE_RIGHT))
-                and (raw_th is None or (raw_th <= TH_REV_OVERRIDE))
-            )
-            if in_normal_zone:
-                override_armed = True
+        # RC-started AUTO has its own link requirement, independent of the browser.
+        if rc_auto_active and not rc_ok:
+            if GPS_GUARD is not None:
+                GPS_GUARD.reset()
+            safe_stop()
+            current_mode = "MANUAL"
+            rc_manual_latched = True
+            rc_auto_active = False
+            rc_entry_steer_held = False
+            add_event_log("FAILSAFE", "RC lost during RC AUTO -> stop and MANUAL", "warn")
+        if rc_entry_steer_held and rc_ok and rc_steer_norm(last_raw_st) < HW["auto_right_ratio"]:
+            rc_entry_steer_held = False
+        suppress_entry_steering = (
+            rc_entry_steer_held and rc_ok
+            and rc_steer_norm(last_raw_st) >= HW["auto_right_ratio"]
+            and rc_throttle_norm(last_raw_th) > -RC_OVERRIDE_REVERSE_RATIO
+        )
 
-            if override_armed and (now - mode_enter_t) >= 0.50:
-                filt_steer_full = (ST_V < ST_OVERRIDE_LEFT) or (ST_V > ST_OVERRIDE_RIGHT)
-                filt_rev_full = (TH_V > TH_REV_OVERRIDE)
-                if filt_steer_full or filt_rev_full:
-                    prev_mode = current_mode
-                    current_mode = "MANUAL"
-                    balloon_substate = "IDLE"
-                    override_armed = False
-                    last_pwm_t = 0.0
-                    if prev_mode == "BALLOON":
-                        add_event_log("OVERRIDE", f"RC emergency input detected (ST:{ST_V}, TH:{TH_V}) -> abort BALLOON, switch to MANUAL", "warn")
-                    else:
-                        add_event_log("OVERRIDE", f"RC emergency input detected (ST:{ST_V}, TH:{TH_V}) -> switch to MANUAL immediately", "warn")
+        # Raw RC always remains available, even in web-only mode and link hold.
+        if rc_ok and not suppress_entry_steering and rc_takeover_requested(current_mode, last_raw_st, last_raw_th):
+            if GPS_GUARD is not None and current_mode == "AUTO":
+                GPS_GUARD.reset()
+            if not rc_manual_latched:
+                add_event_log("OVERRIDE", "RC takeover -> MANUAL (dashboard control released)", "warn")
+            rc_manual_latched = True
+            shared_state["rcManualActive"] = True
+            shared_state["lampRc"] = "ok"
+            current_mode = "MANUAL"
+            balloon_substate = "IDLE"
+            web_manual_until_t = web_manual_stop_hold_t = 0.0
+            web_manual_active = False
+            reset_pid_state()
 
         # 원격 통신 끊김 시 연결 회복 전까지 제자리 정지 유지
-        if gcs_link_paused:
+        if rc_manual_latched:
+            # Keep ownership through neutral and RC loss; never resume web/AUTO implicitly.
+            if rc_ok:
+                steer, drive = rc_to_logical(last_raw_st, last_raw_th)
+                if ready and (now - last_pwm_t) >= PWM_PERIOD:
+                    set_pwm(steer, drive)
+                    last_pwm_t = now
+            else:
+                safe_stop()
+        elif gcs_link_paused and not rc_auto_active:
             safe_stop()
             stall_check_start_t = 0.0
             heading_none_start_t = now
             bad_fix_start_t = 0.0
+            if current_mode == "AUTO":
+                # Holding still breaks forward motion: reacquire heading and power ramp on resume
+                nav_info = None
+                last_nav_t = 0.0
+                if HEADING_SELECTOR is not None:
+                    HEADING_SELECTOR.suspend()
+                if GPS_GUARD is not None:
+                    GPS_GUARD.suspend()
+                AUTO_STRATEGY.suspend()
             if now - last_dbg > 1.0:
                 safe_print(f"LINK_HOLD [waiting for GCS link -> holding stop] mode={current_mode} [RTK:{fix_status}]")
                 last_dbg = now
@@ -2771,10 +2788,7 @@ def main_loop():
             elif now < web_manual_stop_hold_t:
                 safe_stop()
             elif rc_effective_ok and ST_V is not None:
-                steer = map_pulse_to_pwm(ST_V, ST_MIN, ST_MAX, max_LEFT, max_RIGHT, ST_NEU, RC_DEADZONE, CENTER)
-                drive = map_pulse_to_pwm(TH_V, TH_MIN, TH_MAX, max_GO, max_BACK, TH_NEU, RC_DEADZONE, STOP)
-                if TH_NEU_LOW <= TH_V <= TH_NEU_HIGH:
-                    drive = STOP
+                steer, drive = rc_to_logical(ST_V, TH_V)
                 if ready and (now - last_pwm_t) >= PWM_PERIOD:
                     set_pwm(steer, drive)
                     last_pwm_t = now
@@ -2785,13 +2799,13 @@ def main_loop():
                     val_lat = f"{c_lat:.7f}" if c_lat is not None else "0.0"
                     val_lon = f"{c_lon:.7f}" if c_lon is not None else "0.0"
                     try:
-                        log_file.write(f"{current_time},{current_mode},{target_path},{current_point + 1},{t_dist:.1f},{angle_err:.1f},{val_lat},{val_lon},{fix_status},{spd_mps:.2f},{steer},{drive}\n")
+                        log_file.write(f"{current_time},{current_mode},{target_path},{current_point + 1},{t_dist:.1f},{angle_err:.1f},{val_lat},{val_lon},{fix_status},{spd_mps:.2f},{steer},{drive}{LOG_NAV_BLANK}\n")
                     except Exception:
                         pass
             else:
                 safe_stop()
                 if now - last_dbg > 1.5:
-                    safe_print(f"MANUAL [RC signal missing!] ser={getattr(ser, 'port', None)} pca={'OK' if pca else 'FAIL'} [RTK:{fix_status}]")
+                    safe_print(f"MANUAL [RC signal missing!] rc={getattr(rc_reader, 'port', None)} pca={'OK' if pca else 'FAIL'} [RTK:{fix_status}]")
                     last_dbg = now
 
         # BALLOON(비전) 모드 control
@@ -2861,10 +2875,10 @@ def main_loop():
                         steer = balloon_steer(angle_err, 0.0)
                         drive = max_GO
                     elif since_seen <= BALLOON_MEMORY_SEC:
-                        # 일시 소실 시 직전 방향 유지
+                        # Brief loss (waves): keep going straight, rudder centred, until BALLOON_MEMORY_SEC
                         balloon_substate = "TRACKING"
-                        angle_err = balloon_last_angle_err * 0.8
-                        steer = balloon_steer(angle_err, 0.0)
+                        angle_err = 0.0
+                        steer = CENTER
                         drive = lerp(STOP, max_GO, 0.65)
                     else:
                         # 미검출 시 저속 선회 탐색
@@ -2879,7 +2893,7 @@ def main_loop():
                         else:
                             scan_dir = 1 if balloon_last_angle_err >= 0 else -1
                             angle_err = scan_dir * 10.0
-                            steer = clamp(CENTER - int(STEER_SIGN * scan_dir * 220), max_LEFT, max_RIGHT)
+                            steer = clamp(CENTER - int(STEER_SIGN * scan_dir * 5000), max_LEFT, max_RIGHT)
                             drive = lerp(STOP, max_GO, 0.30)
 
                 if current_mode == "BALLOON":
@@ -2921,25 +2935,22 @@ def main_loop():
                         try:
                             log_file.write(
                                 f"{current_time},{current_mode},Balloon_{balloon_substate},{current_point + 1},"
-                                f"{t_dist:.1f},{angle_err:.1f},{val_lat},{val_lon},{fix_status},{spd_mps:.2f},{steer},{drive}\n"
+                                f"{t_dist:.1f},{angle_err:.1f},{val_lat},{val_lon},{fix_status},{spd_mps:.2f},{steer},{drive}"
+                                f"{LOG_NAV_BLANK}\n"
                             )
                         except Exception:
                             pass
 
-        # AUTO 모드 경로 tracking
+        # AUTO mode: shared multipath navigator + selected strategy (same control as multipath_boat.py)
         else:
-            balloon_substate = "IDLE" 
-            if current_point >= total_waypoints:
-                safe_stop()
-                current_mode = "MANUAL"
-                add_event_log("FINISH", f"Final WP {total_waypoints} reached -> MANUAL idle", "auto")
-            elif not gps_ok:
+            balloon_substate = "IDLE"
+            if GPS_GUARD is None and not gps_ok:
                 safe_stop()
                 current_mode = "MANUAL"
                 add_event_log("FAILSAFE", "GPS timeout -> immediate stop and MANUAL", "warn")
             else:
                 fix_abort = False
-                if not (2 <= fix_status <= 5):
+                if GPS_GUARD is None and not (2 <= fix_status <= 5):
                     if bad_fix_start_t == 0.0:
                         bad_fix_start_t = now
                     elif (now - bad_fix_start_t) >= BAD_FIX_TIMEOUT:
@@ -2951,85 +2962,105 @@ def main_loop():
                 else:
                     bad_fix_start_t = 0.0
 
-                if not fix_abort:
+                # Update at the PWM rate (20 Hz): the strategies' steering slew limit assumes 20 Hz
+                if not fix_abort and (now - last_nav_t) >= PWM_PERIOD:
+                    last_nav_t = now
+                    nav_snap = NAV_GPS.get_snapshot()
                     prev_wp = current_point
-                    current_point = advance_index(c_lat, c_lon, target_path, current_point)
-
-                    if current_point != prev_wp and current_point < total_waypoints:
+                    if GPS_GUARD is not None:
+                        nav_info = GPS_GUARD.update(nav_snap, now_mono)
+                        heading_info = GPS_GUARD.heading_info
+                        shared_state["gpsGuardState"] = nav_info["gps_guard_state"]
+                        shared_state["gpsGuardReason"] = nav_info["gps_guard_reason"]
+                    elif HEADING_SELECTOR is not None:
+                        heading_info = HEADING_SELECTOR.select(nav_snap, now_mono)
+                    else:
+                        heading_info = {
+                            "heading_deg": nav_snap["heading_deg"], "source": "legacy_blend", "age_sec": None,
+                            "confident": nav_snap["heading_deg"] is not None, "state": "legacy",
+                        }
+                    if GPS_GUARD is None:
+                        nav_info = NAVIGATOR.update(
+                            c_lat, c_lon, heading_info["heading_deg"], now_mono=now_mono,
+                            heading_confident=heading_info["confident"], motion=heading_info,
+                        )
+                    if not line_guidance:
+                        target_path = LANE_NAMES[nav_info["active_lane"]]
+                    current_point = min(total_waypoints - 1, max(0, nav_info["wp_number"] - 1)) if line_guidance else NAVIGATOR.target_idx
+                    if nav_info["shifted_to"] is not None:
+                        add_event_log(
+                            "PATH",
+                            f"Disturbance AUTO lane switch -> {target_path} (CTE {nav_info['cte_right_m']:+.2f} m)",
+                            "auto",
+                        )
+                    elif current_point != prev_wp and not nav_info["finished"]:
                         add_event_log("NAV", f"WP {prev_wp + 1} passed -> WP {current_point + 1} tracking", "auto")
 
-                    if current_point >= total_waypoints:
+                    # Values shown on the web page
+                    nav_lat, nav_lon = c_lat, c_lon
+                    if GPS_GUARD is not None:
+                        nav_lat = nav_info.get("gps_guard_accepted_latitude")
+                        nav_lon = nav_info.get("gps_guard_accepted_longitude")
+                    bx, by = (latlon_to_enu(nav_lat, nav_lon, NAVIGATOR.ref_lat, NAVIGATOR.ref_lon)
+                              if nav_lat is not None and nav_lon is not None else (None, None))
+                    if line_guidance and (bx is None or nav_info.get("lookahead_target_e_m") is None):
+                        t_dist = 0.0
+                    elif line_guidance:
+                        t_dist = 0.0 if nav_info["finished"] else math.hypot(
+                            nav_info["lookahead_target_e_m"] - bx, nav_info["lookahead_target_n_m"] - by)
+                    else:
+                        nav_pts = NAVIGATOR.paths[nav_info["active_lane"]]
+                        _, t_lat, t_lon = nav_pts[min(current_point, len(nav_pts) - 1)]
+                        t_dist = haversine(c_lat, c_lon, t_lat, t_lon)
+                    if nav_info["target_bearing_deg"] is not None:
+                        target_angle = nav_info["target_bearing_deg"]
+                    if heading_info["heading_deg"] is not None and nav_info["target_bearing_deg"] is not None:
+                        heading = heading_info["heading_deg"]
+                        angle_err = wrap180(target_angle - heading)
+                    else:
+                        angle_err = 0.0
+                    if bx is not None:
+                        for lane_key, lane_name in LANE_NAMES.items():
+                            _, lane_d, _, _ = NAVIGATOR._closest_segment_metrics(lane_key, bx, by)
+                            shared_state["dist" + lane_name] = round(lane_d, 2)
+
+                    if nav_info["finished"]:
+                        if GPS_GUARD is not None:
+                            GPS_GUARD.reset()
                         safe_stop()
                         current_mode = "MANUAL"
-                        add_event_log("FINISH", f"Final WP {total_waypoints} finished -> MANUAL", "auto")
+                        add_event_log(
+                            "FINISH",
+                            f"Finish crossed (WP {nav_info['wp_number']}, margin {NAVIGATOR.finish_margin_m:g} m) -> stop and MANUAL",
+                            "auto",
+                        )
                     else:
-                        cand_path, dists = pick_path(c_lat, c_lon, current_point, target_path)
-                        if path_auto_switch and cand_path != target_path:
-                            if gps:
-                                if path_switch_candidate == cand_path:
-                                    path_switch_count += 1
-                                else:
-                                    path_switch_candidate = cand_path
-                                    path_switch_count = 1
-                                if path_switch_count >= 2:
-                                    add_event_log("PATH", f"Disturbance AUTO lane switch: {target_path} -> {cand_path}", "auto")
-                                    target_path = cand_path
-                                    path_switch_count = 0
-                                    current_point = min(advance_index(c_lat, c_lon, target_path, current_point), total_waypoints - 1)
+                        steer = nav_steer_to_pwm(nav_info["steer_norm"])
+                        if nav_info.get("throttle_norm") is not None:
+                            drive = nav_absolute_throttle_to_pwm(nav_info["throttle_norm"], GPS_GUARD is not None)
                         else:
-                            path_switch_candidate = None
-                            path_switch_count = 0
+                            drive = nav_throttle_to_pwm(nav_info["throttle_blend"])
+                        auto_abort = False
 
-                        shared_state["distCenter"] = round(dists.get("Center", 0.0), 2)
-                        shared_state["distLeft"] = round(dists.get("Left", 0.0), 2)
-                        shared_state["distRight"] = round(dists.get("Right", 0.0), 2)
-
-                        t_lat, t_lon = wp_coord(PATHS[target_path], current_point)
-                        t_dist = haversine(c_lat, c_lon, t_lat, t_lon)
-                        look_lat, look_lon = get_lookahead_target(c_lat, c_lon, PATHS[target_path], current_point)
-                        target_angle = gps_bearing(c_lat, c_lon, look_lat, look_lon)
-
-                        heading_abort = False
-                        if heading is None:
+                        # No heading yet: cruise straight ahead to acquire one; stop if it takes too long
+                        if GPS_GUARD is None and heading_info["heading_deg"] is None:
                             if heading_none_start_t == 0.0:
                                 heading_none_start_t = now
-                            if last_lat is not None and last_lon is not None and haversine(last_lat, last_lon, c_lat, c_lon) >= HEADING_INIT_MOVE_M:
-                                est_heading = gps_bearing(last_lat, last_lon, c_lat, c_lon)
-                                last_lat, last_lon = c_lat, c_lon
-                                heading = est_heading
-                                heading_none_start_t = 0.0
-                                angle_err = wrap180(target_angle - heading)
-                                steer = auto_steer(
-                                    angle_err,
-                                    now_t=now,
-                                    spd_mps=spd_mps,
-                                    gps_updated=(gps is not None),
-                                    wp_changed=(current_point != prev_wp),
-                                )
-                                drive = auto_drive(angle_err)
-                            elif (now - heading_none_start_t) > min(HEADING_INIT_MAX_SEC, 2.5):
+                            elif (now - heading_none_start_t) > HEADING_INIT_MAX_SEC:
                                 safe_stop()
                                 current_mode = "MANUAL"
-                                heading_abort = True
-                                add_event_log("FAILSAFE", "Initial heading not acquired (>2.5s) -> safe stop and MANUAL", "warn")
-                            else:
-                                angle_err = 0.0
-                                steer, drive = CENTER, lerp(STOP, max_GO, 0.20)
+                                auto_abort = True
+                                add_event_log(
+                                    "FAILSAFE",
+                                    f"Heading not acquired (>{HEADING_INIT_MAX_SEC:g}s, {heading_info['state']}) -> safe stop and MANUAL",
+                                    "warn",
+                                )
                         else:
                             heading_none_start_t = 0.0
-                            angle_err = wrap180(target_angle - heading)
-                            steer = auto_steer(
-                                angle_err,
-                                now_t=now,
-                                spd_mps=spd_mps,
-                                gps_updated=(gps is not None),
-                                wp_changed=(current_point != prev_wp),
-                            )
-                            drive = auto_drive(angle_err)
 
-                        if not heading_abort:
-                            stall_abort = False
-                            if drive > STOP + 100:
+                        # Stall watchdog while driving forward
+                        if not auto_abort:
+                            if GPS_GUARD is None and drive > STOP + 100:
                                 if stall_check_start_t == 0.0 or stall_ref_lat is None:
                                     stall_check_start_t = now
                                     stall_ref_lat, stall_ref_lon = c_lat, c_lon
@@ -3043,28 +3074,59 @@ def main_loop():
                                         safe_stop()
                                         current_mode = "MANUAL"
                                         stall_check_start_t = 0.0
-                                        stall_abort = True
+                                        auto_abort = True
                                         shared_state["lampStall"] = "err"
                                         add_event_log("STALL", "Boat stalled ≥5s -> MANUAL", "warn")
                             else:
                                 stall_check_start_t = 0.0
 
-                            if not stall_abort:
-                                if ready and (now - last_pwm_t) >= PWM_PERIOD:
-                                    set_pwm(steer, drive)
-                                    last_pwm_t = now
+                        if not auto_abort:
+                            if ready:
+                                set_pwm(steer, drive)
+                                last_pwm_t = now
 
-                                if now - last_dbg > 0.5:
-                                    fix_str = "FIX" if fix_status == 4 else "FLT" if fix_status == 5 else "DGN" if fix_status == 2 else str(fix_status)
-                                    safe_print(f"AUTO P:{target_path} WP:{current_point + 1}/{total_waypoints} D:{t_dist:.1f}m ERR:{angle_err:.1f}deg [{fix_str}]")
-                                    last_dbg = now
-                                    current_time = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-                                    val_lat = f"{c_lat:.7f}" if c_lat is not None else "0.0"
-                                    val_lon = f"{c_lon:.7f}" if c_lon is not None else "0.0"
-                                    try:
-                                        log_file.write(f"{current_time},{current_mode},{target_path},{current_point + 1},{t_dist:.1f},{angle_err:.1f},{val_lat},{val_lon},{fix_status},{spd_mps:.2f},{steer},{drive}\n")
-                                    except Exception:
-                                        pass
+                            if now - last_dbg > 0.5:
+                                fix_str = "FIX" if fix_status == 4 else "FLT" if fix_status == 5 else "DGN" if fix_status == 2 else str(fix_status)
+                                guard = " [WALL]" if nav_info["boundary_guard"] else ""
+                                cte_text = (f"{nav_info['cte_right_m']:+.2f}"
+                                            if nav_info["cte_right_m"] is not None else "unknown")
+                                safe_print(
+                                    f"AUTO {AUTO_STRATEGY.name} P:{guidance_label or target_path}{guard} WP:{current_point + 1}/{total_waypoints} "
+                                    f"CTE:{cte_text}m ERR:{angle_err:+.1f}deg "
+                                    f"HDG:{heading_info['source']} BOOST:{nav_info['throttle_blend']:.2f} "
+                                    f"pwm={steer},{drive} [{fix_str}]"
+                                )
+                                last_dbg = now
+                                current_time = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                                cte_csv = f"{nav_info['cte_right_m']:.3f}" if nav_info["cte_right_m"] is not None else ""
+                                try:
+                                    log_file.write(
+                                        f"{current_time},{current_mode},{guidance_label or target_path},{current_point + 1},{t_dist:.1f},"
+                                        f"{angle_err:.1f},{c_lat:.7f},{c_lon:.7f},{fix_status},{spd_mps:.2f},{steer},{drive},"
+                                        f"{cte_csv},{AUTO_STRATEGY.name},{nav_info['throttle_blend']:.3f},"
+                                        f"{heading_info['source']},{int(nav_info['boundary_guard'])}\n"
+                                    )
+                                except Exception:
+                                    pass
+
+        # Leaving AUTO (finish, failsafe, override, E-stop, mode change): reset heading/strategy state
+        if was_auto and current_mode != "AUTO":
+            rc_auto_active = False
+            rc_entry_steer_held = False
+            nav_info = None
+            if HEADING_SELECTOR is not None:
+                HEADING_SELECTOR.reset()
+            if GPS_GUARD is not None:
+                GPS_GUARD.reset()
+            AUTO_STRATEGY.suspend()
+        shared_state["rcAutoActive"] = rc_auto_active and current_mode == "AUTO"
+        shared_state["rcManualActive"] = rc_manual_latched
+        was_auto = (current_mode == "AUTO")
+        # Outside AUTO, watch the actual forward command so the next AUTO entry can reuse a fresh GPS course
+        if (HEADING_SELECTOR is not None or GPS_GUARD is not None) and current_mode != "AUTO":
+            thr_sign = 0 if _last_drive is None else (1 if _last_drive > STOP else (-1 if _last_drive < STOP else 0))
+            observer = GPS_GUARD if GPS_GUARD is not None else HEADING_SELECTOR
+            observer.observe_manual(NAV_GPS.get_snapshot(), thr_sign, now_mono)
 
         # 5200 고출력 연속 주행 시간 감시 (10분 초과 시 4800 자동 하향)
         dt_hp = clamp(now - prev_loop_t, 0.0, 0.2)
@@ -3153,18 +3215,14 @@ if __name__ == "__main__":
             log_file.close()
         except Exception:
             pass
+        for stop_fn in (NTRIP.stop, NAV_GPS.stop, (rc_reader.stop if rc_reader is not None else None)):
+            if stop_fn is not None:
+                try:
+                    stop_fn()
+                except Exception:
+                    pass
         if pca is not None:
             try:
-                pca.deinit()
-            except Exception:
-                pass
-        if ser is not None:
-            try:
-                ser.close()
-            except Exception:
-                pass
-        if gps_ser is not None:
-            try:
-                gps_ser.close()
+                pca.close()
             except Exception:
                 pass

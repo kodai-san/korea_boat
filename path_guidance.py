@@ -80,12 +80,17 @@ class StraightLineGuidance:
     Coordinates are local ENU meters. The course frame measures ``s`` along the
     course from its start point and ``d`` to the right of the course centerline.
     The banks are straight and parallel to the centerline, so the safe water is
-    the band ``|d| <= band_half_width_m``. The line keeps the entry offset unless
-    that is beyond ``line_max_offset_m``, in which case it is drawn that far from
-    the centerline and the boat merges onto it while moving forward.
+    the band ``-bank_left_m <= d <= bank_right_m``. The line is drawn at the entry
+    offset (or where the first turn ends) but never beyond ``-line_left_m`` or
+    ``line_right_m``; outside that the boat merges onto it while moving forward.
     """
 
-    def __init__(self, start_xy, end_xy, band_half_width_m, line_max_offset_m):
+    def __init__(self, start_xy, end_xy, bank_left_m, bank_right_m, line_left_m=None, line_right_m=None):
+        # Keep the original (half-width, line-offset) constructor usable by
+        # strategy 06's guard fixtures and external callers.
+        if line_left_m is None and line_right_m is None:
+            line_left_m = line_right_m = bank_right_m
+            bank_right_m = bank_left_m
         sx = _finite_number(start_xy[0], "start x")
         sy = _finite_number(start_xy[1], "start y")
         ex = _finite_number(end_xy[0], "end x")
@@ -93,10 +98,14 @@ class StraightLineGuidance:
         self.length = math.hypot(ex - sx, ey - sy)
         if self.length <= 0:
             raise ValueError("course start and end must differ")
-        self.band_half_width_m = _finite_number(band_half_width_m, "band_half_width_m")
-        self.line_max_offset_m = _finite_number(line_max_offset_m, "line_max_offset_m")
-        if not 0 <= self.line_max_offset_m < self.band_half_width_m:
-            raise ValueError("line_max_offset_m must be nonnegative and inside the band")
+        self.bank_left_m = _finite_number(bank_left_m, "bank_left_m")
+        self.bank_right_m = _finite_number(bank_right_m, "bank_right_m")
+        self.line_left_m = _finite_number(line_left_m, "line_left_m")
+        self.line_right_m = _finite_number(line_right_m, "line_right_m")
+        for line, bank, side in ((self.line_left_m, self.bank_left_m, "left"),
+                                 (self.line_right_m, self.bank_right_m, "right")):
+            if not 0 <= line < bank:
+                raise ValueError(f"line_{side}_m must be nonnegative and inside bank_{side}_m")
         self.start_x, self.start_y = sx, sy
         self.ux, self.uy = (ex - sx) / self.length, (ey - sy) / self.length
         self.bearing_deg = (math.degrees(math.atan2(self.ux, self.uy)) + 360.0) % 360.0
@@ -113,12 +122,20 @@ class StraightLineGuidance:
         return (self.start_x + s * self.ux + d * self.uy,
                 self.start_y + s * self.uy - d * self.ux)
 
+    def set_line(self, d):
+        """Put the line at offset ``d``, clamped to the line limits; return the offset used."""
+        self.line_offset_m = max(-self.line_left_m, min(self.line_right_m, d))
+        return self.line_offset_m
+
     def draw_line(self, x, y):
         """Start a new line at the boat, clamped toward the centerline; return its offset."""
         _, d = self.frame(x, y)
         self.entry_offset_m = d
-        self.line_offset_m = max(-self.line_max_offset_m, min(self.line_max_offset_m, d))
-        return self.line_offset_m
+        return self.set_line(d)
+
+    def bank_limit(self, d):
+        """The bank limit on the side of ``d`` (distance from the centerline, positive)."""
+        return self.bank_right_m if d >= 0 else self.bank_left_m
 
     def desired_course(self, d, lookahead_m, max_intercept_deg):
         """Line-of-sight course toward the line, intercepting at no more than ``max_intercept_deg``."""
@@ -131,21 +148,103 @@ class StraightLineGuidance:
         return speed_mps * math.sin(math.radians(course_deg - self.bearing_deg))
 
 
-def square_corners(s_start, half_widths, leg_length_m):
-    """Corners ``(s, d, label)`` of one rectangle per half width, in the course frame of StraightLineGuidance.
+def turn_arc(d0, phi0_deg, radius_m, direction, lead_m=0.0, step_deg=2.0):
+    """Sideways track of a full-lock turn until the boat points down the course again.
 
-    Each rectangle runs forward along the left line (-h), across to the right line (+h), back along it and
-    across to the start, so every corner is a right turn (the hull's tighter direction). Labels name the leg
-    that ends at the corner.
+    ``phi0_deg`` is the heading relative to the course (+ = pointing right, toward +d). ``direction``
+    is +1 for a right turn (heading increases) and -1 for a left turn. The boat first travels
+    ``lead_m`` straight (steering and GPS delay), then follows a circle of ``radius_m``. On a circle,
+    d changes by R * (cos(phi0) - cos(phi)) per unit of turn, signed by the turn direction.
+    Returns a dict: direction, sweep_deg, arc_m, min_d, max_d, end_d, and advance_m (distance gained
+    along the race direction; negative when the turn finishes behind where it started).
+    """
+    phi0 = (phi0_deg + 180.0) % 360.0 - 180.0
+    d_start = d0 + lead_m * math.sin(math.radians(phi0))
+    sweep = (-phi0) % 360.0 if direction > 0 else phi0 % 360.0
+    steps = max(1, int(math.ceil(sweep / step_deg)))
+    cos0 = math.cos(math.radians(phi0))
+    track = [d_start + direction * radius_m * (cos0 - math.cos(math.radians(phi0 + direction * sweep * k / steps)))
+             for k in range(steps + 1)]
+    end_d = track[-1]
+    # Include exact lateral extrema; discrete samples alone can miss a bank
+    # crossing at the peak of the circle by a fraction of the sampling step.
+    phi_final = phi0 + direction * sweep
+    for k in range(math.ceil(min(phi0, phi_final) / 180.0), math.floor(max(phi0, phi_final) / 180.0) + 1):
+        track.append(d_start + direction * radius_m * (cos0 - math.cos(math.radians(k * 180.0))))
+    track.append(d0)
+    phi_end = math.radians(phi0 + direction * sweep)
+    advance = lead_m * cos0 + direction * radius_m * (math.sin(phi_end) - math.sin(math.radians(phi0)))
+    return {"direction": direction, "sweep_deg": sweep, "arc_m": lead_m + radius_m * math.radians(sweep),
+            "min_d": min(track), "max_d": max(track), "end_d": end_d, "advance_m": advance}
+
+
+def plan_turn(d0, phi0_deg, lead_m, radius_left_m, radius_right_m, low_d, high_d, tolerance_m=0.0):
+    """Choose the turn direction that keeps the boat inside ``low_d <= d <= high_d`` in the shortest arc.
+
+    A turn that leaves the band by at most ``tolerance_m`` counts as fitting. Returns ``(arc, fits)``. If
+    neither direction fits, ``arc`` is the one that leaves the band least, with ``arc["violation_side"]``
+    +1 (beyond high_d) or -1 (beyond low_d).
+    """
+    arcs = [turn_arc(d0, phi0_deg, radius_right_m, +1, lead_m), turn_arc(d0, phi0_deg, radius_left_m, -1, lead_m)]
+    for arc in arcs:
+        below, above = low_d - arc["min_d"], arc["max_d"] - high_d
+        arc["violation_m"] = max(0.0, below, above)
+        arc["violation_side"] = (1 if above >= below else -1) if arc["violation_m"] > 0 else 0
+    fitting = [arc for arc in arcs if arc["violation_m"] <= tolerance_m]
+    if fitting:
+        return min(fitting, key=lambda arc: arc["arc_m"]), True
+    return min(arcs, key=lambda arc: arc["violation_m"]), False
+
+
+def plan_turn_by_time(d0, phi0_deg, lead_m, radius_left_m, radius_right_m, low_d, high_d, tolerance_m,
+                      cruise_mps, reverse_mps, restart_sec, neutral_sec, max_reverse_m, restart_lead_m,
+                      step_m=0.05):
+    """Fastest way onto the race direction that stays inside the band: turn right, turn left, or reverse
+    straight back (rudder centred, so the bow keeps its heading) and then turn.
+
+    Cost (seconds) = time for the manoeuvre + ground lost along the race direction at cruise speed, so a turn
+    that finishes behind its start pays for the distance it must make up. Reversing adds two neutral pauses,
+    the reverse itself and ``restart_sec`` for stopping and starting again. Returns None when no option fits,
+    otherwise a dict: direction, reverse_m, cost_sec, arc (the turn, from where it starts).
+    """
+    phi = (phi0_deg + 180.0) % 360.0 - 180.0
+    best = None
+    for direction, radius in ((+1, radius_right_m), (-1, radius_left_m)):
+        reverse_m = 0.0
+        while reverse_m <= max_reverse_m + 1e-9:
+            reversing = reverse_m > 0
+            d_start = d0 - reverse_m * math.sin(math.radians(phi))
+            arc = turn_arc(d_start, phi, radius, direction, restart_lead_m if reversing else lead_m)
+            violation = max(0.0, low_d - arc["min_d"], arc["max_d"] - high_d)
+            if violation <= tolerance_m:
+                advance = arc["advance_m"] - reverse_m * math.cos(math.radians(phi))
+                cost = arc["arc_m"] / cruise_mps - advance / cruise_mps
+                if reversing:
+                    cost += 2.0 * neutral_sec + reverse_m / reverse_mps + restart_sec
+                if best is None or cost < best["cost_sec"]:
+                    best = {"direction": direction, "reverse_m": reverse_m, "cost_sec": cost, "arc": arc}
+                break                       # More reversing in this direction only costs more
+            reverse_m += step_m
+    return best
+
+
+def square_corners(s_start, limits, leg_length_m):
+    """Corners ``(s, d, label)`` of one rectangle per ``(name, left_m, right_m)`` in ``limits``.
+
+    With ``name`` None the label is the symmetric form used by 05 ("+-2.50 m left line").
+
+    Coordinates are the course frame of StraightLineGuidance. Each rectangle runs forward along the left
+    line (-left_m), across to the right line (+right_m), back along it and across to the start, so every
+    corner is a right turn. Labels name the limits and the leg that ends at the corner.
     """
     corners = []
-    for h in half_widths:
-        tag = f"+-{h:.2f} m"
+    for name, left_m, right_m in limits:
+        tag = f"{name} -{left_m:.2f}/+{right_m:.2f} m" if name is not None else f"+-{right_m:.2f} m"
         corners += [
-            (s_start, -h, f"{tag} to start"),
-            (s_start + leg_length_m, -h, f"{tag} left line"),
-            (s_start + leg_length_m, h, f"{tag} far side"),
-            (s_start, h, f"{tag} right line"),
-            (s_start, -h, f"{tag} near side"),
+            (s_start, -left_m, f"{tag} to start"),
+            (s_start + leg_length_m, -left_m, f"{tag} left line"),
+            (s_start + leg_length_m, right_m, f"{tag} far side"),
+            (s_start, right_m, f"{tag} right line"),
+            (s_start, -left_m, f"{tag} near side"),
         ]
     return corners

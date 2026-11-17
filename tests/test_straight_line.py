@@ -26,7 +26,7 @@ def make_strategy(**options):
 class StraightLineGuidanceTest(unittest.TestCase):
     def setUp(self):
         # Course due east, 100 m long: right of the centerline is south (-y).
-        self.g = StraightLineGuidance((0.0, 0.0), (100.0, 0.0), band_half_width_m=2.5, line_max_offset_m=1.5)
+        self.g = StraightLineGuidance((0.0, 0.0), (100.0, 0.0), 2.5, 2.5, 1.5, 1.5)
 
     def test_frame_and_point_are_inverse(self):
         self.assertAlmostEqual(self.g.bearing_deg, 90.0)
@@ -60,7 +60,7 @@ class StraightLineGuidanceTest(unittest.TestCase):
 
     def test_rejects_line_limit_outside_band(self):
         with self.assertRaises(ValueError):
-            StraightLineGuidance((0.0, 0.0), (100.0, 0.0), band_half_width_m=2.5, line_max_offset_m=2.5)
+            StraightLineGuidance((0.0, 0.0), (100.0, 0.0), 2.5, 2.5, 2.5, 1.5)
 
 
 class StraightLineStrategyTest(unittest.TestCase):
