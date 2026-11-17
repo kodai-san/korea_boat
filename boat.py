@@ -153,7 +153,7 @@ CAM_SENSOR_HEIGHT = 720
 CAM_WIDTH = 640
 CAM_HEIGHT = 360
 CAM_FPS = 30
-CAM_FLIP_METHOD = 0
+CAM_FLIP_METHOD = 2  # 0=normal, 2=rotate 180 (nvvidconv flip-method / cv2.flip)
 CAM_HFOV_DEG = 62.2
 CAM_RECONNECT_SEC = 2.0
 CAM_TIMEOUT = 2.5
@@ -268,7 +268,7 @@ shared_state = {
     "balloonAngleErr": 0.0,
     "balloonFps": 0.0,
     "hsvPreset": "default",
-    "camFlip": 0,
+    "camFlip": 180,
     "camShowMask": False,
     "steerCtrlMode": STEER_CTRL_MODE,
     "pidKp": PID_KP,
@@ -1797,17 +1797,26 @@ def camera_worker():
             cur_fps = _vision_state["fps"]
 
         try:
-            is_v4l2 = not isinstance(cap, GstPipeCapture)
+            # Soft-flip only for raw USB/V4L2. CSI (GstPipe / OpenCV GStreamer) already
+            # applies flip-method in the pipeline — flipping again would cancel 180°.
+            if isinstance(cap, GstPipeCapture):
+                need_soft_flip = False
+            else:
+                try:
+                    backend = (cap.getBackendName() or "").upper()
+                except Exception:
+                    backend = ""
+                need_soft_flip = "GSTREAMER" not in backend
             vision_tracking_active = (shared_state.get("mode") == "BALLOON")
             if vision_tracking_active:
                 detected, nx, ny, rad, area_pct, dist_m, ang_err, vis = detect_pink_balloon(
                     frame,
                     preset_name=_hsv_preset_name,
-                    flip_v4l2=(is_v4l2 and _cam_flip_method == 2),
+                    flip_v4l2=(need_soft_flip and _cam_flip_method == 2),
                     show_mask=_cam_show_mask,
                 )
             else:
-                if is_v4l2 and _cam_flip_method == 2:
+                if need_soft_flip and _cam_flip_method == 2:
                     frame = cv2.flip(frame, -1)
                 with _cam_lock:
                     _latest_bgr_frame = frame
