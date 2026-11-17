@@ -1461,7 +1461,41 @@ def open_camera_with_fallback(flip_method=0):
     if not CV_AVAILABLE:
         return None
 
-    # 1순위: OpenCV GStreamer
+    def _try_v4l2(dev):
+        """Open a V4L2 device path or index; return capture if a BGR frame is readable."""
+        for api_pref in (getattr(cv2, "CAP_V4L2", 0), 0):
+            try:
+                cap = cv2.VideoCapture(dev, api_pref) if api_pref else cv2.VideoCapture(dev)
+                if cap is not None and cap.isOpened():
+                    cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAM_WIDTH)
+                    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAM_HEIGHT)
+                    cap.set(cv2.CAP_PROP_FPS, CAM_FPS)
+                    if hasattr(cv2, "CAP_PROP_BUFFERSIZE"):
+                        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                    ret, frame = cap.read()
+                    if ret and frame is not None and frame.size > 0 and len(frame.shape) == 3 and frame.shape[2] == 3:
+                        return cap
+                if cap is not None:
+                    cap.release()
+            except Exception:
+                pass
+        return None
+
+    # 1순위: /dev/video0 (현재 보드에 연결된 V4L2 카메라)
+    for dev in ("/dev/video0", 0):
+        cap = _try_v4l2(dev)
+        if cap is not None:
+            add_event_log("CAMERA", "V4L2 카메라 연결 성공 (/dev/video0)", "auto")
+            return cap
+
+    # 2순위: 기타 V4L2 노드
+    for dev_idx in (1, 2):
+        cap = _try_v4l2(dev_idx)
+        if cap is not None:
+            add_event_log("CAMERA", f"V4L2/USB 카메라 연결 성공 (/dev/video{dev_idx})", "auto")
+            return cap
+
+    # 3순위: OpenCV GStreamer CSI
     for sid in (0, 1):
         for sw, sh in ((1280, 720), (1640, 1232)):
             try:
@@ -1479,7 +1513,7 @@ def open_camera_with_fallback(flip_method=0):
             except Exception:
                 pass
 
-    # 2순위: gst-launch 파이프
+    # 4순위: gst-launch CSI 파이프
     if shutil.which("gst-launch-1.0"):
         for sid in (0, 1):
             try:
@@ -1489,26 +1523,6 @@ def open_camera_with_fallback(flip_method=0):
                     add_event_log("CAMERA", f"CSI 파이 카메라(gst-launch 파이프) 연결 성공 (CAM{sid}, flip={flip_method})", "auto")
                     return gcap
                 gcap.release()
-            except Exception:
-                pass
-
-    # 3순위: V4L2 / USB 카메라
-    for dev_idx in (0, 1, 2):
-        for api_pref in (getattr(cv2, "CAP_V4L2", 0), 0):
-            try:
-                cap = cv2.VideoCapture(dev_idx, api_pref) if api_pref else cv2.VideoCapture(dev_idx)
-                if cap is not None and cap.isOpened():
-                    cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAM_WIDTH)
-                    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAM_HEIGHT)
-                    cap.set(cv2.CAP_PROP_FPS, CAM_FPS)
-                    if hasattr(cv2, "CAP_PROP_BUFFERSIZE"):
-                        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                    ret, frame = cap.read()
-                    if ret and frame is not None and frame.size > 0 and len(frame.shape) == 3 and frame.shape[2] == 3:
-                        add_event_log("CAMERA", f"V4L2/USB 카메라 연결 성공 (/dev/video{dev_idx})", "auto")
-                        return cap
-                if cap is not None:
-                    cap.release()
             except Exception:
                 pass
     return None
