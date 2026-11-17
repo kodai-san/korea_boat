@@ -71,6 +71,7 @@ class SpresenseGPSStreamer:
     provider should hold its data lock only while making that copy.
     """
 
+    BAUDRATE = 921600
     INTERVAL_SEC = 5.0
     RETRY_SEC = 1.0
     WRITE_TIMEOUT_SEC = 0.5
@@ -158,7 +159,7 @@ class SpresenseGPSStreamer:
             return False
         path, info = selected
         self._serial = serial.Serial(
-            port=path, baudrate=115200,
+            port=path, baudrate=self.BAUDRATE,
             bytesize=serial.EIGHTBITS, parity=serial.PARITY_NONE,
             stopbits=serial.STOPBITS_ONE, timeout=0,
             write_timeout=self.WRITE_TIMEOUT_SEC,
@@ -168,7 +169,7 @@ class SpresenseGPSStreamer:
         if info is not None and self._identity is None:
             self._identity = self._usb_identity(info)
         self._warning = None
-        self._log(f"[SPRESENSE] Connected to {path}: 115200 baud, 8N1; GPS CSV every 5 seconds.")
+        self._log(f"[SPRESENSE] Connected to {path}: {self.BAUDRATE} baud, 8N1; GPS CSV every 5 seconds.")
         return True
 
     def _close(self):

@@ -1,9 +1,11 @@
 # ArbaLabs GPS USB stream
 
 The boat controller sends its latest ZED-F9P GGA observation to the Spresense at
-115200 baud, 8 data bits, no parity, 1 stop bit, and no flow control. Discovery,
+921600 baud, 8 data bits, no parity, 1 stop bit, and no flow control. Discovery,
 connection, writes, retries, and closing run in a dedicated background thread.
-The 20 Hz control loop does not write to this USB port.
+The 20 Hz control loop does not write to this USB port. The 921600 baud rate
+matches the reported ArbaLabs receiver setting; both ends must use this rate.
+The Arduino and ZED-F9P connections retain their separate baud settings.
 
 ## CSV protocol
 
@@ -68,8 +70,8 @@ Ambiguous matches wait for a selector instead of choosing an arbitrary port.
 
 The stock main-board USB connection uses a Silicon Labs CP210x bridge, which can
 have a generic description shared by unrelated devices. Such a device needs the
-one-time selector above. Sony documents the main-board USB serial settings as
-115200, 8N1, no flow control. ArbaLabs firmware must read this serial interface;
+one-time selector above. ArbaLabs firmware must read this serial interface at
+921600 baud, 8N1, no flow control;
 connecting the board alone does not install a CSV receiver.
 See [Sony SDK setup](https://developer.spresense.sony-semicon.com/development-guides/?lang=en&page=sdk_set_up).
 

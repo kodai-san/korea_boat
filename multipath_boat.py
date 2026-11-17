@@ -20,7 +20,7 @@ main controller for multipath navigation (Left/Center/Right).
 4. National Geographic Information Institute (NGII) RTK corrections (NTRIP):
    a built-in background client sends $GNGGA sentences and injects RTCM3 corrections.
 5. ArbaLabs Spresense USB output: a separate worker sends the latest GPS sample
-   every 5 seconds at 115200 8N1. See SPRESENSE_USB.md for device selection.
+   every 5 seconds at 921600 8N1. See SPRESENSE_USB.md for device selection.
 
 [Session diagnostics]
 - logs/multipath_log_<session>.csv: telemetry plus GPS validity/age, NTRIP connection
