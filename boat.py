@@ -68,6 +68,7 @@ from multipath_boat import (
 )
 from auto_strategies import create_auto_strategy
 from gps_heading import MotionHeadingSelector
+from gps_guard import GpsAwareController
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -717,12 +718,14 @@ def load_auto_controller():
         for name, pts in PATHS.items()
     }
     navigator = MultipathNavigator(nav_paths, nav_params, strategy=strategy)
-    selector = MotionHeadingSelector(strategy.options) if strategy.uses_gps_course else None
+    selector = (MotionHeadingSelector(strategy.options)
+                if strategy.uses_gps_course and not getattr(strategy, "uses_gps_guard", False) else None)
     return navigator, strategy, selector, clamp(float(ratio), 0.20, 1.00), found
 
 
 try:
     NAVIGATOR, AUTO_STRATEGY, HEADING_SELECTOR, AUTO_CRUISE_RATIO, AUTO_CONFIG_FOUND = load_auto_controller()
+    GPS_GUARD = GpsAwareController(NAVIGATOR) if getattr(AUTO_STRATEGY, "uses_gps_guard", False) else None
 except Exception as e:
     raise SystemExit(f"AUTO controller config error ({AUTO_CONFIG_FILE}): {e}")
 
@@ -765,6 +768,17 @@ def nav_throttle_to_pwm(blend):
     cruise = lerp(STOP, max_GO, AUTO_CRUISE_RATIO)
     b = clamp(float(blend), 0.0, 1.0)
     return int(round(cruise + b * (max_GO - cruise)))
+
+
+def nav_absolute_throttle_to_pwm(throttle, guarded=False):
+    """Signed absolute power, with guard caps measured against calibrated ESC range."""
+    n = clamp(float(throttle), -1.0, 1.0)
+    if n < 0.0:
+        if guarded:
+            return int(math.ceil(STOP + (-n) * (max_BACK - STOP)))
+        return lerp(STOP, max_BACK, -n)
+    forward_limit = min(max_GO, DEFAULT_MAX_GO) if guarded else max_GO
+    return lerp(STOP, forward_limit, n)
 
 _rc_last_pkt_mono = 0.0
 _rc_read_count = 0
@@ -2249,7 +2263,10 @@ def main_loop():
                   rc_auto_active = False
                   rc_entry_steer_held = False
               if cmd_val == "AUTO" and current_mode != "AUTO":
-                  if not gps_ok or not (2 <= fix_status <= 5):
+                  entry_snap = NAV_GPS.get_snapshot() if GPS_GUARD is not None else None
+                  entry_ready = (entry_snap.get("valid") and entry_snap.get("fix_quality") in (1, 2, 4, 5)
+                                 if entry_snap is not None else gps_ok and 2 <= fix_status <= 5)
+                  if not entry_ready:
                       safe_stop()
                       add_event_log("FAILSAFE", f"GPS not ready (fix={fix_status}) -> AUTO entry rejected", "warn")
                   else:
@@ -2282,14 +2299,20 @@ def main_loop():
                           )
                           heading_reused = HEADING_SELECTOR.enter_auto(entry_snap, now_mono)
                       NAVIGATOR.allow_lane_shift = path_auto_switch
-                      nav_lane, nav_wp, nav_dist = NAVIGATOR.enter_auto_mode(
-                          c_lat, c_lon, now_mono=now_mono,
-                          lane=None if path_auto_switch else LANE_KEYS[target_path],
-                      )
+                      if GPS_GUARD is not None:
+                          # The guard qualifies observations before drawing a route or detecting finish.
+                          nav_info = GPS_GUARD.enter_auto(entry_snap, now_mono)
+                          heading_info = GPS_GUARD.heading_info
+                          nav_lane, nav_wp, nav_dist = "line", nav_info["wp_number"], 0.0
+                      else:
+                          nav_lane, nav_wp, nav_dist = NAVIGATOR.enter_auto_mode(
+                              c_lat, c_lon, now_mono=now_mono,
+                              lane=None if path_auto_switch else LANE_KEYS[target_path],
+                          )
+                          nav_info = None
                       if not line_guidance:
                           target_path = LANE_NAMES[nav_lane]
                       current_point = min(total_waypoints - 1, max(0, nav_wp - 1)) if line_guidance else NAVIGATOR.target_idx
-                      nav_info = None
                       last_nav_t = 0.0
                       with state_lock:
                           shared_state["mode"] = current_mode
@@ -2305,6 +2328,8 @@ def main_loop():
                       if line_guidance:
                           add_event_log("PATH", NAVIGATOR.describe_line(), "auto")
               elif cmd_val == "MANUAL" and current_mode != "MANUAL":
+                  if GPS_GUARD is not None:
+                      GPS_GUARD.reset()
                   current_mode = "MANUAL"
                   balloon_substate = "IDLE"
                   with state_lock:
@@ -2319,6 +2344,8 @@ def main_loop():
                       safe_stop()
                       add_event_log("FAILSAFE", "Pi camera not ready -> BALLOON entry rejected", "warn")
                   else:
+                      if GPS_GUARD is not None:
+                          GPS_GUARD.reset()
                       current_mode = "BALLOON"
                       rc_manual_latched = False
                       rc_entry_steer_held = from_rc
@@ -2672,6 +2699,8 @@ def main_loop():
         shared_state["rcManualActive"] = rc_manual_latched
 
         if estop_active:
+            if GPS_GUARD is not None:
+                GPS_GUARD.reset()
             safe_stop()
             with state_lock:
                 shared_state["mode"] = "MANUAL"
@@ -2683,6 +2712,8 @@ def main_loop():
 
         # RC-started AUTO has its own link requirement, independent of the browser.
         if rc_auto_active and not rc_ok:
+            if GPS_GUARD is not None:
+                GPS_GUARD.reset()
             safe_stop()
             current_mode = "MANUAL"
             rc_manual_latched = True
@@ -2699,6 +2730,8 @@ def main_loop():
 
         # Raw RC always remains available, even in web-only mode and link hold.
         if rc_ok and not suppress_entry_steering and rc_takeover_requested(current_mode, last_raw_st, last_raw_th):
+            if GPS_GUARD is not None and current_mode == "AUTO":
+                GPS_GUARD.reset()
             if not rc_manual_latched:
                 add_event_log("OVERRIDE", "RC takeover -> MANUAL (dashboard control released)", "warn")
             rc_manual_latched = True
@@ -2731,6 +2764,8 @@ def main_loop():
                 last_nav_t = 0.0
                 if HEADING_SELECTOR is not None:
                     HEADING_SELECTOR.suspend()
+                if GPS_GUARD is not None:
+                    GPS_GUARD.suspend()
                 AUTO_STRATEGY.suspend()
             if now - last_dbg > 1.0:
                 safe_print(f"LINK_HOLD [waiting for GCS link -> holding stop] mode={current_mode} [RTK:{fix_status}]")
@@ -2914,13 +2949,13 @@ def main_loop():
         # AUTO mode: shared multipath navigator + selected strategy (same control as multipath_boat.py)
         else:
             balloon_substate = "IDLE"
-            if not gps_ok:
+            if GPS_GUARD is None and not gps_ok:
                 safe_stop()
                 current_mode = "MANUAL"
                 add_event_log("FAILSAFE", "GPS timeout -> immediate stop and MANUAL", "warn")
             else:
                 fix_abort = False
-                if not (2 <= fix_status <= 5):
+                if GPS_GUARD is None and not (2 <= fix_status <= 5):
                     if bad_fix_start_t == 0.0:
                         bad_fix_start_t = now
                     elif (now - bad_fix_start_t) >= BAD_FIX_TIMEOUT:
@@ -2936,18 +2971,24 @@ def main_loop():
                 if not fix_abort and (now - last_nav_t) >= PWM_PERIOD:
                     last_nav_t = now
                     nav_snap = NAV_GPS.get_snapshot()
-                    if HEADING_SELECTOR is not None:
+                    prev_wp = current_point
+                    if GPS_GUARD is not None:
+                        nav_info = GPS_GUARD.update(nav_snap, now_mono)
+                        heading_info = GPS_GUARD.heading_info
+                        shared_state["gpsGuardState"] = nav_info["gps_guard_state"]
+                        shared_state["gpsGuardReason"] = nav_info["gps_guard_reason"]
+                    elif HEADING_SELECTOR is not None:
                         heading_info = HEADING_SELECTOR.select(nav_snap, now_mono)
                     else:
                         heading_info = {
                             "heading_deg": nav_snap["heading_deg"], "source": "legacy_blend", "age_sec": None,
                             "confident": nav_snap["heading_deg"] is not None, "state": "legacy",
                         }
-                    prev_wp = current_point
-                    nav_info = NAVIGATOR.update(
-                        c_lat, c_lon, heading_info["heading_deg"], now_mono=now_mono,
-                        heading_confident=heading_info["confident"], motion=heading_info,
-                    )
+                    if GPS_GUARD is None:
+                        nav_info = NAVIGATOR.update(
+                            c_lat, c_lon, heading_info["heading_deg"], now_mono=now_mono,
+                            heading_confident=heading_info["confident"], motion=heading_info,
+                        )
                     if not line_guidance:
                         target_path = LANE_NAMES[nav_info["active_lane"]]
                     current_point = min(total_waypoints - 1, max(0, nav_info["wp_number"] - 1)) if line_guidance else NAVIGATOR.target_idx
@@ -2961,25 +3002,36 @@ def main_loop():
                         add_event_log("NAV", f"WP {prev_wp + 1} passed -> WP {current_point + 1} tracking", "auto")
 
                     # Values shown on the web page
-                    bx, by = latlon_to_enu(c_lat, c_lon, NAVIGATOR.ref_lat, NAVIGATOR.ref_lon)
-                    if line_guidance:
+                    nav_lat, nav_lon = c_lat, c_lon
+                    if GPS_GUARD is not None:
+                        nav_lat = nav_info.get("gps_guard_accepted_latitude")
+                        nav_lon = nav_info.get("gps_guard_accepted_longitude")
+                    bx, by = (latlon_to_enu(nav_lat, nav_lon, NAVIGATOR.ref_lat, NAVIGATOR.ref_lon)
+                              if nav_lat is not None and nav_lon is not None else (None, None))
+                    if line_guidance and (bx is None or nav_info.get("lookahead_target_e_m") is None):
+                        t_dist = 0.0
+                    elif line_guidance:
                         t_dist = 0.0 if nav_info["finished"] else math.hypot(
                             nav_info["lookahead_target_e_m"] - bx, nav_info["lookahead_target_n_m"] - by)
                     else:
                         nav_pts = NAVIGATOR.paths[nav_info["active_lane"]]
                         _, t_lat, t_lon = nav_pts[min(current_point, len(nav_pts) - 1)]
                         t_dist = haversine(c_lat, c_lon, t_lat, t_lon)
-                    target_angle = nav_info["target_bearing_deg"]
-                    if heading_info["heading_deg"] is not None:
+                    if nav_info["target_bearing_deg"] is not None:
+                        target_angle = nav_info["target_bearing_deg"]
+                    if heading_info["heading_deg"] is not None and nav_info["target_bearing_deg"] is not None:
                         heading = heading_info["heading_deg"]
                         angle_err = wrap180(target_angle - heading)
                     else:
                         angle_err = 0.0
-                    for lane_key, lane_name in LANE_NAMES.items():
-                        _, lane_d, _, _ = NAVIGATOR._closest_segment_metrics(lane_key, bx, by)
-                        shared_state["dist" + lane_name] = round(lane_d, 2)
+                    if bx is not None:
+                        for lane_key, lane_name in LANE_NAMES.items():
+                            _, lane_d, _, _ = NAVIGATOR._closest_segment_metrics(lane_key, bx, by)
+                            shared_state["dist" + lane_name] = round(lane_d, 2)
 
                     if nav_info["finished"]:
+                        if GPS_GUARD is not None:
+                            GPS_GUARD.reset()
                         safe_stop()
                         current_mode = "MANUAL"
                         add_event_log(
@@ -2990,13 +3042,13 @@ def main_loop():
                     else:
                         steer = nav_steer_to_pwm(nav_info["steer_norm"])
                         if nav_info.get("throttle_norm") is not None:
-                            drive = lerp(STOP, max_GO, nav_info["throttle_norm"])
+                            drive = nav_absolute_throttle_to_pwm(nav_info["throttle_norm"], GPS_GUARD is not None)
                         else:
                             drive = nav_throttle_to_pwm(nav_info["throttle_blend"])
                         auto_abort = False
 
                         # No heading yet: cruise straight ahead to acquire one; stop if it takes too long
-                        if heading_info["heading_deg"] is None:
+                        if GPS_GUARD is None and heading_info["heading_deg"] is None:
                             if heading_none_start_t == 0.0:
                                 heading_none_start_t = now
                             elif (now - heading_none_start_t) > HEADING_INIT_MAX_SEC:
@@ -3013,7 +3065,7 @@ def main_loop():
 
                         # Stall watchdog while driving forward
                         if not auto_abort:
-                            if drive > STOP + 100:
+                            if GPS_GUARD is None and drive > STOP + 100:
                                 if stall_check_start_t == 0.0 or stall_ref_lat is None:
                                     stall_check_start_t = now
                                     stall_ref_lat, stall_ref_lon = c_lat, c_lon
@@ -3041,19 +3093,22 @@ def main_loop():
                             if now - last_dbg > 0.5:
                                 fix_str = "FIX" if fix_status == 4 else "FLT" if fix_status == 5 else "DGN" if fix_status == 2 else str(fix_status)
                                 guard = " [WALL]" if nav_info["boundary_guard"] else ""
+                                cte_text = (f"{nav_info['cte_right_m']:+.2f}"
+                                            if nav_info["cte_right_m"] is not None else "unknown")
                                 safe_print(
                                     f"AUTO {AUTO_STRATEGY.name} P:{guidance_label or target_path}{guard} WP:{current_point + 1}/{total_waypoints} "
-                                    f"CTE:{nav_info['cte_right_m']:+.2f}m ERR:{angle_err:+.1f}deg "
+                                    f"CTE:{cte_text}m ERR:{angle_err:+.1f}deg "
                                     f"HDG:{heading_info['source']} BOOST:{nav_info['throttle_blend']:.2f} "
                                     f"pwm={steer},{drive} [{fix_str}]"
                                 )
                                 last_dbg = now
                                 current_time = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                                cte_csv = f"{nav_info['cte_right_m']:.3f}" if nav_info["cte_right_m"] is not None else ""
                                 try:
                                     log_file.write(
                                         f"{current_time},{current_mode},{guidance_label or target_path},{current_point + 1},{t_dist:.1f},"
                                         f"{angle_err:.1f},{c_lat:.7f},{c_lon:.7f},{fix_status},{spd_mps:.2f},{steer},{drive},"
-                                        f"{nav_info['cte_right_m']:.3f},{AUTO_STRATEGY.name},{nav_info['throttle_blend']:.3f},"
+                                        f"{cte_csv},{AUTO_STRATEGY.name},{nav_info['throttle_blend']:.3f},"
                                         f"{heading_info['source']},{int(nav_info['boundary_guard'])}\n"
                                     )
                                 except Exception:
@@ -3066,14 +3121,17 @@ def main_loop():
             nav_info = None
             if HEADING_SELECTOR is not None:
                 HEADING_SELECTOR.reset()
+            if GPS_GUARD is not None:
+                GPS_GUARD.reset()
             AUTO_STRATEGY.suspend()
         shared_state["rcAutoActive"] = rc_auto_active and current_mode == "AUTO"
         shared_state["rcManualActive"] = rc_manual_latched
         was_auto = (current_mode == "AUTO")
         # Outside AUTO, watch the actual forward command so the next AUTO entry can reuse a fresh GPS course
-        if HEADING_SELECTOR is not None and current_mode != "AUTO":
+        if (HEADING_SELECTOR is not None or GPS_GUARD is not None) and current_mode != "AUTO":
             thr_sign = 0 if _last_drive is None else (1 if _last_drive > STOP else (-1 if _last_drive < STOP else 0))
-            HEADING_SELECTOR.observe_manual(NAV_GPS.get_snapshot(), thr_sign, now_mono)
+            observer = GPS_GUARD if GPS_GUARD is not None else HEADING_SELECTOR
+            observer.observe_manual(NAV_GPS.get_snapshot(), thr_sign, now_mono)
 
         # 5200 고출력 연속 주행 시간 감시 (10분 초과 시 4800 자동 하향)
         dt_hp = clamp(now - prev_loop_t, 0.0, 0.2)

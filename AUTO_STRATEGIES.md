@@ -24,9 +24,13 @@ The numbers follow creation order and stay fixed as more strategies are added.
 | 3 | `03_gps_course_progressive` | Experimental fresh GPS-course steering, validated forward-motion handover, and progressive power between cruise and full throttle. |
 | 4 | `04_predictive_recovery` | GPS-course handover with predictive recovery power and continuous, speed-dependent lookahead along the selected path. |
 | 5 | `05_straight_line` | Race line: one straight line drawn where AUTO is engaged (moved toward the centerline near a bank), full throttle, GPS-course line-of-sight steering with a PI loop on course error, and bank protection inside a +-2.5 m band. No lanes. |
+| 6 | `06_gps_aware` | Straight-line steering with position-jump rejection, GPS-quality and clearance checks, absolute power limits, and automatic recovery after consistent observations return. Full power requires qualified RTK FIX. |
+| 7 | `07_turn_planner` | 05 plus planned large turns, bounded reverse when a turn needs more room, separate left/right bank and line limits, and a line drawn where the turn ends. |
+| 8 | `08_gps_aware_turn_planner` | 06's GPS qualification and absolute power limits combined with 07's asymmetric geometry and turn planner, including guarded planned reverse and optional three-point turns. |
 
 The original names `constant_cruise`, `adaptive_throttle`,
-`gps_course_progressive`, `predictive_recovery`, and `straight_line` remain accepted aliases for
+`gps_course_progressive`, `predictive_recovery`, `straight_line`, `gps_aware`,
+`turn_planner`, and `gps_aware_turn_planner` are accepted aliases for
 their corresponding numbered strategies in JSON selectors, option-block keys,
 and CLI arguments. Defaults, new logs, and files saved by the calibration tool
 use the numbered names. Existing logs retain their recorded names.
@@ -39,13 +43,16 @@ settings can stay in the file. Missing `autonomous` or `strategy` settings selec
 `02_adaptive_throttle`, preserving this branch's previous default. Settings are read
 at startup; restart the controller after editing the file.
 
-`pwm.auto_throttle_ratio` sets the cruise throttle for all strategies. With the
+`pwm.auto_throttle_ratio` sets the cruise throttle for strategies 01–04. With the
 current calibration, 0.60 produces 1914 microseconds; adaptive full power is
 1990 microseconds. The ratio is a cruise setting, not an adaptive maximum-power
 limit. Adaptive thresholds are inclusive and independently configurable. The CTE
 threshold must be a finite nonnegative number, and heading must be between 0 and
 180 degrees. Unknown names, options, and malformed settings are rejected before
 hardware initialization, including settings supplied for an inactive strategy.
+Modes 05 and 07 use full forward power while tracking; modes 06 and 08 use
+GPS-qualified absolute power limits independent of the cruise setting. Planned
+reverse in 07/08 uses a fraction of the neutral-to-reverse-maximum PWM range.
 
 To select a strategy for one run without changing the JSON:
 
@@ -54,6 +61,9 @@ python3 multipath_boat.py --auto-strategy 01_constant_cruise
 python3 multipath_boat.py --auto-strategy 02_adaptive_throttle --throttle-ratio 0.60
 python3 multipath_boat.py --auto-strategy 03_gps_course_progressive
 python3 multipath_boat.py --auto-strategy 04_predictive_recovery
+python3 multipath_boat.py --auto-strategy 06_gps_aware
+python3 multipath_boat.py --auto-strategy 07_turn_planner
+python3 multipath_boat.py --auto-strategy 08_gps_aware_turn_planner
 ```
 
 These commands launch the normal boat controller and initialize its hardware.
@@ -105,9 +115,11 @@ reads `hardware`, `rc`, `pwm`, `mode_switch`, `autonomous` and `navigation` from
   the course line; the dashboard labels straight-line or test-square guidance
   and disables lane selection. Test-square mode uses its configured test throttle.
   Wall-guard recovery still applies during normal straight-line guidance.
-- **Safety:** boat.py keeps its own failsafes. These are the RC override, E-stop,
-  link-loss hold, GPS timeout, the 1 s bad-fix stop, the 5 s stall stop, and a 5 s
-  no-heading stop.
+- **Safety:** RC override, E-stop and link-loss hold apply to every strategy.
+  Modes 06/08 use the shared GPS guard for position, heading, power and automatic
+  requalification; its neutral holds replace the legacy GPS timeout, bad-fix,
+  stall and no-heading timers. Other modes retain the GPS timeout, 1 s bad-fix
+  stop, 5 s stall stop and 5 s no-heading stop.
 - **Log columns:** the `logs/auto_log_*.csv` file has these extra columns: `CTE_m`,
   `Strategy`, `ThrottleBlend`, `HeadingSrc` and `WallGuard`.
 
@@ -220,8 +232,8 @@ faster run or better recovery.
 
 Select `"04_predictive_recovery"` in `autonomous.strategy`, or use the CLI command
 above. Its independent settings live in `autonomous["04_predictive_recovery"]`.
-The checked-in JSON still selects `02_adaptive_throttle`; the other three modes
-retain their control behavior.
+The checked-in JSON selects `05_straight_line`; explicitly selecting
+04 retains its independent control behavior.
 
 This mode inherits the GPS-course progressive mode's heading acquisition,
 same-source speed checks, RTK boost requirement, steering controller, and power
@@ -336,7 +348,7 @@ cycles that do not compute predictive navigation.
 
 Implement a strategy in `auto_strategies.py` and register it in `AUTO_STRATEGIES`.
 The registry supplies JSON selection, CLI choices, validation, and calibration
-defaults. Give the next strategy the prefix `05_`, then continue in creation
+defaults. Give the next strategy the prefix `09_`, then continue in creation
 order. Never renumber existing strategies: their names identify configurations
 and historical runs. Each strategy provides:
 
@@ -363,9 +375,13 @@ and historical runs. Each strategy provides:
 For a throttle-only experiment, subclass `ConstantCruiseStrategy` and override
 `throttle_blend`. For a different steering controller, override `update` and
 reset any added state in `reset`. Keep navigation and safety handling shared.
-The current interface supports throttle between cruise and full forward.
-Strategies requiring a lower throttle or another guidance method need an
-explicit extension of that interface.
+`throttle_blend` selects between cruise and full forward. An explicit
+`throttle_norm` overrides that blend: positive values use the forward range,
+zero is neutral, and negative values use the reverse range. For strategies
+with `uses_gps_guard`, only `GpsAwareController` may authorize that power;
+standalone strategy output remains neutral. Guarded navigator maneuvers expose
+`planner_throttle_norm` separately from the neutral `throttle_norm`; the guard
+checks the request before producing the final actuator command.
 
 Add offline tests for the new strategy, its configuration, and mode transitions:
 
@@ -375,7 +391,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_*.py' -
 
 ## 05 — Straight line (race line)
 
-`calibration.json` selects `"05_straight_line"`. Settings live in
+Select `"05_straight_line"` to run mode 05. Settings live in
 `autonomous["05_straight_line"]`. Point the boat down the course before
 engaging AUTO: the boat has no heading until it is moving.
 
@@ -473,7 +489,303 @@ reports, per leg, where the boat actually was from the centerline and its error
 to the commanded line, using only the real log. Compare the "left line" and
 "right line" legs with where the team saw the boat relative to the banks.
 
-## Stuck recovery (all strategies)
+## 06 — GPS-aware straight line (`06_gps_aware`)
+
+Mode 06 keeps 05's straight-line geometry and course PI steering, then places
+a GPS guard before navigation and an absolute throttle limit after it. Select
+it explicitly with `--auto-strategy 06_gps_aware` or `autonomous.strategy`.
+The checked-in calibration still selects **05**; the complete 06 option block
+remains available for explicit selection. The alias is `gps_aware`.
+
+**Position integrity.** The guard checks position freshness and source time,
+rejects motion inconsistent with the recent accepted position and Doppler
+velocity, and tracks uncertainty. Repeated telemetry rows are not new GPS
+observations. A rejected observation must not redraw the race line, advance
+the route, declare finish, or create a displacement heading. Receiver accuracy,
+when available, is usable only while fresh and aligned with the position epoch;
+the FIX/FLOAT/DGPS/GPS uncertainty floors still apply. RTK FIX alone does not prove
+that a position is fresh or consistent. Optional PUBX,00 or GST accuracy messages
+are read when the receiver already emits them; this mode does not reconfigure
+the receiver to enable those messages. Without them, the configured quality
+floors and age allowances are policy estimates, not measured error bounds.
+With `retain_stale_accuracy=true`, the last usable reported accuracy remains
+an uncertainty floor until a fresh aligned replacement or controller reset;
+losing accuracy messages cannot silently erase a previously large error estimate.
+
+**Power and clearance.** Full power requires sustained consistent RTK FIX,
+fresh position and course, acceptable quality/correction age, small tracking
+errors, and sufficient clearance after accounting for uncertainty and hull
+margin. FLOAT is capped at 70% forward range, DGPS at 50%, and ordinary GPS
+at 30%. Each may continue only when its uncertainty still leaves enough usable
+clearance and a trustworthy course is available. Setting `gps_throttle` to zero
+explicitly disables ordinary-GPS propulsion. Near a boundary the cap is 35%
+(or the quality cap if lower); unusable or stale observations cause a neutral hold.
+These are absolute forward caps: a configured cruise ratio of 1.0 cannot
+override them. Power falls immediately when conditions worsen and rises at
+most 0.5 of the forward range per second when they improve.
+
+Ordinary GPS uses a configurable `gps_uncertainty_m` allowance of 1.5 m. This
+permits movement within the configured 2.5 m half-width; it is an operating
+assumption, not a claim that ordinary GPS is accurate to 1.5 m. At a fresh,
+centered fix, subtracting this allowance and the 0.25 m hull margin leaves
+0.75 m clearance. The 0.25 m minimum clearance then permits at most 0.5 m
+of lateral offset before accounting for age and predicted lateral movement.
+A larger reported accuracy estimate still increases uncertainty and can cause
+HOLD. Correction-age checks apply to FIX/FLOAT/DGPS; ordinary GPS does not
+require differential corrections.
+
+**Acquisition and recovery.** Position qualification requires both 2 seconds and
+five distinct consistent usable observations. FLOAT/DGPS/GPS can qualify for
+cautious tracking; race power separately requires the same duration and count
+of consistent FIX observations. After a hold, `auto_resume=true` permits
+automatic recovery on the existing race line once observations qualify again;
+it does not treat one FIX label or repeated copies of a fix as qualification.
+A bounded launch uses at most 30% power for 1.5 seconds, subject to launch
+clearance and recent forward-heading evidence. It cannot indefinitely drive
+without a trusted heading. A stationary entry with no recent forward-heading
+evidence stays neutral: establish direction by driving forward in MANUAL first.
+The forward handover uses `forward_acquire_sec` (0.6 s) of sustained manual
+forward motion and `forward_memory_sec` (4 s) of permitted handover memory.
+Bounded launch is available with each usable GPS quality, with its power
+limited to the smaller of `launch_throttle` and that quality's throttle cap.
+FIX requires `launch_min_clearance_m` (1.0 m); FLOAT/DGPS/GPS require
+`degraded_launch_min_clearance_m` (0.5 m), in each case after uncertainty and
+hull margin have been subtracted. This lets a boat with ordinary GPS restart
+after the neutral entry gesture, provided recent forward-heading evidence
+remains valid. It cannot repeatedly launch without acquiring a usable course.
+Course-integral learning is allowed only for
+guard-qualified FIX; degraded observations do not train rudder trim. A hold
+commands neutral and allows the hull to coast or drift; it is not station
+keeping. After a long outage, a large change of position solution, or loss of
+recent forward-heading evidence, the controller may remain in HOLD even with
+automatic resumption enabled. Reposition or establish forward motion in MANUAL
+and engage AUTO again when needed.
+
+Automatic stuck reverse is **always disabled for 06**, even if
+`autonomous.recovery.enabled` is true. An uncertain GPS speed cannot authorize
+reverse propulsion. Manual transmitter override remains available. The
+standalone strategy returns neutral power; `GpsAwareController` must qualify
+the observations and authorize the actual throttle. Test-square mode is
+unsupported for 06 and is rejected explicitly; use 05 for that test.
+
+The following guard options are additional to the inherited 05 geometry and
+steering options. Distances are metres, times seconds, speeds metres/second,
+and throttle values fractions of the forward PWM range.
+
+| Options | Defaults | Purpose |
+| --- | --- | --- |
+| `position_max_age_sec` | 0.6 | Maximum usable position age. |
+| `accuracy_max_age_sec`, `accuracy_max_skew_sec` | 1.0, 0.25 | Freshness and epoch alignment for reported accuracy. |
+| `retain_stale_accuracy` | true | Retain the last usable accuracy allowance until replacement/reset. |
+| `race_throttle`, `float_throttle`, `dgps_throttle`, `gps_throttle` | 1.0, 0.7, 0.5, 0.3 | Quality-dependent absolute power limits. |
+| `boundary_throttle`, `throttle_rise_per_sec` | 0.35, 0.5 | Boundary cap and maximum upward power ramp. |
+| `qualification_sec`, `qualification_fixes` | 2.0, 5 | Required duration and distinct-observation count for qualification. |
+| `max_hdop`, `min_satellites`, `max_correction_age_sec` | 2.5, 8, 10.0 | HDOP/satellite limits for every forward state; known correction age must meet its limit for FIX/FLOAT/DGPS. |
+| `fixed_uncertainty_m`, `float_uncertainty_m`, `dgps_uncertainty_m`, `gps_uncertainty_m` | 0.25, 0.75, 1.25, 1.5 | Minimum horizontal uncertainty by solution quality. |
+| `accuracy_multiplier`, `uncertainty_growth_mps` | 2.0, 0.5 | Reported-accuracy multiplier and growth with age. |
+| `hull_margin_m`, `min_clearance_m`, `race_clearance_m` | 0.25, 0.25, 0.75 | Hull allowance and minimum usable/race clearance. |
+| `race_max_heading_error_deg`, `race_max_cte_m` | 20.0, 0.5 | Tracking limits for race power. |
+| `jump_tolerance_m`, `innovation_growth_mps` | 1.0, 0.5 | Initial innovation tolerance and its time allowance. |
+| `max_speed_mps`, `max_source_gap_sec`, `source_clock_tolerance_sec` | 4.0, 2.0, 0.5 | Motion and source-clock plausibility bounds. |
+| `max_reacquire_shift_m` | 3.0 | Limit on accepting a shifted solution after a hold. |
+| `launch_throttle`, `launch_timeout_sec`, `launch_min_clearance_m`, `launch_heading_memory_sec` | 0.3, 1.5, 1.0, 5.0 | Bounded launch power, duration, clearance, and heading-memory window. |
+| `degraded_launch_min_clearance_m` | 0.5 | Required remaining clearance for a FLOAT/DGPS/GPS launch; FIX uses `launch_min_clearance_m`. |
+| `auto_resume` | true | Permit automatic recovery after a hold; false requires a new AUTO engagement. |
+
+Numeric options must be finite and correctly typed. Counts must be integers;
+qualification needs at least two distinct observations and the satellite limit
+at least four. Quality power limits and uncertainty floors must be ordered;
+race/launch clearance plus FIX uncertainty and hull margin must fit inside the
+configured band. Inconsistent settings are rejected before hardware opens.
+`--line-limit` and `--bank-limit` update the selected 06 block for that run.
+The inherited `position_heading_max_age_sec` remains accepted for configuration
+compatibility but does not affect 06: the guard uses Doppler course rather than
+a position-displacement heading. The inherited `test_*` options
+are also inactive because `test_square` must remain false.
+
+Guard diagnostics accompany the original raw GPS telemetry:
+`gps_guard_state`, `gps_guard_reason`, `gps_guard_uncertainty_m`,
+`gps_guard_clearance_m`, `gps_guard_innovation_m`,
+`gps_guard_position_age_sec`, `gps_guard_throttle_cap`, and
+`gps_guard_accepted_latitude`/`gps_guard_accepted_longitude`.
+Compare raw observations with accepted observations when investigating a hold.
+
+The defaults address the November 17 stale-position/full-power intervals and
+large position discontinuities. Log replay can verify rejection, state
+transitions, and output caps; it cannot establish the resulting physical track
+after the commands change. Closed-loop simulation should separately check
+clean-data speed and bank clearance under jumps, gaps, current and rudder trim.
+Reduced throttle limits distance travelled under uncertainty; it is not a
+claim of a tighter turning radius or an instantaneous stop. The course band
+and uncertainty settings still need confirmation on the water.
+
+For an offline moving-entry simulation, use
+`python3 simulate_boat.py auto --strategy 06_gps_aware --start-speed 1.4`.
+The default stationary simulator entry has no recent manual heading and should
+remain neutral in 06. The dynamics regression suite is
+`python3 -m unittest discover -s tests -p 'test_gps_guard_simulation.py'`;
+it requires the simulator's NumPy dependency.
+
+
+## 07 — Turn planner
+
+`07_turn_planner` is 05 (`05_straight_line`, the controller used for the
+17 Nov evening runs) with the changes made after those runs. Select it with
+`"strategy": "07_turn_planner"` or `python3 multipath_boat.py --auto-strategy 07_turn_planner`;
+its settings live in `autonomous["07_turn_planner"]`. Steering, throttle,
+finish and stuck recovery are as in 05. What differs:
+
+**Separate left and right limits.** `bank_left_m` / `bank_right_m` (3.2 / 4.0)
+and `line_left_m` / `line_right_m` (2.6 / 3.4) replace 05's symmetric
+`band_half_width_m` / `line_max_offset_m`; the measured banks are 4.20 m left and
+5.11 m right of the centerline. `--bank-limit X` / `--line-limit X` set both
+sides; `--bank-left`, `--bank-right`, `--line-left`, `--line-right` set one side
+(07 or 08). On each side the line limit plus `guard_zone_m` must stay inside the
+bank limit. The test square drives the per-side limits and labels its legs
+`bank -3.20/+4.00 m left line`.
+
+**Line where the turn ends.** Once the first forward course is known, the line
+moves to where the boat's turn onto the race direction will end (full-lock
+radius plus `turn_delay_sec` of travel), clamped to the line limits. 05 keeps
+the line at the (clamped) AUTO entry point.
+
+**Turn planner.** When the course is more than `turn_plan_deg` (60) off the race
+direction (at entry, after a takeover, or after a collision), the navigator
+works out both full-lock turns with the measured radii (`turn_radius_left_m`
+3.0, `turn_radius_right_m` 2.3) and chooses the one that stays inside the bank
+limits in the shortest arc (a predicted overshoot up to `turn_tolerance_m`
+counts as fitting; the bank limits already keep about 1 m of water). The short
+way round can point the boat straight at the bank (17 Nov routes 2, 3 and 6).
+The boat holds full lock in that direction until the course is within
+`turn_exit_deg` (25), even when the other way becomes shorter, and the line is
+drawn where the turn ends. If neither turn fits and the bow points clearly
+toward the limit it would cross, it goes neutral (`plan_neutral_sec`), reverses
+at `plan_reverse_throttle` with the rudder centered until a turn fits (at most
+`plan_reverse_max_sec`), goes neutral, and starts that turn at once: with the
+rudder centered the bow kept its heading, so no forward run is needed to
+measure it again. At most `plan_max_reverses` reverses per AUTO run; otherwise,
+or when reversing would not gain room (e.g. pointing straight backward), it
+takes the least-bad turn. A full 180-degree turn needs about 4.6 m of width
+(right) or 6 m (left), so from mid-channel pointing backward the least-bad turn
+can pass a bank limit. The event log records `[TURN PLAN]` with the choice and the
+predicted sideways range; `prediction_status` shows `turn_right`, `turn_left`,
+`plan_neutral_in`, `plan_reverse` or `plan_neutral_out`. Full throttle is kept
+while turning: the measured turns are tighter at full throttle (about 2.2 m)
+than at 60% (2.1-6.9 m), because the propeller wash drives the rudder. Reversing
+needs a land check first (does this ESC reverse after the neutral pause?).
+
+**Steering.** Outer loop: line-of-sight course
+`course_cmd = course_bearing - clamp(atan(cte / lookahead), +-max_intercept_deg)`,
+with the speed-dependent lookahead of 04. GPS course over ground already
+includes current, so this loop has no integral. Inner loop: proportional
+steering on course error (`course_gain` x the 01-04 gain) plus an integral
+(`course_integral_gain`, 1/s, contribution capped at `integral_limit_deg`)
+that removes rudder trim. The integral is frozen for `integral_delay_sec` after
+entry, below `min_course_speed_mps`, without an RTK-trusted course, in the bank
+zones, and when the course error exceeds `integral_max_error_deg`. Without a
+course the rudder holds the learned trim (zero at launch).
+
+**Three-point turns (`three_point_turns`, off by default; `--three-point-turns`).**
+The planner above only reverses when no forward turn fits. With this flag it
+compares turn right, turn left, and reverse-then-turn by estimated time and
+takes the fastest, even when a long forward turn fits. The estimate is the turn
+time plus the ground lost along the race direction at `plan_cruise_mps` (a
+254-degree circle finishes about 2 m behind its start), plus, for a reverse, two
+neutral pauses, the reverse at `plan_reverse_mps` and `plan_restart_sec` for
+stopping and starting again. Example (17 Nov route 3, 106 degrees off on the
+centreline): forward only, the boat circles 254 degrees right; with the flag it
+reverses about 0.2 m and turns 106 degrees left, about 3.4 s faster in a simple
+model. The boat reverses until the chosen turn fits (at most
+`plan_reverse_max_sec`), then turns at once. Leave it off until a land check has
+shown that this ESC reverses after the neutral pause, and measure
+`plan_restart_sec` then: a slow ESC makes the full circle the better choice. The
+event log records `[TURN PLAN] ... three-point turn, reverse about X m then turn
+...`.
+
+`--no-turn-planner` (or `"turn_planner": false`) makes 07 turn the short way
+round like 05 and keep the line at the entry point; the per-side limits stay.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `bank_left_m`, `bank_right_m` | 3.2, 4.0 | Bank limits from the centerline. Measured banks (RTK bank hits): left 4.20 m, right 5.11 m. |
+| `line_left_m`, `line_right_m` | 2.6, 3.4 | Furthest from the centerline a line may be drawn on each side. |
+| `turn_planner` | true | Plan large turns against the bank limits (`--no-turn-planner` turns the short way). |
+| `turn_plan_deg`, `turn_exit_deg` | 60, 25 | Plan a turn when the course is further off than this; hand back to line following below this. |
+| `turn_radius_left_m`, `turn_radius_right_m` | 3.0, 2.3 | Full-lock, full-throttle turn radii (measured 2.1-2.3 m right/left on 17 Nov, left 2.9-3.5 m on 16 Nov). |
+| `turn_delay_sec` | 0.4 | Straight travel before a turn bites (servo slew and GPS delay). |
+| `turn_tolerance_m` | 0.3 | Predicted overshoot of a bank limit still accepted as fitting. |
+| `plan_neutral_sec`, `plan_reverse_max_sec`, `plan_reverse_throttle`, `plan_max_reverses` | 0.3, 4.0, 0.5, 2 | The reverse-then-turn manoeuvre (reverse until a turn fits, at most 4 s). |
+| `turn_restart_lead_m` | 0.2 | Straight travel assumed before the turn bites when starting from rest after a reverse. |
+| `three_point_turns` | false | Choose turn right / turn left / reverse-then-turn by estimated time. |
+| `plan_cruise_mps`, `plan_reverse_mps`, `plan_restart_sec` | 1.6, 0.5, 0.6 | Speeds and the stop-start penalty used in that estimate. |
+| other options | as 05 | Line following, PI steering, bank guard, test square. |
+
+## 08 — GPS-aware turn planner (`08_gps_aware_turn_planner`)
+
+Mode 08 combines the position and power guard from 06 with the turn planner
+from 07. The checked-in calibration keeps **05** selected and includes complete
+option blocks for 06, 07 and 08. Select 08 explicitly with `--auto-strategy`
+or `autonomous.strategy`. The alias is `gps_aware_turn_planner`.
+
+```sh
+python3 multipath_boat.py --auto-strategy 08_gps_aware_turn_planner
+python3 multipath_boat.py --auto-strategy 08_gps_aware_turn_planner --three-point-turns
+python3 multipath_boat.py --auto-strategy 08_gps_aware_turn_planner --bank-left 3.2 --bank-right 4.0
+python3 simulate_boat.py auto --strategy 08_gps_aware_turn_planner --start-speed 1.4
+```
+
+**Settings.** The `autonomous["08_gps_aware_turn_planner"]` block contains 07's
+options and the guard options documented under 06. Bank and line limits are
+asymmetric: `bank_left_m` / `bank_right_m` and `line_left_m` / `line_right_m`.
+`--bank-limit` and `--line-limit` set both sides; explicit per-side arguments
+then take precedence. These overrides affect only the selected strategy's
+block. `three_point_turns` remains off by default. `--no-turn-planner` retains
+GPS guarding and asymmetric line following while disabling planned maneuvers.
+Test-square mode is rejected, as it is in 06.
+
+**Accepted positions and clearance.** Navigation, turn planning and finish
+checks use accepted observations from the guard. Freshness, distinct source
+epochs, jump rejection, reported accuracy, quality uncertainty floors,
+qualification and automatic requalification follow 06. Clearance uses the
+nearer actual side at both the accepted position and its forecast:
+`min(d + bank_left_m, bank_right_m - d)`, less GPS uncertainty and hull margin.
+The left and right banks are never approximated by a symmetric half-width.
+
+Turn arcs are planned inside bounds inset by uncertainty, hull margin and
+minimum clearance. Mode 08 holds neutral if it cannot find a maneuver within
+those bounds; it does not authorize 07's least-bad out-of-bounds fallback.
+An increase in uncertainty can invalidate a previously usable maneuver.
+
+**Power during maneuvers.** The guard applies the quality-dependent absolute
+power limits and upward ramp from 06. Full forward power remains subject to
+qualified FIX, tracking and clearance requirements. A planned neutral pause
+stays neutral, and a planned reverse retains its direction; neither can be
+replaced by the forward throttle governor. Reverse power is capped by the smallest of `plan_reverse_throttle`, the
+current quality limit and `boundary_throttle`; the default FIX reverse cap is
+35% of the reverse PWM range. `plan_reverse_max_sec` and `plan_max_reverses`
+bound its duration and attempt count, with GPS checks still active. The
+planner preserves the validated forward bow heading through neutral/reverse
+phases, rather than treating backward course over ground as the bow direction.
+Afterward, forward restart is capped by `launch_throttle` and the quality limit
+(default at most 30% forward). It must reacquire a fresh forward course within
+`launch_timeout_sec` (1.5 s); lingering backward course is rejected and a
+failed acquisition ends in neutral HOLD.
+
+A guard hold cancels the pending maneuver and commands neutral while retaining
+the course route. Qualification and heading evidence must recover before
+movement resumes. Automatic stuck reverse from `autonomous.recovery` stays
+disabled for 08; planned reverse is a separate, explicitly qualified maneuver.
+RC takeover, RC loss and finish neutral output retain priority.
+
+The guard telemetry fields listed under 06 accompany 07's planner statuses.
+Use `gps_guard_state`, `gps_guard_reason`, accepted coordinates and actual PWM
+output when interpreting a turn or hold. An offline moving-entry simulation
+supplies prior forward-motion evidence; a stationary entry with no such
+evidence remains neutral. As with 06, power limits reduce exposure to uncertain
+positions but do not guarantee a tighter turn radius; the measured radii,
+clearance margins and ESC reverse behavior require validation on the boat.
+
+## Stuck recovery (strategies 01–05 and 07)
 
 `autonomous.recovery` (default on). In AUTO, if the ESC is commanded forward but
 GPS speed stays below `stuck_speed_mps` (0.15) for `stuck_sec` (1.5 s), the
