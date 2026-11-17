@@ -180,6 +180,8 @@ class AutoControllerIntegrationTests(unittest.TestCase):
     def run_auto(self, strategy, args=(), end="tracking", omit_config=False):
         source = Path(boat.__file__).parent
         cal = boat.load_calibration(source / "calibration.json")
+        cal["pwm"]["auto_throttle_ratio"] = .60
+        cal["navigation"] = {"finish_margin_m": 0.0}
         cal["mode_switch"]["right_steer_hold_sec"] = .01
         if omit_config:
             cal.pop("autonomous", None)
@@ -266,7 +268,11 @@ class AutoControllerIntegrationTests(unittest.TestCase):
                 self.assertEqual(int(rows[-1]["esc_us"]), 1990)
 
     def test_strategy_cannot_override_finish_gps_stop_or_manual_return(self):
-        for name in strategies.AUTO_STRATEGIES:
+        # This three-cycle fixture has no advancing observations. Mode 06's qualified
+        # entry, finish, and takeover are exercised by test_gps_aware_integration.
+        for name, strategy_type in strategies.AUTO_STRATEGIES.items():
+            if getattr(strategy_type, "uses_gps_guard", False):
+                continue
             for end, mode, pwm in (("no_fix", "AUTO", 1800), ("reverse", "MANUAL", 1650),
                                    ("finish", "MANUAL", 1800)):
                 with self.subTest(strategy=name, end=end):

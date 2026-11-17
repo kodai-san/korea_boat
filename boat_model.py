@@ -302,6 +302,11 @@ class GPSEmulator:
         lat, lon = self.latlon()
         age = now - self.fix_t
         course = self.cog if self.sog >= 0.05 else None   # Receivers leave COG blank when nearly stopped
+        # Round before splitting fields so 59.999... carries into the next minute.
+        centiseconds = int(round(self.fix_t * 100)) % 8640000
+        hours, remainder = divmod(centiseconds, 360000)
+        minutes, remainder = divmod(remainder, 6000)
+        utc = f"{hours:02d}{minutes:02d}{remainder / 100:05.2f}"
         return {
             "valid": True, "lat": lat, "lon": lon, "fix_quality": self.fix_quality, "age_sec": age,
             "heading_deg": self.heading_deg, "sog_mps": self.sog, "cog_deg": self.cog,
@@ -310,6 +315,7 @@ class GPSEmulator:
             "position_heading_deg": self.position_heading_deg, "position_heading_time_mono": self.position_heading_t,
             "position_heading_age_sec": None if self.position_heading_t is None else now - self.position_heading_t,
             "position_speed_mps": self.position_speed_mps,
+            "gps_utc": utc, "num_sats": 20, "hdop": 0.7, "diff_age_sec": 1.0,
         }
 
     def latlon(self):

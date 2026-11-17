@@ -85,7 +85,11 @@ class StraightLineGuidance:
     ``line_right_m``; outside that the boat merges onto it while moving forward.
     """
 
-    def __init__(self, start_xy, end_xy, bank_left_m, bank_right_m, line_left_m, line_right_m):
+    def __init__(self, start_xy, end_xy, bank_left_m, bank_right_m, line_left_m=None, line_right_m=None):
+        if line_left_m is None and line_right_m is None:
+            # Symmetric form used by 05/06: (band_half_width_m, line_max_offset_m).
+            band, line = bank_left_m, bank_right_m
+            bank_left_m, bank_right_m, line_left_m, line_right_m = band, band, line, line
         sx = _finite_number(start_xy[0], "start x")
         sy = _finite_number(start_xy[1], "start y")
         ex = _finite_number(end_xy[0], "end x")

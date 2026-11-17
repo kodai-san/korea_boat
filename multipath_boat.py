@@ -52,11 +52,19 @@ import time
 from auto_strategies import (AUTO_STRATEGIES, apply_run_overrides, canonical_auto_strategy_name,
                              create_auto_strategy, resolve_recovery_config)
 from gps_heading import MotionHeadingSelector
+from gps_guard import GpsAwareController
+from gps_accuracy import parse_accuracy_message
 from path_guidance import (StraightLineGuidance, interpolate_lookahead, plan_turn, plan_turn_by_time,
                            square_corners, turn_arc)
 from recovery import StuckRecovery
 from spresense_stream import (
     SpresenseGPSStreamer, reserved_spresense_ports, same_serial_port,
+)
+
+GPS_GUARD_FIELDS = (
+    "gps_guard_state", "gps_guard_reason", "gps_guard_uncertainty_m",
+    "gps_guard_clearance_m", "gps_guard_innovation_m", "gps_guard_position_age_sec",
+    "gps_guard_throttle_cap", "gps_guard_accepted_latitude", "gps_guard_accepted_longitude",
 )
 
 try:
@@ -462,6 +470,7 @@ class ZEDF9PReceiver:
         self.latest_gps_sample = None
         self.last_fix_time = 0.0
         self.last_rx_mono = 0.0           # Last serial line of any kind (for link watchdogs)
+        self.horizontal_accuracy = None  # Optional PUBX,00/GST observation, independent of GGA.
         self.rtcm_bytes_written = 0
         self.rtcm_write_errors = 0
         self.last_rtcm_write_error = ""
@@ -672,6 +681,12 @@ class ZEDF9PReceiver:
                             and self._anchor_lat is not None and sog >= NAV_PARAMS["sog_cog_blend_mps"]):
                         self.heading_deg = cog % 360.0
 
+        elif talker_msg.endswith("GST") or talker_msg == "$PUBX":
+            accuracy = parse_accuracy_message(fields)
+            if accuracy is not None:
+                with self.state_lock:
+                    self.horizontal_accuracy = dict(accuracy, received_at=time.monotonic())
+
     def _read_loop(self):
         while self.running:
             try:
@@ -709,6 +724,10 @@ class ZEDF9PReceiver:
             course_skew = None
             if gga_seconds is not None and self._course_time_seconds is not None:
                 course_skew = (self._course_time_seconds - gga_seconds + 43200.0) % 86400.0 - 43200.0
+            accuracy = self.horizontal_accuracy
+            accuracy_seconds = parse_nmea_time_seconds(accuracy["utc"]) if accuracy else None
+            accuracy_skew = ((accuracy_seconds - gga_seconds + 43200.0) % 86400.0 - 43200.0
+                             if accuracy_seconds is not None and gga_seconds is not None else None)
             return {
                 "valid": valid,
                 "lat": self.lat,
@@ -728,6 +747,10 @@ class ZEDF9PReceiver:
                 "alt_m": self.alt_m,
                 "diff_age_sec": self.diff_age_sec,
                 "gps_utc": self.gps_utc,
+                "hacc_m": accuracy["hacc_m"] if accuracy else None,
+                "hacc_age_sec": now - accuracy["received_at"] if accuracy else None,
+                "hacc_gga_skew_sec": accuracy_skew,
+                "hacc_source": accuracy["source"] if accuracy else "",
                 "heading_deg": self.heading_deg,
                 "position_heading_deg": self.position_heading_deg,
                 "position_heading_time_mono": self.position_heading_time_mono,
@@ -1509,6 +1532,7 @@ class MultipathNavigator:
         return result(status, command["steer_norm"], target_bearing, guard=guard,
                       throttle_blend=command["throttle_blend"], cte_rate_mps=rate,
                       predicted_cte_m=None if future is None else future - line.line_offset_m,
+                      throttle_norm=command.get("throttle_norm"),
                       prediction_corridor_clearance_m=line.bank_limit(x) - abs(x), reacquire_heading=reacquire)
 
     def update(self, boat_lat, boat_lon, boat_heading_deg, now_mono=None, heading_confident=False,
@@ -1743,7 +1767,8 @@ def open_telemetry_log(stamp=None):
             "position_speed_mps", "gps_course_deg", "gps_course_speed_mps",
             "lookahead_m", "lookahead_target_e_m", "lookahead_target_n_m", "cte_rate_mps",
             "predicted_cte_m", "prediction_status", "prediction_corridor_clearance_m", "throttle_target_blend",
-            "recovery_state"
+            "recovery_state", "hacc_m", "hacc_age_sec", "hacc_gga_skew_sec", "hacc_source",
+            *GPS_GUARD_FIELDS
         ])
         f.flush()
         print(f"[LOG] Started recording telemetry: {filepath}")
@@ -1772,9 +1797,9 @@ def main(session_stamp=None):
     parser.add_argument("--use-04", action="store_true",
                         help="Run 04_predictive_recovery whatever the strategy (same as autonomous.use_04_control)")
     parser.add_argument("--line-limit", type=float, default=None, metavar="X",
-                        help="05/07: furthest the straight line may be drawn from the centerline, +-X m on both sides")
+                        help="05/06/07: furthest the straight line may be drawn from the centerline, +-X m on both sides")
     parser.add_argument("--bank-limit", type=float, default=None, metavar="X",
-                        help="05/07: bank limit, +-X m from the centerline on both sides")
+                        help="05/06/07: bank limit, +-X m from the centerline on both sides")
     for side in ("left", "right"):
         parser.add_argument(f"--line-{side}", type=float, default=None, metavar="X",
                             help=f"07: line limit on the {side} only, X m from the centerline (JSON line_{side}_m)")
@@ -1806,7 +1831,9 @@ def main(session_stamp=None):
     except ValueError as exc:
         parser.error(str(exc))
 
-    heading_selector = MotionHeadingSelector(auto_strategy.options) if auto_strategy.uses_gps_course else None
+    guarded = getattr(auto_strategy, "uses_gps_guard", False) is True
+    heading_selector = (MotionHeadingSelector(auto_strategy.options)
+                        if auto_strategy.uses_gps_course and not guarded else None)
 
     if serial is None or SMBus is None:
         print("[ERROR] Required packages (pyserial, smbus2) are not installed.")
@@ -1833,6 +1860,7 @@ def main(session_stamp=None):
 
     try:
         navigator = MultipathNavigator(paths, nav_params, strategy=auto_strategy)
+        gps_guard = GpsAwareController(navigator) if guarded else None
     except ValueError as exc:
         parser.error(str(exc))
 
@@ -1906,6 +1934,7 @@ def main(session_stamp=None):
     mode = "MANUAL"
     last_esc_us = pwm_cfg["esc_neutral_us"]
     last_recovery_state = ""
+    last_guard_status = None
     right_steer_hold_start = None
     last_no_gps_warn_t = 0.0
     last_non_rtk_warn_t = 0.0
@@ -1930,10 +1959,10 @@ def main(session_stamp=None):
     print(f"  - AUTO throttle  : {auto_strategy.describe_throttle(auto_cruise_us, pwm_cfg['esc_fwd_max_us'])}")
     print(f"  - Finish margin  : {navigator.finish_margin_m:g} m beyond the final waypoint")
     rec_o = recovery.options
-    print(f"  - Stuck recovery : " + (
+    print(f"  - Stuck recovery : " + ("OFF (mode 06 uses GPS-quality holds)" if guarded else (
         f"ON (below {rec_o['stuck_speed_mps']:g} m/s for {rec_o['stuck_sec']:g} s -> reverse "
         f"{100 * rec_o['reverse_throttle']:.0f}% for {rec_o['reverse_sec']:g} s, up to {rec_o['max_attempts']} tries)"
-        if recovery.enabled else "OFF"))
+        if recovery.enabled else "OFF")))
     if navigator.line_guidance is not None and auto_strategy.options["test_square"]:
         print("  - TEST SQUARE    : AUTO drives the test rectangles, then stops (not a race run)")
     print("  - MANUAL -> AUTO : Hold neutral throttle + right steering for 2.0 seconds (then transmitter steering is ignored)")
@@ -1995,6 +2024,8 @@ def main(session_stamp=None):
                 if heading_selector is not None:
                     heading_selector.reset()
                     auto_strategy.suspend()
+                if gps_guard is not None:
+                    gps_guard.reset()
                 if mode == "AUTO":
                     mode = "MANUAL"
                     print("\n[FAILSAFE] RC receiver signal lost -> stopping in neutral and switching to MANUAL")
@@ -2022,6 +2053,8 @@ def main(session_stamp=None):
             nav_info = None
 
             if mode == "MANUAL":
+                if gps_guard is not None:
+                    gps_guard.observe_manual(gps_snap, th_norm, loop_t0)
                 if heading_selector is not None:
                     heading_selector.observe_manual(gps_snap, th_norm, loop_t0)
                 servo_us = map_norm_to_pwm(
@@ -2066,30 +2099,43 @@ def main(session_stamp=None):
                                 reused = heading_selector.enter_auto(gps_snap, loop_t0)
                                 heading_info = heading_selector.select(gps_snap, loop_t0)
                                 log_event(f"[AUTO HEADING] {'Reusing forward GPS course' if reused else 'Acquiring forward motion'}")
-                            lane, wp_no, init_dist = navigator.enter_auto_mode(
-                                gps_snap["lat"], gps_snap["lon"], now_mono=loop_t0
-                            )
-                            if navigator.line_guidance is not None:
-                                log_event(navigator.describe_line())
                             recovery.reset(loop_t0)
                             mode = "AUTO"
-                            servo_us = pwm_cfg["servo_center_us"]
-                            esc_us = auto_cruise_us
-                            print(
-                                f"\n[MODE CHANGE] >>> Entering AUTO mode! Initial nearest path: '{lane.upper()}' "
-                                f"(target ahead: WP #{wp_no}, distance to path: {init_dist:.2f}m, fix: {fq_str})"
-                            )
+                            if gps_guard is not None:
+                                # The guard also owns the first AUTO command; never launch at legacy cruise.
+                                nav_info = gps_guard.enter_auto(gps_snap, loop_t0)
+                                heading_info = gps_guard.heading_info
+                                servo_us = map_norm_to_pwm(nav_info["steer_norm"], pwm_cfg["servo_center_us"],
+                                                           pwm_cfg["servo_left_us"], pwm_cfg["servo_right_us"])
+                                esc_us = map_norm_to_pwm(nav_info["throttle_norm"], pwm_cfg["esc_neutral_us"],
+                                                         pwm_cfg["esc_rev_max_us"], pwm_cfg["esc_fwd_max_us"])
+                                log_event("[MODE CHANGE] AUTO armed with GPS guard; qualifying observations")
+                            else:
+                                lane, wp_no, init_dist = navigator.enter_auto_mode(
+                                    gps_snap["lat"], gps_snap["lon"], now_mono=loop_t0
+                                )
+                                if navigator.line_guidance is not None:
+                                    log_event(navigator.describe_line())
+                                servo_us = pwm_cfg["servo_center_us"]
+                                esc_us = auto_cruise_us
+                                print(
+                                    f"\n[MODE CHANGE] >>> Entering AUTO mode! Initial nearest path: '{lane.upper()}' "
+                                    f"(target ahead: WP #{wp_no}, distance to path: {init_dist:.2f}m, fix: {fq_str})"
+                                )
                 else:
                     right_steer_hold_start = None
 
             else:
                 # ==================== AUTO mode ====================
                 # Stuck recovery: forward command but no GPS speed -> neutral, reverse, neutral, then retry.
-                rec_cmd = recovery.update(loop_t0, last_esc_us > pwm_cfg["esc_neutral_us"],
+                rec_cmd = (recovery.update(loop_t0, last_esc_us > pwm_cfg["esc_neutral_us"],
                                           gps_snap.get("sog_mps") if gps_snap["valid"] else None)
+                           if gps_guard is None else None)
                 # 1) Ignore transmitter steering (st_norm); monitor for full reverse throttle.
                 if th_norm <= -ms_cfg["full_reverse_ratio_threshold"]:
                     mode = "MANUAL"
+                    if gps_guard is not None:
+                        gps_guard.reset()
                     if heading_selector is not None:
                         heading_selector.reset()
                         auto_strategy.suspend()
@@ -2102,6 +2148,21 @@ def main(session_stamp=None):
                         pwm_cfg["esc_fwd_max_us"]
                     )
                     print("\n[MANUAL RETURN] <<< Full reverse detected on the transmitter -> switching immediately to MANUAL mode!")
+
+                elif gps_guard is not None:
+                    # Validate raw positions before they can steer, advance the route, or finish.
+                    nav_info = gps_guard.update(gps_snap, loop_t0)
+                    heading_info = gps_guard.heading_info
+                    if nav_info["finished"]:
+                        mode = "MANUAL"
+                        servo_us = pwm_cfg["servo_center_us"]
+                        esc_us = pwm_cfg["esc_neutral_us"]
+                        log_event("[COURSE COMPLETE] GPS-guarded finish reached; neutral and MANUAL")
+                    else:
+                        servo_us = map_norm_to_pwm(nav_info["steer_norm"], pwm_cfg["servo_center_us"],
+                                                   pwm_cfg["servo_left_us"], pwm_cfg["servo_right_us"])
+                        esc_us = map_norm_to_pwm(nav_info["throttle_norm"], pwm_cfg["esc_neutral_us"],
+                                                 pwm_cfg["esc_rev_max_us"], pwm_cfg["esc_fwd_max_us"])
 
                 elif not gps_snap["valid"]:
                     # Stop in neutral without abrupt steering during a temporary GPS outage.
@@ -2197,6 +2258,13 @@ def main(session_stamp=None):
                                 + thr_blend * (pwm_cfg["esc_fwd_max_us"] - auto_cruise_us)
                             ))
 
+            if gps_guard is not None and nav_info is not None:
+                guard_status = (nav_info.get("gps_guard_state"), nav_info.get("gps_guard_reason"))
+                if guard_status != last_guard_status:
+                    log_event("[GPS GUARD] " + json.dumps(
+                        {key: nav_info.get(key) for key in GPS_GUARD_FIELDS}, sort_keys=True))
+                    last_guard_status = guard_status
+
             # 4) Write the servo and ESC hardware outputs.
             pca.set_pwm_us(servo_ch, servo_us)
             pca.set_pwm_us(esc_ch, esc_us)
@@ -2210,11 +2278,15 @@ def main(session_stamp=None):
             if mode == "AUTO" and nav_info is not None and not nav_info["finished"]:
                 guard_tag = "[WALL GUARD]" if nav_info["boundary_guard"] else ""
                 thr_pct = int(round(100.0 * nav_info.get("throttle_blend", 0.0)))
+                cte_text = (f"{nav_info['cte_right_m']:+5.2f}" if nav_info.get("cte_right_m") is not None else " N/A ")
+                target_text = (f"{nav_info['target_bearing_deg']:5.1f}" if nav_info.get("target_bearing_deg") is not None else " N/A ")
+                power_text = (f"{nav_info['gps_guard_state']} Throttle:{100 * nav_info['throttle_norm']:3.0f}%"
+                              if gps_guard is not None else f"Boost:{thr_pct:3d}%")
                 status_line = (
                     f"\r[AUTO:{nav_info['active_lane'].upper():6s}{guard_tag}] "
-                    f"WP#{nav_info['wp_number']:02d} | CTE:{nav_info['cte_right_m']:+5.2f}m | "
-                    f"Heading:{hdg_txt}deg->Target:{nav_info['target_bearing_deg']:5.1f}deg | "
-                    f"GPS:{fq_short} | Boost:{thr_pct:3d}% Servo:{servo_us:4d} ESC:{esc_us:4d}   "
+                    f"WP#{nav_info['wp_number']:02d} | CTE:{cte_text}m | "
+                    f"Heading:{hdg_txt}deg->Target:{target_text}deg | "
+                    f"GPS:{fq_short} | {power_text} Servo:{servo_us:4d} ESC:{esc_us:4d}   "
                 )
             else:
                 status_line = (
@@ -2234,9 +2306,9 @@ def main(session_stamp=None):
                         gps_snap["fix_quality"],
                         f"{gps_snap['lat']:.8f}" if gps_snap["lat"] is not None else "",
                         f"{gps_snap['lon']:.8f}" if gps_snap["lon"] is not None else "",
-                        f"{nav_info['cte_right_m']:.3f}" if nav_info else "",
+                        f"{nav_info['cte_right_m']:.3f}" if nav_info and nav_info.get("cte_right_m") is not None else "",
                         f"{heading_info['heading_deg']:.1f}" if heading_info["heading_deg"] is not None else "",
-                        f"{nav_info['target_bearing_deg']:.1f}" if nav_info else "",
+                        f"{nav_info['target_bearing_deg']:.1f}" if nav_info and nav_info.get("target_bearing_deg") is not None else "",
                         servo_us,
                         esc_us,
                         ch1_us,
@@ -2258,7 +2330,9 @@ def main(session_stamp=None):
                         *[nav_info.get(key) if nav_info else None for key in (
                             "lookahead_m", "lookahead_target_e_m", "lookahead_target_n_m", "cte_rate_mps",
                             "predicted_cte_m", "prediction_status", "prediction_corridor_clearance_m", "throttle_target_blend")],
-                        recovery_state
+                        recovery_state,
+                        *[gps_snap.get(key) for key in ("hacc_m", "hacc_age_sec", "hacc_gga_skew_sec", "hacc_source")],
+                        *[nav_info.get(key) if nav_info else None for key in GPS_GUARD_FIELDS]
                     ])
                 except OSError as exc:
                     log_event(f"[LOG WARNING] Telemetry write failed: {exc}", logging.WARNING)

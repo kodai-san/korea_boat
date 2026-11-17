@@ -485,6 +485,123 @@ class StraightLineStrategy(ConstantCruiseStrategy):
         )
 
 
+class GpsAwareStrategy(StraightLineStrategy):
+    """Straight-line steering with GPS-qualified, absolute power from GpsAwareController.
+
+    This low-level strategy cannot authorize propulsion. The guard supplies
+    accepted observations, marks only qualified FIX headings confident for trim
+    learning, and replaces the neutral throttle command after applying its caps.
+    """
+
+    name = "06_gps_aware"
+    uses_gps_guard = True
+    guard_default_options = {
+        "position_max_age_sec": 0.6,
+        "accuracy_max_age_sec": 1.0,
+        "accuracy_max_skew_sec": 0.25,
+        "retain_stale_accuracy": True,
+        "race_throttle": 1.0,
+        "float_throttle": 0.7,
+        "dgps_throttle": 0.5,
+        "gps_throttle": 0.3,
+        "boundary_throttle": 0.35,
+        "throttle_rise_per_sec": 0.5,
+        "qualification_sec": 2.0,
+        "qualification_fixes": 5,
+        "max_hdop": 2.5,
+        "min_satellites": 8,
+        "max_correction_age_sec": 10.0,
+        "fixed_uncertainty_m": 0.25,
+        "float_uncertainty_m": 0.75,
+        "dgps_uncertainty_m": 1.25,
+        "gps_uncertainty_m": 1.5,
+        "accuracy_multiplier": 2.0,
+        "uncertainty_growth_mps": 0.5,
+        "hull_margin_m": 0.25,
+        "min_clearance_m": 0.25,
+        "race_clearance_m": 0.75,
+        "race_max_heading_error_deg": 20.0,
+        "race_max_cte_m": 0.5,
+        "jump_tolerance_m": 1.0,
+        "innovation_growth_mps": 0.5,
+        "max_speed_mps": 4.0,
+        "max_source_gap_sec": 2.0,
+        "source_clock_tolerance_sec": 0.5,
+        "max_reacquire_shift_m": 3.0,
+        "launch_throttle": 0.3,
+        "launch_timeout_sec": 1.5,
+        "launch_min_clearance_m": 1.0,
+        "degraded_launch_min_clearance_m": 0.5,
+        "launch_heading_memory_sec": 5.0,
+        "auto_resume": True,
+    }
+    default_options = dict(StraightLineStrategy.default_options, **guard_default_options)
+    option_limits = dict(StraightLineStrategy.option_limits, **{
+        key: (0.0, 1.0 if key.endswith("_throttle") else
+              180.0 if key == "race_max_heading_error_deg" else None)
+        for key, value in guard_default_options.items() if not isinstance(value, bool)
+    })
+
+    @classmethod
+    def validate_options(cls, options):
+        resolved = super().validate_options(options)
+        if resolved["test_square"]:
+            raise ValueError(f"autonomous.{cls.name}.test_square is unsupported; use 05_straight_line")
+        for key in ("auto_resume", "retain_stale_accuracy"):
+            if not isinstance(resolved[key], bool):
+                raise ValueError(f"autonomous.{cls.name}.{key} must be true or false")
+        for key, minimum in (("qualification_fixes", 2), ("min_satellites", 4)):
+            if not isinstance(resolved[key], int) or isinstance(resolved[key], bool) or resolved[key] < minimum:
+                raise ValueError(f"autonomous.{cls.name}.{key} must be an integer >= {minimum}")
+        for key in ("position_max_age_sec", "accuracy_max_age_sec", "accuracy_max_skew_sec",
+                    "throttle_rise_per_sec", "qualification_sec", "max_hdop", "max_correction_age_sec",
+                    "fixed_uncertainty_m", "accuracy_multiplier", "uncertainty_growth_mps",
+                    "jump_tolerance_m", "innovation_growth_mps", "max_speed_mps", "max_source_gap_sec",
+                    "source_clock_tolerance_sec", "max_reacquire_shift_m", "launch_timeout_sec",
+                    "launch_heading_memory_sec"):
+            if resolved[key] <= 0.0:
+                raise ValueError(f"autonomous.{cls.name}.{key} must be greater than zero")
+        for smaller, larger in (
+                ("gps_throttle", "dgps_throttle"), ("dgps_throttle", "float_throttle"),
+                ("float_throttle", "race_throttle"), ("boundary_throttle", "race_throttle"),
+                ("launch_throttle", "float_throttle"),
+                ("fixed_uncertainty_m", "float_uncertainty_m"),
+                ("float_uncertainty_m", "dgps_uncertainty_m"),
+                ("dgps_uncertainty_m", "gps_uncertainty_m"),
+                ("accuracy_max_skew_sec", "accuracy_max_age_sec"),
+                ("position_max_age_sec", "max_source_gap_sec"),
+                ("min_clearance_m", "race_clearance_m"),
+                ("min_clearance_m", "launch_min_clearance_m"),
+                ("min_clearance_m", "degraded_launch_min_clearance_m"),
+                ("forward_acquire_sec", "launch_timeout_sec")):
+            if resolved[smaller] > resolved[larger]:
+                raise ValueError(f"autonomous.{cls.name}.{larger} must be >= {smaller}")
+        if resolved["max_speed_mps"] <= resolved["min_course_speed_mps"]:
+            raise ValueError(f"autonomous.{cls.name}.max_speed_mps must exceed min_course_speed_mps")
+        for key in ("race_clearance_m", "launch_min_clearance_m"):
+            if resolved[key] + resolved["fixed_uncertainty_m"] + resolved["hull_margin_m"] >= resolved["band_half_width_m"]:
+                raise ValueError(f"autonomous.{cls.name}.{key} plus FIX uncertainty and hull margin must fit inside band_half_width_m")
+        if resolved["race_max_cte_m"] >= resolved["band_half_width_m"]:
+            raise ValueError(f"autonomous.{cls.name}.race_max_cte_m must be inside band_half_width_m")
+        return resolved
+
+    def update(self, **kwargs):
+        command = super().update(**kwargs)
+        command["throttle_blend"] = 0.0
+        command["throttle_norm"] = 0.0
+        return command
+
+    def throttle_blend(self, cte_right_m, heading_error_deg):
+        return 0.0
+
+    def describe_throttle(self, cruise_us, full_us):
+        return (f"GPS-guarded straight line; up to {100 * self.options['race_throttle']:.0f}% forward "
+                f"({full_us} us maximum) only after FIX qualification; FLOAT <= {100 * self.options['float_throttle']:.0f}%, "
+                f"DGPS <= {100 * self.options['dgps_throttle']:.0f}% when clearance permits; "
+                f"GPS <= {100 * self.options['gps_throttle']:.0f}%; "
+                "otherwise neutral; automatic stuck reverse disabled")
+
+
 class TurnPlannerStrategy(StraightLineStrategy):
     """05's straight race line plus a turn planner and separate left/right limits.
 
@@ -584,7 +701,7 @@ class TurnPlannerStrategy(StraightLineStrategy):
 # strategies; never renumber existing modes when adding or retiring one.
 AUTO_STRATEGIES = {
     cls.name: cls for cls in (ConstantCruiseStrategy, AdaptiveThrottleStrategy, GpsCourseProgressiveStrategy,
-                            PredictiveRecoveryStrategy, StraightLineStrategy, TurnPlannerStrategy)
+                            PredictiveRecoveryStrategy, StraightLineStrategy, GpsAwareStrategy, TurnPlannerStrategy)
 }
 
 AUTO_STRATEGY_ALIASES = {
@@ -593,6 +710,7 @@ AUTO_STRATEGY_ALIASES = {
     "gps_course_progressive": GpsCourseProgressiveStrategy.name,
     "predictive_recovery": PredictiveRecoveryStrategy.name,
     "straight_line": StraightLineStrategy.name,
+    "gps_aware": GpsAwareStrategy.name,
     "turn_planner": TurnPlannerStrategy.name,
 }
 
@@ -608,7 +726,7 @@ def canonical_auto_strategy_name(name):
 
 # Settings in the autonomous section that are not strategy option blocks.
 #   use_04_control: true runs 04_predictive_recovery whatever "strategy" selects (quick way back from 05).
-#   recovery: stuck-recovery settings (recovery.py), used by every strategy.
+#   recovery: stuck-recovery settings (recovery.py), bypassed by GPS-guarded mode 06.
 FALLBACK_AUTO_STRATEGY = PredictiveRecoveryStrategy.name
 RUN_SETTINGS = ("use_04_control", "recovery")
 
@@ -648,7 +766,8 @@ def apply_run_overrides(config, strategy=None, use_04=False, line_limit_m=None, 
                         bank_left_m=None, bank_right_m=None, turn_planner=None, three_point_turns=None):
     """Return a copy of the autonomous section with command-line choices applied (None keeps the JSON).
 
-    The line/bank limit and test-square choices go to 07's block when 07 is selected, otherwise to 05's.
+    The line/bank limit and test-square choices go to the selected strategy's block when that is 06 or 07,
+    otherwise to 05's.
     line_limit_m / bank_limit_m set both sides; the per-side values, turn_planner and three_point_turns exist
     only in 07.
     """
@@ -668,7 +787,7 @@ def apply_run_overrides(config, strategy=None, use_04=False, line_limit_m=None, 
         if any(value is not None for value in per_side.values()):
             raise ValueError("per-side limits, the turn planner switch and three-point turns apply to "
                              f"{TurnPlannerStrategy.name} only (select it with --auto-strategy)")
-        target = StraightLineStrategy.name
+        target = GpsAwareStrategy.name if config["strategy"] == GpsAwareStrategy.name else StraightLineStrategy.name
         line_options = {"line_max_offset_m": line_limit_m, "band_half_width_m": bank_limit_m,
                         "test_square": test_square}
     line_options = {key: value for key, value in line_options.items() if value is not None}
