@@ -1,0 +1,115 @@
+{
+  "hardware": {
+    "arduino_port": "/dev/ttyACM0",
+    "arduino_baud": 115200,
+    "gps_port": "auto",
+    "gps_baud": 115200,
+    "i2c_bus": 0,
+    "pca9685_addr": 64,
+    "pca9685_freq_hz": 50,
+    "servo_channel": 0,
+    "esc_channel": 1
+  },
+  "rc": {
+    "steer_neutral_us": 1495,
+    "steer_left_us": 1997,
+    "steer_right_us": 1001,
+    "steer_deadband_us": 30,
+    "throttle_neutral_us": 1514,
+    "throttle_fwd_us": 1907,
+    "throttle_rev_us": 1112,
+    "throttle_deadband_us": 35
+  },
+  "pwm": {
+    "servo_center_us": 1750,
+    "servo_left_us": 2130,
+    "servo_right_us": 1030,
+    "esc_neutral_us": 1800,
+    "esc_fwd_max_us": 1990,
+    "esc_rev_max_us": 1650,
+    "auto_throttle_ratio": 1.0
+  },
+  "mode_switch": {
+    "right_steer_ratio_threshold": 0.75,
+    "right_steer_hold_sec": 2.0,
+    "full_reverse_ratio_threshold": 0.75
+  },
+  "navigation": {
+    "finish_margin_m": 1.0
+  },
+  "autonomous": {
+    "strategy": "05_straight_line",
+    "use_04_control": true,
+    "recovery": {
+      "enabled": true,
+      "stuck_speed_mps": 0.15,
+      "stuck_sec": 1.5,
+      "startup_grace_sec": 3.0,
+      "neutral_sec": 0.3,
+      "reverse_sec": 2.0,
+      "reverse_throttle": 0.6,
+      "max_attempts": 3
+    },
+    "02_adaptive_throttle": {
+      "full_throttle_cte_m": 0.30,
+      "full_throttle_heading_deg": 11.0
+    },
+    "03_gps_course_progressive": {
+      "full_throttle_cte_m": 0.30,
+      "cruise_cte_m": 1.5,
+      "full_throttle_heading_deg": 11.0,
+      "cruise_heading_deg": 35.0,
+      "throttle_rise_per_sec": 0.5,
+      "min_course_speed_mps": 0.45,
+      "course_max_age_sec": 0.6,
+      "position_heading_max_age_sec": 0.8,
+      "forward_acquire_sec": 0.6,
+      "forward_memory_sec": 4.0
+    },
+    "04_predictive_recovery": {
+      "full_throttle_cte_m": 0.30,
+      "cruise_cte_m": 1.5,
+      "full_throttle_heading_deg": 11.0,
+      "cruise_heading_deg": 35.0,
+      "throttle_rise_per_sec": 0.5,
+      "min_course_speed_mps": 0.45,
+      "course_max_age_sec": 0.6,
+      "position_heading_max_age_sec": 0.8,
+      "forward_acquire_sec": 0.6,
+      "forward_memory_sec": 4.0,
+      "lookahead_time_sec": 1.8,
+      "lookahead_min_m": 2.4,
+      "lookahead_max_m": 5.0,
+      "prediction_horizon_sec": 1.0,
+      "prediction_min_convergence_mps": 0.05,
+      "prediction_max_path_turn_deg": 15.0,
+      "prediction_corridor_margin_m": 0.2
+    },
+    "05_straight_line": {
+      "min_course_speed_mps": 0.45,
+      "course_max_age_sec": 0.6,
+      "position_heading_max_age_sec": 0.8,
+      "forward_acquire_sec": 0.6,
+      "forward_memory_sec": 4.0,
+      "band_half_width_m": 2.5,
+      "line_max_offset_m": 1.5,
+      "guard_zone_m": 0.5,
+      "max_intercept_deg": 15.0,
+      "recovery_intercept_deg": 40.0,
+      "lookahead_time_sec": 1.8,
+      "lookahead_min_m": 2.4,
+      "lookahead_max_m": 5.0,
+      "prediction_horizon_sec": 1.0,
+      "course_gain": 1.0,
+      "course_integral_gain": 0.3,
+      "integral_limit_deg": 20.0,
+      "integral_delay_sec": 2.0,
+      "integral_max_error_deg": 20.0,
+      "test_square": false,
+      "test_leg_length_m": 15.0,
+      "test_lead_m": 3.0,
+      "test_throttle": 0.6,
+      "test_accept_m": 1.0
+    }
+  }
+}
