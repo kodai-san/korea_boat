@@ -1,9 +1,11 @@
 # ArbaLabs GPS USB stream
 
 The boat controller sends its latest ZED-F9P GGA observation to the Spresense at
-115200 baud, 8 data bits, no parity, 1 stop bit, and no flow control. Discovery,
+921600 baud, 8 data bits, no parity, 1 stop bit, and no flow control. Discovery,
 connection, writes, retries, and closing run in a dedicated background thread.
-The 20 Hz control loop does not write to this USB port.
+The 20 Hz control loop does not write to this USB port. The 921600 baud rate
+matches the reported ArbaLabs receiver setting; both ends must use this rate.
+The Arduino and ZED-F9P connections retain their separate baud settings.
 
 ## CSV protocol
 
@@ -68,8 +70,8 @@ Ambiguous matches wait for a selector instead of choosing an arbitrary port.
 
 The stock main-board USB connection uses a Silicon Labs CP210x bridge, which can
 have a generic description shared by unrelated devices. Such a device needs the
-one-time selector above. Sony documents the main-board USB serial settings as
-115200, 8N1, no flow control. ArbaLabs firmware must read this serial interface;
+one-time selector above. ArbaLabs firmware must read this serial interface at
+921600 baud, 8N1, no flow control;
 connecting the board alone does not install a CSV receiver.
 See [Sony SDK setup](https://developer.spresense.sony-semicon.com/development-guides/?lang=en&page=sdk_set_up).
 
@@ -101,6 +103,46 @@ python3 multipath_boat.py --no-spresense
 ```
 
 ## Verification
+
+The terminal and event log distinguish three sender states:
+
+- `Connected to ...: 921600 baud`: the host opened the selected serial port.
+- `USB port is open but no GPS GGA sample has arrived`: no CSV is being sent.
+  This warning repeats every 30 seconds while waiting. A no-fix GGA is enough
+  to start sending; a position fix is not required.
+- `Host write OK: ... bytes`: the host serial driver accepted a complete CSV
+  row. This appears on the first successful write after connection and every
+  30 seconds while sending. It does not acknowledge receipt by the receiver.
+
+To test raw reception indoors without relying on GPS data, stop the boat
+controller first, then run this on the Jetson. Replace `/dev/ttyUSB0` with the
+confirmed Spresense port if it differs. This sends three synthetic **no-fix**
+rows (no coordinates) five seconds apart and does not initialize boat controls:
+
+```sh
+python3 - <<'PY'
+import time
+import serial
+
+with serial.Serial("/dev/ttyUSB0", 921600, bytesize=8, parity="N", stopbits=1,
+                   timeout=0, write_timeout=0.5, xonxoff=False, rtscts=False,
+                   dsrdtr=False, exclusive=True) as port:
+    for _ in range(3):
+        row = b"000000.00,0,,,0,\n"
+        written = port.write(row)
+        print(f"Host accepted {written}/{len(row)} bytes", flush=True)
+        if written != len(row):
+            raise RuntimeError("Incomplete diagnostic write")
+        time.sleep(5)
+PY
+```
+
+Watch the receiver's raw byte count during this test. Complete host writes with
+zero received bytes rule out missing GPS samples as the cause of the test's
+silence; verify the selected device, the physical USB connection, and which
+serial interface the receiver firmware reads at 921600 baud, 8N1, no flow control.
+If test bytes arrive but normal streaming stays silent, use the sender state
+messages above to check GPS input and any write/reconnection errors.
 
 Run the offline tests without connecting motors, GPS, or a network:
 

@@ -75,6 +75,9 @@ def default_calibration():
             "right_steer_hold_sec": 2.0,
             "full_reverse_ratio_threshold": 0.75
         },
+        "navigation": {
+            "finish_margin_m": 0.0
+        },
         "autonomous": default_autonomous_config()
     }
 
