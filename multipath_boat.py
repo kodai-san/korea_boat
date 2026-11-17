@@ -81,7 +81,10 @@ NTRIP_CONFIG = {
     "mountpoint": "VRS-RTCM32",       # Team mountpoint (e.g., VRS-RTCM31, FKP-RTCM31)
     "user": "lim6246",               # NGII RTS2 account ID
     "password": "ngii",               # Password (default: ngii, or your configured password)
-    "gga_interval_sec": 5.0           # Interval for sending the current position ($GNGGA) to the VRS server (s)
+    "gga_interval_sec": 5.0,          # Interval for sending the current position ($GNGGA) to the VRS server (s)
+    # Reconnect when the stream stays open but sends nothing (2026-11-16: stalls up to 122 s while "connected"
+    # cost RTK for 31% of a run). Corrections normally arrive every 1-2 s; the F9P holds RTK ~60 s on old data.
+    "stall_timeout_sec": 8.0
 }
 
 # 2) Path CSV files (relative to the current directory)
@@ -110,7 +113,10 @@ NAV_PARAMS = {
     "boundary_gain_boost": 1.45,      # Recovery steering gain multiplier when drifting outside an outer path toward a wall
     "servo_slew_per_cycle": 0.18,     # Maximum steering change per cycle to prevent abrupt servo motion (at 20 Hz)
     "min_heading_move_m": 0.25,       # Minimum movement to update GPS heading, filtering stationary noise (m)
-    "sog_cog_blend_mps": 0.45         # Minimum speed at which to trust $GNRMC course over ground (m/s)
+    "sog_cog_blend_mps": 0.45,        # Minimum speed at which to trust $GNRMC course over ground (m/s)
+    # "blend": 50/50 of RMC course and the 0.25 m movement bearing (original).
+    # "cog": receiver Doppler course every fix above sog_cog_blend_mps, movement bearing below it.
+    "heading_source": "blend"
 }
 
 DEFAULT_CALIBRATION_FILE = "calibration.json"
@@ -503,6 +509,14 @@ class ZEDF9PReceiver:
             self._anchor_lon = new_lon
             return
 
+        if (NAV_PARAMS.get("heading_source", "blend") == "cog" and rmc_cog is not None
+                and sog_mps >= NAV_PARAMS["sog_cog_blend_mps"]):
+            # Doppler course: low noise, no 0.25 m chord lag, updated every fix while moving.
+            self.heading_deg = rmc_cog % 360.0
+            self._anchor_lat = new_lat
+            self._anchor_lon = new_lon
+            return
+
         moved_m = distance_m_between(self._anchor_lat, self._anchor_lon, new_lat, new_lon)
         if moved_m >= NAV_PARAMS["min_heading_move_m"]:
             vec_heading = bearing_deg_between(self._anchor_lat, self._anchor_lon, new_lat, new_lon)
@@ -650,6 +664,10 @@ class ZEDF9PReceiver:
                         with self.state_lock:
                             self.sog_mps = sog
                             self.cog_deg = cog
+                            # Apply the Doppler course as soon as it arrives, whatever the GGA/RMC order.
+                            if (NAV_PARAMS.get("heading_source", "blend") == "cog" and cog is not None
+                                    and self._anchor_lat is not None and sog >= NAV_PARAMS["sog_cog_blend_mps"]):
+                                self.heading_deg = cog % 360.0
             except Exception:
                 time.sleep(0.02)
 
@@ -849,9 +867,14 @@ class NGII_NtripClient:
                 sock.settimeout(2.0)
                 last_gga_sent = 0.0
                 first_data = True
+                stall_timeout = float(self.cfg.get("stall_timeout_sec", 0.0))
+                last_data_time = time.monotonic()
 
                 while self.running:
                     now = time.monotonic()
+                    if stall_timeout > 0 and now - last_data_time > stall_timeout:
+                        phase = "stall_watchdog"
+                        raise ConnectionError(f"no correction data for {now - last_data_time:.1f} s; reconnecting")
                     snap = self.gps.get_snapshot()
                     if snap["gga_raw"] and (now - last_gga_sent >= gga_interval):
                         sock.sendall((snap["gga_raw"] + "\r\n").encode("ascii"))
@@ -866,9 +889,10 @@ class NGII_NtripClient:
                             data = sock.recv(2048)
                         if not data:
                             raise ConnectionError("NTRIP stream closed")
+                        last_data_time = time.monotonic()
                         with self.state_lock:
                             self.rtcm_bytes_rx += len(data)
-                            self.last_rtcm_rx_time = time.monotonic()
+                            self.last_rtcm_rx_time = last_data_time
                         if first_data:
                             log_event(f"[NTRIP] First correction-stream data received: {len(data)} bytes")
                             first_data = False
@@ -882,7 +906,7 @@ class NGII_NtripClient:
                     self.status = "error"
                     self.last_error = f"{phase}: {exc}"
                 log_event(f"[NTRIP RECONNECT PENDING] phase={phase}, {type(exc).__name__}: {exc}", logging.WARNING)
-                time.sleep(5.0)
+                time.sleep(1.0 if phase == "stall_watchdog" else 5.0)
             finally:
                 with self.state_lock:
                     self.connected = False
