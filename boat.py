@@ -1456,24 +1456,64 @@ class GstPipeCapture:
                     pass
             self.proc = None
 
+def _v4l2_device_name(dev_path):
+    """Return the sysfs name for a /dev/videoN node, or ''."""
+    try:
+        base = os.path.basename(str(dev_path))
+        with open(f"/sys/class/video4linux/{base}/name", "r") as f:
+            return f.read().strip()
+    except Exception:
+        return ""
+
+
+def _is_csi_v4l2_node(dev_path):
+    """Jetson CSI ribbon cameras show up as vi-output-* and need nvargus, not raw V4L2."""
+    return _v4l2_device_name(dev_path).startswith("vi-output")
+
+
+def _frame_looks_valid_bgr(frame):
+    """Reject empty / solid-green CSI garbage that raw V4L2 often returns on Jetson."""
+    if frame is None or getattr(frame, "size", 0) <= 0:
+        return False
+    if len(frame.shape) != 3 or frame.shape[2] != 3:
+        return False
+    # Sample a coarse grid; pure Argus/V4L2 green dump is ~G=255, R≈B≈0.
+    sample = frame[::16, ::16]
+    mean_b, mean_g, mean_r = [float(x) for x in sample.mean(axis=(0, 1))]
+    if mean_g > 200.0 and mean_r < 40.0 and mean_b < 40.0:
+        return False
+    return True
+
+
 # 카메라 순차 탐색 및 연결
 def open_camera_with_fallback(flip_method=0):
     if not CV_AVAILABLE:
         return None
 
     def _try_v4l2(dev):
-        """Open a V4L2 device path or index; return capture if a BGR frame is readable."""
+        """Open a USB/V4L2 device; skip Jetson CSI vi-output nodes (they go green)."""
+        path = dev if isinstance(dev, str) else f"/dev/video{int(dev)}"
+        if _is_csi_v4l2_node(path):
+            return None
         for api_pref in (getattr(cv2, "CAP_V4L2", 0), 0):
             try:
                 cap = cv2.VideoCapture(dev, api_pref) if api_pref else cv2.VideoCapture(dev)
                 if cap is not None and cap.isOpened():
+                    # Many USB cams need MJPG to deliver real color frames at 640x360+.
+                    try:
+                        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+                    except Exception:
+                        pass
                     cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAM_WIDTH)
                     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAM_HEIGHT)
                     cap.set(cv2.CAP_PROP_FPS, CAM_FPS)
                     if hasattr(cv2, "CAP_PROP_BUFFERSIZE"):
-                        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                        try:
+                            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                        except Exception:
+                            pass
                     ret, frame = cap.read()
-                    if ret and frame is not None and frame.size > 0 and len(frame.shape) == 3 and frame.shape[2] == 3:
+                    if ret and _frame_looks_valid_bgr(frame):
                         return cap
                 if cap is not None:
                     cap.release()
@@ -1481,22 +1521,7 @@ def open_camera_with_fallback(flip_method=0):
                 pass
         return None
 
-    # 1순위: /dev/video0 (현재 보드에 연결된 V4L2 카메라)
-    for dev in ("/dev/video0", 0):
-        cap = _try_v4l2(dev)
-        if cap is not None:
-            add_event_log("CAMERA", "V4L2 카메라 연결 성공 (/dev/video0)", "auto")
-            return cap
-
-    # 2순위: 기타 V4L2 노드
-    for dev_idx in (1, 2):
-        cap = _try_v4l2(dev_idx)
-        if cap is not None:
-            add_event_log("CAMERA", f"V4L2/USB 카메라 연결 성공 (/dev/video{dev_idx})", "auto")
-            return cap
-
-    # 3순위: OpenCV GStreamer CSI
-    for sid in (0, 1):
+    def _try_csi_opencv(sid):
         for sw, sh in ((1280, 720), (1640, 1232)):
             try:
                 gst = build_csi_gstreamer_pipeline(
@@ -1505,26 +1530,79 @@ def open_camera_with_fallback(flip_method=0):
                 cap = cv2.VideoCapture(gst, cv2.CAP_GSTREAMER)
                 if cap is not None and cap.isOpened():
                     ret, frame = cap.read()
-                    if ret and frame is not None and frame.size > 0:
-                        add_event_log("CAMERA", f"CSI 카메라 연결 성공 (CAM{sid}, {sw}x{sh}->{CAM_WIDTH}x{CAM_HEIGHT}, flip={flip_method})", "auto")
+                    if ret and _frame_looks_valid_bgr(frame):
+                        add_event_log(
+                            "CAMERA",
+                            f"CSI 카메라 연결 성공 (CAM{sid}/dev/video{sid}, {sw}x{sh}->{CAM_WIDTH}x{CAM_HEIGHT}, flip={flip_method})",
+                            "auto",
+                        )
                         return cap
                 if cap is not None:
                     cap.release()
             except Exception:
                 pass
+        return None
 
-    # 4순위: gst-launch CSI 파이프
-    if shutil.which("gst-launch-1.0"):
+    def _try_csi_gstpipe(sid):
+        if not shutil.which("gst-launch-1.0"):
+            return None
+        try:
+            gcap = GstPipeCapture(sensor_id=sid, flip_method=flip_method)
+            ret, frame = gcap.read()
+            if ret and _frame_looks_valid_bgr(frame):
+                add_event_log(
+                    "CAMERA",
+                    f"CSI 파이 카메라(gst-launch 파이프) 연결 성공 (CAM{sid}/dev/video{sid}, flip={flip_method})",
+                    "auto",
+                )
+                return gcap
+            gcap.release()
+        except Exception:
+            pass
+        return None
+
+    # /dev/video0 on this Jetson board: prefer CSI Argus if it is a vi-output node.
+    video0_is_csi = _is_csi_v4l2_node("/dev/video0")
+    if video0_is_csi:
+        add_event_log(
+            "CAMERA",
+            f"/dev/video0={_v4l2_device_name('/dev/video0')} -> nvarguscamerasrc (raw V4L2 would be green)",
+            "auto",
+        )
+        # gst-launch BGR pipe is more reliable here than OpenCV appsink (avoids green/dmabuf).
         for sid in (0, 1):
-            try:
-                gcap = GstPipeCapture(sensor_id=sid, flip_method=flip_method)
-                ret, frame = gcap.read()
-                if ret and frame is not None and frame.size > 0:
-                    add_event_log("CAMERA", f"CSI 파이 카메라(gst-launch 파이프) 연결 성공 (CAM{sid}, flip={flip_method})", "auto")
-                    return gcap
-                gcap.release()
-            except Exception:
-                pass
+            gcap = _try_csi_gstpipe(sid)
+            if gcap is not None:
+                return gcap
+        for sid in (0, 1):
+            cap = _try_csi_opencv(sid)
+            if cap is not None:
+                return cap
+    else:
+        # Real USB/UVC camera at /dev/video0
+        for dev in ("/dev/video0", 0):
+            cap = _try_v4l2(dev)
+            if cap is not None:
+                add_event_log("CAMERA", "V4L2 카메라 연결 성공 (/dev/video0)", "auto")
+                return cap
+
+    # Other USB nodes
+    for dev_idx in (1, 2):
+        cap = _try_v4l2(dev_idx)
+        if cap is not None:
+            add_event_log("CAMERA", f"V4L2/USB 카메라 연결 성공 (/dev/video{dev_idx})", "auto")
+            return cap
+
+    # Last-resort CSI attempts (in case video0 naming was unavailable)
+    if not video0_is_csi:
+        for sid in (0, 1):
+            gcap = _try_csi_gstpipe(sid)
+            if gcap is not None:
+                return gcap
+        for sid in (0, 1):
+            cap = _try_csi_opencv(sid)
+            if cap is not None:
+                return cap
     return None
 
 # 카메라 리소스 해제
