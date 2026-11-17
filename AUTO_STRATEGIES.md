@@ -116,34 +116,47 @@ mode is unchanged.
 
 ### BALLOON GPS fallback
 
-If the camera loses the balloon, boat.py can steer to a known GPS position of the
-balloon instead. It is off until you set it up in the `balloon_gps_fallback`
-section of `calibration.json`:
+When the camera loses the balloon in BALLOON mode, boat.py works through three steps:
+
+1. **0-5 s:** keep going straight with the rudder centred (waves can drop frames).
+   `BALLOON_MEMORY_SEC` in boat.py.
+2. **5 s to `vision_lost_sec`:** turn toward the side where the balloon disappeared.
+3. **After `vision_lost_sec` (20 s):** GPS pursuit. The target is the balloon's position
+   estimated from the last good detection (the boat's GPS position, plus the distance the
+   camera measured, along the heading plus the camera angle). If the balloon was never
+   seen, the configured `lat`/`lon` is used instead. Seeing the balloon again always
+   takes over at once.
+
+It is off until you enable it in the `balloon_gps_fallback` section of `calibration.json`:
 
 ```json
 "balloon_gps_fallback": {
   "enabled": true,
-  "lat": 35.0727498,
-  "lon": 129.0826989,
+  "lat": null,
+  "lon": null,
   "vision_lost_sec": 20.0,
   "arrive_radius_m": null,
   "thrust_ratio": 0.5,
-  "timeout_sec": 120.0
+  "timeout_sec": 120.0,
+  "use_vision_estimate": true
 }
 ```
 
 | Setting | Meaning |
 | --- | --- |
-| `enabled` | `false` (default) keeps the old behaviour: turn to search for 25 s, then stop. |
-| `lat`, `lon` | The balloon's position in decimal degrees. Required when enabled. |
+| `enabled` | `false` keeps the old behaviour: turn to search for 25 s, then stop. |
+| `lat`, `lon` | Optional known balloon position in decimal degrees (both or neither). Used when no estimate exists, for example if the balloon was never seen. |
+| `use_vision_estimate` | `true` (default) remembers the balloon position from each camera detection and pursues the latest one. It needs a GPS fix and a GPS heading at the time of the detection. |
 | `vision_lost_sec` | Time without seeing the balloon before the GPS takes over (default 20). |
 | `arrive_radius_m` | Stop when this close to the position. `null` uses the vision stop distance in APPROACH_STOP, or 1.5 m in RAM_POP. |
 | `thrust_ratio` | Thrust between stop and the web page's max thrust (default 0.5). It is reduced during turns of more than 45 degrees. |
 | `timeout_sec` | Longest time in the GPS phase before it gives up and returns to MANUAL (default 120). |
 
-- **Trigger:** the balloon has not been detected for `vision_lost_sec`, and the GPS
-  has a usable fix (2, 4 or 5). Without a usable fix it keeps searching and stops
-  after 25 s as before.
+- **Trigger:** the balloon has not been detected for `vision_lost_sec`, a target exists
+  (estimate or configured position), and the GPS has a usable fix (2, 4 or 5). Otherwise
+  it keeps searching and stops after 25 s as before.
+- **Estimate accuracy:** it is only as good as the camera distance (a pinhole model of the
+  balloon size) and the GPS heading. It also assumes the balloon has not drifted since.
 - **Steering:** the same law as AUTO: heading error divided by `max_steer_angle_deg`
   (35 degrees), using the boat's GPS heading. With no heading yet it drives straight
   at low thrust, and stops if there is still none after 5 s.

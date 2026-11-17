@@ -782,7 +782,12 @@ _rc_last_pkt_mono = 0.0
 BALLOON_GPS_FALLBACK_DEFAULTS = {
     "enabled": False, "lat": None, "lon": None, "vision_lost_sec": 20.0,
     "arrive_radius_m": None, "thrust_ratio": 0.5, "timeout_sec": 120.0,
+    "use_vision_estimate": True,
 }
+# Balloon position estimated from a camera detection (boat GPS + heading + camera angle + distance):
+# detections outside this range are too noisy to be worth remembering.
+BALLOON_EST_MIN_DIST_M = 0.5
+BALLOON_EST_MAX_DIST_M = 60.0
 BALLOON_GPS_RAM_RADIUS_M = 1.5
 
 
@@ -811,10 +816,15 @@ def load_balloon_gps_fallback():
         raise ValueError("balloon_gps_fallback.enabled must be true or false")
     if not cfg["enabled"]:
         return None
-    if cfg["lat"] is None or cfg["lon"] is None:
-        raise ValueError("balloon_gps_fallback is enabled but lat and lon are not set")
-    cfg["lat"] = _fallback_number("lat", cfg["lat"], -90.0, 90.0)
-    cfg["lon"] = _fallback_number("lon", cfg["lon"], -180.0, 180.0)
+    if not isinstance(cfg["use_vision_estimate"], bool):
+        raise ValueError("balloon_gps_fallback.use_vision_estimate must be true or false")
+    if (cfg["lat"] is None) != (cfg["lon"] is None):
+        raise ValueError("balloon_gps_fallback: set both lat and lon, or neither")
+    if cfg["lat"] is None and not cfg["use_vision_estimate"]:
+        raise ValueError("balloon_gps_fallback is enabled but has no lat/lon and use_vision_estimate is false")
+    if cfg["lat"] is not None:
+        cfg["lat"] = _fallback_number("lat", cfg["lat"], -90.0, 90.0)
+        cfg["lon"] = _fallback_number("lon", cfg["lon"], -180.0, 180.0)
     cfg["vision_lost_sec"] = _fallback_number("vision_lost_sec", cfg["vision_lost_sec"], 1.0)
     cfg["thrust_ratio"] = _fallback_number("thrust_ratio", cfg["thrust_ratio"], 0.2, 1.0)
     cfg["timeout_sec"] = _fallback_number("timeout_sec", cfg["timeout_sec"], 5.0)
@@ -827,6 +837,27 @@ try:
     BALLOON_GPS_FALLBACK = load_balloon_gps_fallback()
 except (ValueError, OSError) as e:
     raise SystemExit(f"balloon_gps_fallback config error ({AUTO_CONFIG_FILE}): {e}")
+
+
+def _gps_fb_target_text(cfg):
+    parts = []
+    if cfg["use_vision_estimate"]:
+        parts.append("last-seen balloon estimate")
+    if cfg["lat"] is not None:
+        parts.append("configured ({:.7f}, {:.7f})".format(cfg["lat"], cfg["lon"]))
+    return " / ".join(parts) if parts else "no target"
+
+
+def gps_offset(lat, lon, bearing_deg, dist_m):
+    """GPS position dist_m away from (lat, lon) along bearing_deg (degrees clockwise from north)."""
+    r = 6371000.0
+    br = math.radians(bearing_deg)
+    p1 = math.radians(lat)
+    l1 = math.radians(lon)
+    d = dist_m / r
+    p2 = math.asin(math.sin(p1) * math.cos(d) + math.cos(p1) * math.sin(d) * math.cos(br))
+    l2 = l1 + math.atan2(math.sin(br) * math.sin(d) * math.cos(p1), math.cos(d) - math.sin(p1) * math.sin(p2))
+    return math.degrees(p2), (math.degrees(l2) + 540.0) % 360.0 - 180.0
 
 
 def balloon_gps_command(c_lat, c_lon, heading_deg, tgt_lat, tgt_lon, thrust_ratio):
@@ -2217,6 +2248,7 @@ def main_loop():
     balloon_gps_active = False
     balloon_gps_start_t = 0.0
     balloon_gps_heading_none_t = 0.0
+    balloon_est = None          # (lat, lon) of the balloon estimated from the last good camera detection
     balloon_last_angle_err = 0.0
     balloon_substate = "IDLE"
     balloon_arrive_count = 0
@@ -2264,7 +2296,7 @@ def main_loop():
     if BALLOON_GPS_FALLBACK is not None:
         add_event_log(
             "BALLOON",
-            f"GPS fallback ON: target ({BALLOON_GPS_FALLBACK['lat']:.7f}, {BALLOON_GPS_FALLBACK['lon']:.7f}) "
+            f"GPS fallback ON: {_gps_fb_target_text(BALLOON_GPS_FALLBACK)} "
             f"after {BALLOON_GPS_FALLBACK['vision_lost_sec']:g}s without the balloon in view",
             "auto",
         )
@@ -2495,6 +2527,7 @@ def main_loop():
                       balloon_mode_start_t = now
                       balloon_gps_active = False
                       balloon_gps_heading_none_t = 0.0
+                      balloon_est = None
                       balloon_last_seen_t = now if b_det_now else 0.0
                       balloon_substate = "TRACKING" if b_det_now else "SEARCHING"
                       filt_st, filt_th = float(ST_NEU), float(TH_NEU)
@@ -2973,6 +3006,13 @@ def main_loop():
                     angle_err = b_ang_err
                     if heading is not None:
                         target_angle = (heading + b_ang_err) % 360.0
+                        # Remember where the balloon is: boat GPS + (heading + camera angle) bearing + distance
+                        if (
+                            BALLOON_GPS_FALLBACK is not None and BALLOON_GPS_FALLBACK["use_vision_estimate"]
+                            and gps_ok and 2 <= fix_status <= 5 and c_lat is not None
+                            and BALLOON_EST_MIN_DIST_M <= b_dist <= BALLOON_EST_MAX_DIST_M
+                        ):
+                            balloon_est = gps_offset(c_lat, c_lon, target_angle, b_dist)
 
                     # 목표 거리 도달 시 정지 및 MANUAL 전환
                     if BALLOON_ACTION_MODE == "APPROACH_STOP" and (
@@ -3024,8 +3064,16 @@ def main_loop():
                         balloon_substate = "SEARCHING"
                         ref_t = balloon_last_seen_t if balloon_last_seen_t > 0.0 else balloon_mode_start_t
                         gps_fb = BALLOON_GPS_FALLBACK
+                        # Target: the balloon position estimated from the last detection, else the configured one
+                        gps_tgt = None
+                        gps_tgt_src = ""
+                        if gps_fb is not None:
+                            if balloon_est is not None:
+                                gps_tgt, gps_tgt_src = balloon_est, "last-seen estimate"
+                            elif gps_fb["lat"] is not None:
+                                gps_tgt, gps_tgt_src = (gps_fb["lat"], gps_fb["lon"]), "configured position"
                         use_gps = (
-                            gps_fb is not None and (now - ref_t) >= gps_fb["vision_lost_sec"]
+                            gps_tgt is not None and (now - ref_t) >= gps_fb["vision_lost_sec"]
                             and gps_ok and 2 <= fix_status <= 5
                         )
                         if not use_gps:
@@ -3038,13 +3086,13 @@ def main_loop():
                                 balloon_gps_heading_none_t = 0.0
                                 add_event_log(
                                     "BALLOON",
-                                    f"Balloon not seen for {now - ref_t:.0f}s -> GPS fallback to "
-                                    f"({gps_fb['lat']:.7f}, {gps_fb['lon']:.7f}), "
-                                    f"{haversine(c_lat, c_lon, gps_fb['lat'], gps_fb['lon']):.1f} m away",
+                                    f"Balloon not seen for {now - ref_t:.0f}s -> GPS pursuit of the {gps_tgt_src} "
+                                    f"({gps_tgt[0]:.7f}, {gps_tgt[1]:.7f}), "
+                                    f"{haversine(c_lat, c_lon, gps_tgt[0], gps_tgt[1]):.1f} m away",
                                     "warn",
                                 )
                             steer, drive, t_dist, target_angle, gps_err = balloon_gps_command(
-                                c_lat, c_lon, heading, gps_fb["lat"], gps_fb["lon"], gps_fb["thrust_ratio"]
+                                c_lat, c_lon, heading, gps_tgt[0], gps_tgt[1], gps_fb["thrust_ratio"]
                             )
                             angle_err = gps_err if gps_err is not None else 0.0
                             balloon_substate = "GPS_FALLBACK"
