@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
-  <title>무인 자율운항 보트 관제</title>
+  <title>USV Bridge Console</title>
   <link id="leafletCssPrimary" rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" onerror="this.onerror=null;this.href='https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.min.css';" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <script>
@@ -1138,15 +1138,15 @@
   <div id="maxGoWarnOverlay" class="warn-overlay hidden" onclick="cancelHighThrust5200()">
     <div class="warn-modal" onclick="event.stopPropagation()">
       <div class="warn-badge mono">THERMAL &amp; ESC OVERLOAD CAUTION</div>
-      <div class="warn-title">고출력 모드 (PWM 5200) 실행 경고</div>
+      <div class="warn-title">HIGH THRUST MODE (PWM 5200) WARNING</div>
       <p class="warn-desc">
-        기본 출력(4800) 대비 약 <b>212%</b>의 최대 전류가 추진 모터와 변속기(ESC)에 인가됩니다.<br />
-        과열 및 소손 방지를 위해 <b>10분 이상 연속 주행하지 마십시오.</b><br />
-        <span class="mono" style="font-size:11px; color:var(--sig-caution);">* 10분 연속 고출력 주행 시 안전 출력(4800)으로 자동 감속됩니다.</span>
+        About <b>212%</b> of the default (4800) peak current will be applied to the drive motor and ESC.<br />
+        To avoid overheating and damage, <b>do not run continuously for more than 10 minutes.</b><br />
+        <span class="mono" style="font-size:11px; color:var(--sig-caution);">* After 10 minutes of continuous high thrust, power auto-limits to the safe level (4800).</span>
       </p>
       <div class="warn-actions">
-        <button type="button" class="pid-close-btn" onclick="cancelHighThrust5200()">취소 (기존 출력 유지)</button>
-        <button type="button" class="warn-confirm-btn" onclick="confirmHighThrust5200()">확인 후 5200 적용</button>
+        <button type="button" class="pid-close-btn" onclick="cancelHighThrust5200()">CANCEL (KEEP CURRENT THRUST)</button>
+        <button type="button" class="warn-confirm-btn" onclick="confirmHighThrust5200()">CONFIRM AND APPLY 5200</button>
       </div>
     </div>
   </div>
@@ -1200,7 +1200,7 @@
               <div style="font-size:9px; color:var(--sig-caution);">MAX 10 MIN</div>
             </button>
           </div>
-          <div class="pid-guide-text">조향 중립(4500)과 정지 출력(4443)은 고정되며, 수동(RC·웹)·자율·비전 전 모드의 전진 최대 출력(MAX_GO)에 즉시 반영됩니다.</div>
+          <div class="pid-guide-text">Steer neutral (4500) and stop thrust (4443) stay fixed. MAX_GO is applied immediately in manual (RC/web), AUTO, and vision modes.</div>
         </div>
 
         <div class="pid-mode-tabs">
@@ -1209,14 +1209,14 @@
               <span>APPROACH &amp; STOP</span>
               <span class="mono" style="font-size:10px; color:var(--text-muted);">PINK SPHERE</span>
             </div>
-            <p class="pid-tab-desc">목표 도달 시 정지 후 수동 모드 전환</p>
+            <p class="pid-tab-desc">Stop on target reach, then switch to MANUAL</p>
           </button>
           <button type="button" id="tabBalloonPop" class="pid-mode-tab" onclick="selectBalloonActionMode('RAM_POP')">
             <div class="pid-tab-head">
               <span>RAM &amp; POP</span>
               <span class="mono" style="font-size:10px; color:var(--text-muted);">SMALL BALLOON</span>
             </div>
-            <p class="pid-tab-desc">최대 추력으로 목표물 관통</p>
+            <p class="pid-tab-desc">Ram the target at full thrust</p>
           </button>
         </div>
 
@@ -1281,7 +1281,7 @@
               <input id="colorInputVal" type="number" class="pid-num-input" min="30" max="240" step="5" value="80" onchange="syncColorControl('Val', this.value)" />
             </div>
           </div>
-          <div class="pid-guide-text">PICK FROM VIDEO : 미리보기에서 목표 색 클릭 잠금 / HUE·TOL·SAT·VAL : 마스크 수동 미세조정 / SHOW MASK : HSV 마스크 오버레이</div>
+          <div class="pid-guide-text">PICK FROM VIDEO: click a color on the preview to lock / HUE·TOL·SAT·VAL: fine-tune the mask / SHOW MASK: HSV mask overlay</div>
         </div>
 
         <div class="pid-param-grid">
@@ -1296,7 +1296,7 @@
               <button type="button" class="pid-step-btn" onclick="stepPidInput('visionInputDiam', 0.1, 0.2, 8.0)">+</button>
               <input id="visionInputDiam" type="number" class="pid-num-input" min="0.2" max="8.0" step="0.1" value="3.5" onchange="syncVisionSlider('Diam', this.value, 0.2, 8.0)" />
             </div>
-            <div class="pid-guide-text">실제 표적의 지름</div>
+            <div class="pid-guide-text">Real target diameter</div>
           </div>
           <div id="visionCardStopDist" class="pid-param-card">
             <div class="pid-param-top">
@@ -1317,7 +1317,7 @@
               <button type="button" class="pid-step-btn" onclick="stepPidInput('visionInputStopArea', 2.0, 5.0, 80.0)">+</button>
               <input id="visionInputStopArea" type="number" class="pid-num-input" min="5.0" max="80.0" step="1.0" value="30.0" onchange="syncVisionSlider('StopArea', this.value, 5.0, 80.0)" />
             </div>
-            <div class="pid-guide-text">계산된 거리가 DIST(m) 이하로 가까워지거나,<br>화면 대비 표적 면적이 AREA(%) 이상 커지면 도착 판정</div>
+            <div class="pid-guide-text">Arrive when estimated range is at or below DIST(m),<br>or target area is at or above AREA(%) of the frame</div>
           </div>
         </div>
       </div>
@@ -1329,65 +1329,65 @@
               <span>P CONTROL</span>
               <span class="mono" style="font-size:10px; color:var(--text-muted);">BASIC</span>
             </div>
-            <p class="pid-tab-desc">목표 방위각과 현재 선수각의 각도 오차에만 비례하여 조향</p>
+            <p class="pid-tab-desc">Steer proportional only to heading error vs target bearing</p>
           </button>
           <button type="button" id="tabBtnModePID" class="pid-mode-tab" onclick="selectModalCtrlMode('PID')">
             <div class="pid-tab-head">
               <span>PID CONTROL</span>
               <span class="mono" style="font-size:10px; color:var(--text-muted);">DAMPED</span>
             </div>
-            <p class="pid-tab-desc">비례 제어에 회전 관성 제어와 쏠림 보정을 결합하여 조향</p>
+            <p class="pid-tab-desc">Steer with proportional control plus yaw damping and drift correction</p>
           </button>
         </div>
 
         <div class="pid-preset-bar">
           <span style="font-size:10.5px; font-weight:700; color:var(--text-muted);">PRESETS:</span>
-          <button type="button" class="pid-preset-btn" onclick="applyPidPreset('P', 15.0, 0.0, 0.0, 15.0)">P DEFAULT (평수면 - 기본)</button>
-          <button type="button" class="pid-preset-btn" onclick="applyPidPreset('PID', 15.0, 0.0, 3.5, 15.0)">STABLE PD (좌우 흔들림 억제)</button>
-          <button type="button" class="pid-preset-btn" onclick="applyPidPreset('PID', 15.0, 0.4, 3.5, 15.0)">DRIFT PID (조류 및 횡풍 보정)</button>
-          <button type="button" class="pid-preset-btn" onclick="applyPidPreset('PID', 12.5, 0.3, 4.5, 12.0)">SMOOTH PID (고속 조향)</button>
+          <button type="button" class="pid-preset-btn" onclick="applyPidPreset('P', 15.0, 0.0, 0.0, 15.0)">P DEFAULT (calm water)</button>
+          <button type="button" class="pid-preset-btn" onclick="applyPidPreset('PID', 15.0, 0.0, 3.5, 15.0)">STABLE PD (reduce sway)</button>
+          <button type="button" class="pid-preset-btn" onclick="applyPidPreset('PID', 15.0, 0.4, 3.5, 15.0)">DRIFT PID (current / crosswind)</button>
+          <button type="button" class="pid-preset-btn" onclick="applyPidPreset('PID', 12.5, 0.3, 4.5, 12.0)">SMOOTH PID (high-speed steering)</button>
         </div>
 
         <div class="pid-live-strip mono">
           <div class="pid-live-cell"><span>ERR</span><b id="modalLiveErr">0.0°</b></div>
-          <div class="pid-live-cell"><span>P 보정</span><b id="modalLiveP">0.0</b></div>
-          <div class="pid-live-cell"><span>I 보정</span><b id="modalLiveI">0.0</b></div>
-          <div class="pid-live-cell"><span>D 보정</span><b id="modalLiveD">0.0</b></div>
+          <div class="pid-live-cell"><span>P TERM</span><b id="modalLiveP">0.0</b></div>
+          <div class="pid-live-cell"><span>I TERM</span><b id="modalLiveI">0.0</b></div>
+          <div class="pid-live-cell"><span>D TERM</span><b id="modalLiveD">0.0</b></div>
           <div class="pid-live-cell"><span>SERVO PWM</span><b id="modalLivePwm">4500</b></div>
         </div>
 
         <div class="pid-param-grid">
           <div class="pid-param-card">
-            <div class="pid-param-top"><span class="pid-param-name">Kp (기본 반응 강도)</span><span class="pid-param-role mono">GAIN</span></div>
+            <div class="pid-param-top"><span class="pid-param-name">Kp (response gain)</span><span class="pid-param-role mono">GAIN</span></div>
             <div class="pid-control-row mono">
               <button type="button" class="pid-step-btn" onclick="stepPidInput('pidInputKp', -0.5, 1.0, 45.0)">-</button>
               <input id="pidSliderKp" type="range" class="pid-slider" min="1.0" max="45.0" step="0.5" value="15.0" oninput="syncPidInputFromSlider('Kp', this.value)" />
               <button type="button" class="pid-step-btn" onclick="stepPidInput('pidInputKp', 0.5, 1.0, 45.0)">+</button>
               <input id="pidInputKp" type="number" class="pid-num-input" min="1.0" max="45.0" step="0.5" value="15.0" onchange="syncPidSliderFromInput('Kp', this.value, 1.0, 45.0)" />
             </div>
-            <div class="pid-guide-text">경로 복귀가 느리면 값을 올리고 좌우로 진동하면 값을 내려야 함</div>
+            <div class="pid-guide-text">Raise if path recovery is slow; lower if the boat oscillates left/right</div>
           </div>
 
           <div id="pidCardKd" class="pid-param-card disabled-card">
-            <div class="pid-param-top"><span class="pid-param-name">Kd (회전 브레이크 감도)</span><span class="pid-param-role mono">DAMPING</span></div>
+            <div class="pid-param-top"><span class="pid-param-name">Kd (yaw damping)</span><span class="pid-param-role mono">DAMPING</span></div>
             <div class="pid-control-row mono">
               <button type="button" class="pid-step-btn" onclick="stepPidInput('pidInputKd', -0.5, 0.0, 25.0)">-</button>
               <input id="pidSliderKd" type="range" class="pid-slider" min="0.0" max="25.0" step="0.5" value="3.0" oninput="syncPidInputFromSlider('Kd', this.value)" />
               <button type="button" class="pid-step-btn" onclick="stepPidInput('pidInputKd', 0.5, 0.0, 25.0)">+</button>
               <input id="pidInputKd" type="number" class="pid-num-input" min="0.0" max="25.0" step="0.5" value="3.0" onchange="syncPidSliderFromInput('Kd', this.value, 0.0, 25.0)" />
             </div>
-            <div class="pid-guide-text">선수 회전 속도가 빠를 때 미리 반대로 감쇠력을 주는 강도 (권장 : 2.5 ~ 4.5)</div>
+            <div class="pid-guide-text">Opposite damping when yaw rate is high (recommended: 2.5–4.5)</div>
           </div>
 
           <div id="pidCardKi" class="pid-param-card disabled-card">
-            <div class="pid-param-top"><span class="pid-param-name">Ki (누적 오차 보정)</span><span class="pid-param-role mono">DRIFT FIX</span></div>
+            <div class="pid-param-top"><span class="pid-param-name">Ki (integral / drift fix)</span><span class="pid-param-role mono">DRIFT FIX</span></div>
             <div class="pid-control-row mono">
               <button type="button" class="pid-step-btn" onclick="stepPidInput('pidInputKi', -0.05, 0.0, 5.0)">-</button>
               <input id="pidSliderKi" type="range" class="pid-slider" min="0.0" max="5.0" step="0.05" value="0.0" oninput="syncPidInputFromSlider('Ki', this.value)" />
               <button type="button" class="pid-step-btn" onclick="stepPidInput('pidInputKi', 0.05, 0.0, 5.0)">+</button>
               <input id="pidInputKi" type="number" class="pid-num-input" min="0.0" max="5.0" step="0.05" value="0.0" onchange="syncPidSliderFromInput('Ki', this.value, 0.0, 5.0)" />
             </div>
-            <div class="pid-guide-text">바람, 조류, 하드웨어 편차 등으로 인해 배가 한 쪽으로 꾸준히 밀릴 때 0.2 ~ 0.6 사이로 설정</div>
+            <div class="pid-guide-text">Use 0.2–0.6 when wind, current, or hardware bias steadily pushes the boat aside</div>
           </div>
 
           <div id="pidCardIMax" class="pid-param-card disabled-card">
@@ -1398,7 +1398,7 @@
               <button type="button" class="pid-step-btn" onclick="stepPidInput('pidInputIMax', 1.0, 2.0, 40.0)">+</button>
               <input id="pidInputIMax" type="number" class="pid-num-input" min="2.0" max="40.0" step="1.0" value="15.0" onchange="syncPidSliderFromInput('IMax', this.value, 2.0, 40.0)" />
             </div>
-            <div class="pid-guide-text">적분값이 과하게 쌓여 조향타가 한쪽으로 고정되는 현상을 막기 위한 최대 한도</div>
+            <div class="pid-guide-text">Cap that prevents integral windup from locking the rudder to one side</div>
           </div>
         </div>
       </div>
@@ -1414,23 +1414,23 @@
 
         <div class="pid-param-card">
           <div class="pid-param-top">
-            <span class="pid-param-name">CAMERA STREAM PROFILE (저지연 영상 전송)</span>
+            <span class="pid-param-name">CAMERA STREAM PROFILE (low-latency video)</span>
             <span class="pid-param-role mono">ALL MODES LIVE</span>
           </div>
           <div class="pid-mode-tabs">
             <button type="button" id="tabStreamLte" class="pid-mode-tab active-pid" onclick="selectModalStreamMode(true)">
               <div class="pid-tab-head">
                 <span>LTE LOW-LATENCY</span>
-                <span class="mono" style="font-size:10px; color:var(--sig-nominal);">12 FPS · 권장</span>
+                <span class="mono" style="font-size:10px; color:var(--sig-nominal);">12 FPS · recommended</span>
               </div>
-              <p class="pid-tab-desc">원격 LTE 운항 시 영상 데이터양을 줄여 조종 및 비상정지 반응 지연을 최소화 (내부 비전 연산은 30FPS 유지)</p>
+              <p class="pid-tab-desc">For LTE ops: reduce video bitrate to cut control/E-STOP latency (vision still runs at 30 FPS)</p>
             </button>
             <button type="button" id="tabStreamHq" class="pid-mode-tab" onclick="selectModalStreamMode(false)">
               <div class="pid-tab-head">
                 <span>HIGH QUALITY</span>
-                <span class="mono" style="font-size:10px; color:var(--text-muted);">25 FPS · 고화질</span>
+                <span class="mono" style="font-size:10px; color:var(--text-muted);">25 FPS · high quality</span>
               </div>
-              <p class="pid-tab-desc">근거리 통신이 원활할 때 고프레임·고화질 실시간 전방 영상 전송</p>
+              <p class="pid-tab-desc">Higher frame-rate / quality forward video when local link is strong</p>
             </button>
           </div>
         </div>
@@ -1438,12 +1438,12 @@
         <div class="pid-param-grid">
           <div class="pid-param-card">
             <div class="pid-param-top">
-              <span class="pid-param-name">LINK LOSS AUTO-HOLD (통신 끊김 정지)</span>
+              <span class="pid-param-name">LINK LOSS AUTO-HOLD (stop on disconnect)</span>
               <span class="pid-param-role mono">FAILSAFE</span>
             </div>
             <div style="display:flex; gap:6px; margin-bottom:6px;" class="mono">
-              <button type="button" id="btnModalWatchdogOn" class="pid-preset-btn" style="flex:1; padding:6px;" onclick="selectModalWatchdog(true)">ON (회복까지 제자리 정지)</button>
-              <button type="button" id="btnModalWatchdogOff" class="pid-preset-btn" style="flex:1; padding:6px;" onclick="selectModalWatchdog(false)">OFF (감시 해제)</button>
+              <button type="button" id="btnModalWatchdogOn" class="pid-preset-btn" style="flex:1; padding:6px;" onclick="selectModalWatchdog(true)">ON (hold stop until link recovers)</button>
+              <button type="button" id="btnModalWatchdogOff" class="pid-preset-btn" style="flex:1; padding:6px;" onclick="selectModalWatchdog(false)">OFF (disable watchdog)</button>
             </div>
             <div class="pid-control-row mono">
               <span style="font-size:10px; color:var(--text-muted); width:58px;">WAIT(s)</span>
@@ -1452,31 +1452,31 @@
               <button type="button" class="pid-step-btn" onclick="stepPidInput('remoteInputTimeout', 0.5, 2.0, 10.0)">+</button>
               <input id="remoteInputTimeout" type="number" class="pid-num-input" min="2.0" max="10.0" step="0.5" value="3.5" onchange="syncRemoteTimeout(this.value, true)" />
             </div>
-            <div class="pid-guide-text">중계 서버 통신이 WAIT(초) 이상 끊기면 연결이 회복될 때까지 제자리 정지(4443) 유지</div>
+            <div class="pid-guide-text">If GCS link is lost longer than WAIT(s), hold stop (4443) until it recovers</div>
           </div>
 
           <div class="pid-param-card">
             <div class="pid-param-top">
-              <span class="pid-param-name">RC OVERRIDE &amp; CAM FLIP (조종기·카메라)</span>
+              <span class="pid-param-name">RC OVERRIDE &amp; CAM FLIP (radio · camera)</span>
               <span class="pid-param-role mono">REMOTE</span>
             </div>
             <div style="display:flex; gap:6px; margin-bottom:6px;" class="mono">
-              <button type="button" id="btnModalRcShared" class="pid-preset-btn" style="flex:1; padding:6px;" onclick="selectModalRcIgnore(false)">RC + 웹 병행 (기본)</button>
-              <button type="button" id="btnModalRcWebOnly" class="pid-preset-btn" style="flex:1; padding:6px;" onclick="selectModalRcIgnore(true)">웹 단독 (RC 간섭 차단)</button>
+              <button type="button" id="btnModalRcShared" class="pid-preset-btn" style="flex:1; padding:6px;" onclick="selectModalRcIgnore(false)">RC + WEB (default)</button>
+              <button type="button" id="btnModalRcWebOnly" class="pid-preset-btn" style="flex:1; padding:6px;" onclick="selectModalRcIgnore(true)">WEB ONLY (block RC interference)</button>
             </div>
             <div style="display:flex; gap:6px;" class="mono">
-              <button type="button" id="btnModalFlip0" class="pid-preset-btn" style="flex:1; padding:6px;" onclick="selectModalCamFlip(0)">카메라 정방향 (0°)</button>
-              <button type="button" id="btnModalFlip180" class="pid-preset-btn" style="flex:1; padding:6px;" onclick="selectModalCamFlip(180)">카메라 상하반전 (180°)</button>
+              <button type="button" id="btnModalFlip0" class="pid-preset-btn" style="flex:1; padding:6px;" onclick="selectModalCamFlip(0)">Camera upright (0°)</button>
+              <button type="button" id="btnModalFlip180" class="pid-preset-btn" style="flex:1; padding:6px;" onclick="selectModalCamFlip(180)">Camera inverted (180°)</button>
             </div>
-            <div class="pid-guide-text">장거리 운항 시 '웹 단독'을 선택하면 조종기 전파 이탈 경계의 노이즈로 인한 오작동을 차단</div>
+            <div class="pid-guide-text">On long-range runs, WEB ONLY blocks false inputs from RC link-edge noise</div>
           </div>
         </div>
       </div>
 
       <div class="pid-modal-footer">
         <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
-          <button type="button" class="pid-preset-btn" onclick="selectMaxGoPreset(4800)">최대 전진 추력 초기화 (4800)</button>
-          <button type="button" class="pid-preset-btn" onclick="resetPidIntegralNow()">적분 보정값 초기화 (0)</button>
+          <button type="button" class="pid-preset-btn" onclick="selectMaxGoPreset(4800)">Reset max forward thrust (4800)</button>
+          <button type="button" class="pid-preset-btn" onclick="resetPidIntegralNow()">Reset integral term (0)</button>
           <span id="pidApplyFeedback" class="mono" style="font-size:11px; color:var(--sig-nominal);"></span>
         </div>
         <div style="display:flex; align-items:center; gap:8px;">
@@ -1563,7 +1563,7 @@
               <span id="mapPanelTitleText">ECDIS CHART · 65 WPs</span>
               <div style="display:flex; align-items:center; gap:6px;">
                 <span id="coordText" class="mono" style="color:var(--text-primary); font-weight:600;">35.073109, 129.082918</span>
-                <button id="btnExpandMapPip" type="button" class="cam-mini-btn hidden" onclick="setPrimaryViewport('MAP')">확대</button>
+                <button id="btnExpandMapPip" type="button" class="cam-mini-btn hidden" onclick="setPrimaryViewport('MAP')">EXPAND</button>
               </div>
             </div>
             <div id="map"></div>
@@ -1596,7 +1596,7 @@
                   <button type="button" class="cam-mini-btn" onclick="openColorSetupModal()">COLOR</button>
                   <button id="btnCamMaskToggle" type="button" class="cam-mini-btn" onclick="toggleCamMask()">MASK</button>
                 </span>
-                <button id="btnSwapCamViewport" type="button" class="cam-mini-btn" onclick="toggleCamPrimaryViewport()">확대</button>
+                <button id="btnSwapCamViewport" type="button" class="cam-mini-btn" onclick="toggleCamPrimaryViewport()">EXPAND</button>
               </div>
             </div>
             <div id="camStageBox" class="cam-stage" onclick="handleCameraStageClick(event)">
@@ -1667,19 +1667,19 @@
 
           <div class="info-card">
             <div class="card-label">
-              <span>WEB REMOTE DRIVE (WASD · 방향키)</span>
+              <span>WEB REMOTE DRIVE (WASD · arrow keys)</span>
               <div style="display:flex; align-items:center; gap:6px;">
                 <span class="mono"><span id="manNextWpPreview">WP 1</span> · <span id="manNextDistPreview">1.4m</span></span>
                 <button type="button" id="dpadBtnStop" class="web-dpad-btn stop-btn mono" onmousedown="emergencyStopManualHold(event)" ontouchstart="emergencyStopManualHold(event)">STOP (SPC)</button>
               </div>
             </div>
             <div class="web-dpad-grid mono">
-              <button type="button" id="dpadBtnFL" class="web-dpad-btn" onmousedown="startPointerHold('FL', event)" ontouchstart="startPointerHold('FL', event)">↖ 좌전진 (Q)</button>
-              <button type="button" id="dpadBtnF" class="web-dpad-btn" onmousedown="startPointerHold('F', event)" ontouchstart="startPointerHold('F', event)">↑ 전진 (W)</button>
-              <button type="button" id="dpadBtnFR" class="web-dpad-btn" onmousedown="startPointerHold('FR', event)" ontouchstart="startPointerHold('FR', event)">↗ 우전진 (E)</button>
-              <button type="button" id="dpadBtnL" class="web-dpad-btn" onmousedown="startPointerHold('L', event)" ontouchstart="startPointerHold('L', event)">← 좌회전 (A)</button>
-              <button type="button" id="dpadBtnB" class="web-dpad-btn" onmousedown="startPointerHold('B', event)" ontouchstart="startPointerHold('B', event)">↓ 후진 (S)</button>
-              <button type="button" id="dpadBtnR" class="web-dpad-btn" onmousedown="startPointerHold('R', event)" ontouchstart="startPointerHold('R', event)">→ 우회전 (D)</button>
+              <button type="button" id="dpadBtnFL" class="web-dpad-btn" onmousedown="startPointerHold('FL', event)" ontouchstart="startPointerHold('FL', event)">↖ FWD-LEFT (Q)</button>
+              <button type="button" id="dpadBtnF" class="web-dpad-btn" onmousedown="startPointerHold('F', event)" ontouchstart="startPointerHold('F', event)">↑ FORWARD (W)</button>
+              <button type="button" id="dpadBtnFR" class="web-dpad-btn" onmousedown="startPointerHold('FR', event)" ontouchstart="startPointerHold('FR', event)">↗ FWD-RIGHT (E)</button>
+              <button type="button" id="dpadBtnL" class="web-dpad-btn" onmousedown="startPointerHold('L', event)" ontouchstart="startPointerHold('L', event)">← LEFT (A)</button>
+              <button type="button" id="dpadBtnB" class="web-dpad-btn" onmousedown="startPointerHold('B', event)" ontouchstart="startPointerHold('B', event)">↓ REVERSE (S)</button>
+              <button type="button" id="dpadBtnR" class="web-dpad-btn" onmousedown="startPointerHold('R', event)" ontouchstart="startPointerHold('R', event)">→ RIGHT (D)</button>
             </div>
           </div>
         </div>
@@ -1852,7 +1852,7 @@
         <div id="multiPathCard" class="mid-card">
           <div class="card-label">
             <span>FAIRWAY XTE &amp; VOYAGE</span>
-            <button id="btnPathAutoMode" type="button" class="cam-mini-btn active mono" onclick="togglePathAutoMode()">AUTO 전환 ON</button>
+            <button id="btnPathAutoMode" type="button" class="cam-mini-btn active mono" onclick="togglePathAutoMode()">AUTO SWITCH ON</button>
           </div>
           <div class="path-dist-grid mono">
             <div id="distBoxLeft" class="path-dist-item" onclick="setDemoPath('Left')">
@@ -1915,10 +1915,10 @@
               <label id="pathSelectControl" class="mono" style="font-size:9.5px;">
                 PATH
                 <select id="demoPathSelect" class="inline-select" onchange="setDemoPath(this.value)">
-                  <option value="AUTO">AUTO (자동전환)</option>
-                  <option value="Center">CENTER (고정)</option>
-                  <option value="Left">PORT (고정)</option>
-                  <option value="Right">STBD (고정)</option>
+                  <option value="AUTO">AUTO (auto switch)</option>
+                  <option value="Center">CENTER (locked)</option>
+                  <option value="Left">PORT (locked)</option>
+                  <option value="Right">STBD (locked)</option>
                 </select>
               </label>
               <span id="logCountText" class="mono" style="font-size:9.5px; color:var(--sig-nominal);">REC</span>
@@ -1931,14 +1931,14 @@
   </div>
 
   <script>
-    // 해수천 3중 경로 좌표 (65 WPs)
+    // Triple canal path waypoints (65 WPs)
     const centerCoords = [[35.07310917, 129.0829184], [35.07310281, 129.0829046], [35.07309644, 129.0828908], [35.07309008, 129.082877], [35.07308371, 129.0828631], [35.07307735, 129.0828493], [35.07307098, 129.0828355], [35.07306462, 129.0828217], [35.07305825, 129.0828079], [35.07305189, 129.0827941], [35.07304552, 129.0827803], [35.07303916, 129.0827664], [35.07303279, 129.0827526], [35.07302643, 129.0827388], [35.07302006, 129.082725], [35.0730137, 129.0827112], [35.07300734, 129.0826974], [35.07300097, 129.0826836], [35.07299461, 129.0826697], [35.07298824, 129.0826559], [35.07298188, 129.0826421], [35.07297551, 129.0826283], [35.07296915, 129.0826145], [35.07296278, 129.0826007], [35.07295642, 129.0825869], [35.07295005, 129.082573], [35.07294369, 129.0825592], [35.07293732, 129.0825454], [35.07293096, 129.0825316], [35.07292459, 129.0825178], [35.07291823, 129.082504], [35.07291186, 129.0824902], [35.0729055, 129.0824764], [35.07289914, 129.0824625], [35.07289277, 129.0824487], [35.07288641, 129.0824349], [35.07288004, 129.0824211], [35.07287368, 129.0824073], [35.07286731, 129.0823935], [35.07286095, 129.0823797], [35.07285458, 129.0823658], [35.07284822, 129.082352], [35.07284185, 129.0823382], [35.07283549, 129.0823244], [35.07282912, 129.0823106], [35.07282276, 129.0822968], [35.07281639, 129.082283], [35.07281003, 129.0822691], [35.07280366, 129.0822553], [35.0727973, 129.0822415], [35.07279094, 129.0822277], [35.07278457, 129.0822139], [35.07277821, 129.0822001], [35.07277184, 129.0821863], [35.07276548, 129.0821724], [35.07275911, 129.0821586], [35.07275275, 129.0821448], [35.07274638, 129.082131], [35.07274002, 129.0821172], [35.07273365, 129.0821034], [35.07272729, 129.0820896], [35.07272092, 129.0820757], [35.07271456, 129.0820619], [35.07270819, 129.0820481], [35.07270183, 129.0820343]];
     const leftCoords = [[35.07309698, 129.0829256], [35.07309062, 129.0829118], [35.07308425, 129.082898], [35.07307789, 129.0828842], [35.07307153, 129.0828704], [35.07306517, 129.0828566], [35.0730588, 129.0828427], [35.07305244, 129.0828289], [35.07304608, 129.0828151], [35.07303972, 129.0828013], [35.07303335, 129.0827875], [35.07302699, 129.0827737], [35.07302063, 129.0827599], [35.07301427, 129.0827461], [35.0730079, 129.0827323], [35.07300154, 129.0827185], [35.07299518, 129.0827046], [35.07298881, 129.0826908], [35.07298245, 129.082677], [35.07297609, 129.0826632], [35.07296973, 129.0826494], [35.07296336, 129.0826356], [35.072957, 129.0826218], [35.07295064, 129.082608], [35.07294428, 129.0825942], [35.07293791, 129.0825804], [35.07293155, 129.0825666], [35.07292519, 129.0825527], [35.07291883, 129.0825389], [35.07291246, 129.0825251], [35.0729061, 129.0825113], [35.07289974, 129.0824975], [35.07289338, 129.0824837], [35.07288701, 129.0824699], [35.07288065, 129.0824561], [35.07287429, 129.0824423], [35.07286792, 129.0824285], [35.07286156, 129.0824147], [35.0728552, 129.0824008], [35.07284884, 129.082387], [35.07284247, 129.0823732], [35.07283611, 129.0823594], [35.07282975, 129.0823456], [35.07282339, 129.0823318], [35.07281702, 129.082318], [35.07281066, 129.0823042], [35.0728043, 129.0822904], [35.07279794, 129.0822766], [35.07279157, 129.0822628], [35.07278521, 129.0822489], [35.07277885, 129.0822351], [35.07277248, 129.0822213], [35.07276612, 129.0822075], [35.07275976, 129.0821937], [35.0727534, 129.0821799], [35.07274703, 129.0821661], [35.07274067, 129.0821523], [35.07273431, 129.0821385], [35.07272795, 129.0821247], [35.07272158, 129.0821108], [35.07271522, 129.082097], [35.07270886, 129.0820832], [35.0727025, 129.0820694], [35.07269613, 129.0820556], [35.07268977, 129.0820418]];
     const rightCoords = [[35.07312136, 129.0829112], [35.073115, 129.0828974], [35.07310863, 129.0828836], [35.07310227, 129.0828698], [35.07309589, 129.0828558], [35.07308953, 129.082842], [35.07308316, 129.0828283], [35.0730768, 129.0828145], [35.07307042, 129.0828007], [35.07306406, 129.0827869], [35.07305769, 129.0827731], [35.07305133, 129.0827591], [35.07304495, 129.0827453], [35.07303859, 129.0827315], [35.07303222, 129.0827177], [35.07302586, 129.0827039], [35.0730195, 129.0826902], [35.07301313, 129.0826764], [35.07300677, 129.0826624], [35.07300039, 129.0826486], [35.07299403, 129.0826348], [35.07298766, 129.082621], [35.0729813, 129.0826072], [35.07297492, 129.0825934], [35.07296856, 129.0825796], [35.07296219, 129.0825656], [35.07295583, 129.0825518], [35.07294945, 129.0825381], [35.07294309, 129.0825243], [35.07293672, 129.0825105], [35.07293036, 129.0824967], [35.07292398, 129.0824829], [35.07291762, 129.0824691], [35.07291127, 129.0824551], [35.07290489, 129.0824413], [35.07289853, 129.0824275], [35.07289216, 129.0824137], [35.0728858, 129.0823999], [35.07287942, 129.0823862], [35.07287306, 129.0823724], [35.07286669, 129.0823584], [35.07286033, 129.0823446], [35.07285395, 129.0823308], [35.07284759, 129.082317], [35.07284122, 129.0823032], [35.07283486, 129.0822894], [35.07282848, 129.0822756], [35.07282212, 129.0822616], [35.07281575, 129.0822478], [35.07280939, 129.0822341], [35.07280303, 129.0822203], [35.07279666, 129.0822065], [35.0727903, 129.0821927], [35.07278392, 129.0821789], [35.07277756, 129.0821649], [35.07277119, 129.0821511], [35.07276483, 129.0821373], [35.07275845, 129.0821235], [35.07275209, 129.0821097], [35.07274572, 129.082096], [35.07273936, 129.0820822], [35.07273298, 129.0820682], [35.07272662, 129.0820544], [35.07272025, 129.0820406], [35.07271389, 129.0820268]];
     const totalWaypoints = centerCoords.length;
     const totalCourseLengthM = 92.3;
 
-    // 방위각 및 거리 계산
+    // Bearing and distance helpers
     function calcBearing(lat1, lon1, lat2, lon2) {
       const p1 = lat1 * Math.PI / 180.0, p2 = lat2 * Math.PI / 180.0;
       const dl = (lon2 - lon1) * Math.PI / 180.0;
@@ -2701,7 +2701,7 @@
         pathAutoBtn.classList.toggle("active", isAutoPath);
         pathAutoBtn.style.borderColor = isAutoPath ? "" : "var(--sig-caution)";
         pathAutoBtn.style.color = isAutoPath ? "" : "var(--sig-caution)";
-        pathAutoBtn.textContent = isAutoPath ? `AUTO (${korLane})` : `${korLane} 고정 · AUTO 복귀`;
+        pathAutoBtn.textContent = isAutoPath ? `AUTO (${korLane})` : `${korLane} LOCKED · resume AUTO`;
       }
       const pathSelect = document.getElementById("demoPathSelect");
       const wantSel = isAutoPath ? "AUTO" : state.targetPath;
@@ -2911,7 +2911,7 @@
         if (camVisionActions) camVisionActions.style.display = "none";
         if (camSwapBtn) {
           camSwapBtn.classList.remove("hidden");
-          camSwapBtn.textContent = camIsMain ? "지도 크게" : "확대";
+          camSwapBtn.textContent = camIsMain ? "SHOW MAP" : "EXPAND";
         }
       }
       multiPathCard.classList.toggle("hidden", isVisionMode);
@@ -3643,7 +3643,7 @@
       if (!isLiveConnected) {
         addLog(
           "DRIVE",
-          val >= 5200 ? `MAX_GO -> 5200 (고출력 모드: 10분 이상 연속 주행 금지)` : `MAX_GO -> ${val}`,
+          val >= 5200 ? `MAX_GO -> 5200 (high thrust: do not run >10 min continuous)` : `MAX_GO -> ${val}`,
           val >= 5200 ? "warn" : "auto"
         );
       }
@@ -3863,7 +3863,7 @@
           sendBoatCommand("set_path", "AUTO");
           setTimeout(pollBoatServer, 50);
         }
-        addLog("PATH", `외란 자동 경로 전환(AUTO) 활성화 -> 현재 ${state.targetPath}`, "auto");
+        addLog("PATH", `Disturbance AUTO lane switch enabled -> current ${state.targetPath}`, "auto");
       } else if (val === "Left" || val === "Center" || val === "Right") {
         state.targetPath = val;
         state.pathAutoSwitch = false;
@@ -3871,7 +3871,7 @@
           sendBoatCommand("set_path", { path: val, auto: false });
           setTimeout(pollBoatServer, 50);
         }
-        addLog("PATH", `추종 경로 '${val}' 수동 고정 (외란 자동전환 해제)`, "warn");
+        addLog("PATH", `Lane '${val}' locked manually (AUTO disturbance switch off)`, "warn");
       }
       updateUI();
     }

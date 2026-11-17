@@ -83,7 +83,7 @@ MAX_GO_CONTINUOUS_SEC = 600.0
 STEER_GAIN = 15.0
 STEER_SIGN = 1
 
-# 조향 제어 파라미터 (P / PID)
+# 조향 control 파라미터 (P / PID)
 PID_CONFIG_FILE = os.path.join(BASE_DIR, "pid_config.json")
 STEER_CTRL_MODE = "P"
 PID_KP = 15.0
@@ -146,7 +146,7 @@ GCS_LINK_TIMEOUT_SEC = 3.5
 PCA_ADDR = 0x40
 PCA_I2C_BUS = 0
 
-# 카메라(16:9 와이드) 및 비전 제어 상수
+# 카메라(16:9 와이드) 및 비전 control 상수
 CAM_ENABLE = True
 CAM_SENSOR_WIDTH = 1280
 CAM_SENSOR_HEIGHT = 720
@@ -304,7 +304,7 @@ ser = None
 gps_ser = None
 pca = None
 
-# 시리얼 포트 연결 (흐름 제어 비활성화 및 중복 포트 제외)
+# 시리얼 포트 연결 (흐름 control 비활성화 및 중복 포트 제외)
 def open_serial_with_fallback(preferred_port, baud, prefix, exclude_port=None):
     if serial is None:
         return None
@@ -329,7 +329,7 @@ def open_serial_with_fallback(preferred_port, baud, prefix, exclude_port=None):
                 s.reset_input_buffer()
             except Exception:
                 pass
-            add_event_log("SERIAL", f"시리얼 포트 연결 성공: {port_name} ({baud} bps)", "auto")
+            add_event_log("SERIAL", f"Serial port connected: {port_name} ({baud} bps)", "auto")
             return s
         except Exception:
             continue
@@ -360,13 +360,13 @@ def init_pca9685():
             cand.frequency = 50.0
             pca = cand
             shared_state["lampSerial"] = "ok"
-            add_event_log("I2C", f"PCA9685 모터 드라이버 연결 성공 ({name}, 0x{PCA_ADDR:02x})", "auto")
+            add_event_log("I2C", f"PCA9685 motor driver connected ({name}, 0x{PCA_ADDR:02x})", "auto")
             return True
         except Exception as e:
             last_err = e
     pca = None
     shared_state["lampSerial"] = "err"
-    add_event_log("I2C", f"PCA9685 응답 없음 (Bus 0/1 모두 실패: {last_err}) -> I2C 배선/전원 확인!", "warn")
+    add_event_log("I2C", f"PCA9685 not responding (bus 0/1 failed: {last_err}) -> check I2C wiring/power!", "warn")
     return False
 
 # 주변장치(RC, GPS, PCA9685) 초기화
@@ -445,7 +445,7 @@ def load_csv_auto(filename):
     with open(filepath, "r", encoding="utf-8-sig") as f:
         rows = [r for r in csv.reader(f) if any(cell.strip() for cell in r)]
     if not rows:
-        raise ValueError(f"{filename} 파일이 비어 있습니다.")
+        raise ValueError(f"{filename} is empty.")
 
     first_row = [c.strip().lower() for c in rows[0]]
     has_header = False
@@ -461,9 +461,9 @@ def load_csv_auto(filename):
 
     if has_header:
         for i, c in enumerate(first_row):
-            if c in ("lat", "latitude", "위도") or "lat" in c:
+            if c in ("lat", "latitude") or "lat" in c:
                 lat_idx = i
-            elif c in ("lon", "lng", "long", "longitude", "경도") or "lon" in c or "lng" in c:
+            elif c in ("lon", "lng", "long", "longitude") or "lon" in c or "lng" in c:
                 lon_idx = i
 
     if lat_idx is None or lon_idx is None:
@@ -489,7 +489,7 @@ def load_csv_auto(filename):
             continue
 
     if not coords:
-        raise ValueError(f"{filename}에서 유효한 좌표를 읽지 못했습니다.")
+        raise ValueError(f"No valid coordinates in {filename}.")
     return coords
 
 # 3중 경로 정렬 상태 검증
@@ -627,7 +627,7 @@ def read_latest_rc():
             if line:
                 lines.append(line)
     except SERIAL_ERR_TYPES as e:
-        add_event_log("SERIAL", f"RC 포트 순단 감지 ({e})", "warn")
+        add_event_log("SERIAL", f"RC serial disconnect detected ({e})", "warn")
         shared_state["lampSerial"] = "err"
         try:
             ser.close()
@@ -654,7 +654,7 @@ def read_latest_rc():
             _rc_silent_reset_count += 1
             if _rc_silent_reset_count <= 2:
                 cur_port = getattr(ser, "port", RC_PORT)
-                add_event_log("SERIAL", f"RC 무응답({int(backoff_sec)}초) -> 시리얼 버퍼 정리 #{_rc_silent_reset_count}", "warn")
+                add_event_log("SERIAL", f"RC silent ({int(backoff_sec)}s) -> flush serial buffer #{_rc_silent_reset_count}", "warn")
                 try:
                     ser.reset_input_buffer()
                     ser.close()
@@ -717,7 +717,7 @@ def read_latest_gps(is_reversing=False):
                         cand_spd_kn = r_spd
                         updated = True
     except SERIAL_ERR_TYPES as e:
-        add_event_log("SERIAL", f"GPS 포트 순단 감지 ({e})", "warn")
+        add_event_log("SERIAL", f"GPS serial disconnect detected ({e})", "warn")
         shared_state["lampSerial"] = "err"
         with gps_ser_lock:
             try:
@@ -742,7 +742,7 @@ def read_latest_gps(is_reversing=False):
                 if _glitch_reject_count < 3 or (not consistent_with_cand and _glitch_reject_count < 8):
                     _glitch_reject_count += 1
                     shared_state["lampGlitch"] = "warn"
-                    add_event_log("GLITCH", f"담벼락 반사 이상치 무시 #{_glitch_reject_count} ({jump_dist:.1f}m / {jump_mps:.1f}m/s)", "warn")
+                    add_event_log("GLITCH", f"Reject wall-reflection GPS glitch #{_glitch_reject_count} ({jump_dist:.1f}m / {jump_mps:.1f}m/s)", "warn")
                     return None
 
         _glitch_reject_count = 0
@@ -797,7 +797,7 @@ def ntrip_worker():
                 continue
 
             shared_state["ntripConnected"] = True
-            add_event_log("NTRIP", f"RTCM3 보정 신호 수신 시작 ({NTRIP_MOUNT})", "ntrip")
+            add_event_log("NTRIP", f"RTCM3 corrections started ({NTRIP_MOUNT})", "ntrip")
 
             if b"\r\n\r\n" in resp:
                 body = resp.split(b"\r\n\r\n", 1)[1]
@@ -946,7 +946,7 @@ _pid_last_p = 0.0
 _pid_last_i = 0.0
 _pid_last_d = 0.0
 
-# 제어/비전 설정 파일 저장
+# control/비전 설정 파일 저장
 def save_pid_config():
     try:
         cfg = {
@@ -974,9 +974,9 @@ def save_pid_config():
         with open(PID_CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(cfg, f, indent=2, ensure_ascii=False)
     except Exception as e:
-        add_event_log("CTRL", f"설정 파일 저장 실패 ({e})", "warn")
+        add_event_log("CTRL", f"Failed to save settings file ({e})", "warn")
 
-# 저장된 제어/비전 설정 로드
+# 저장된 control/비전 설정 로드
 def load_pid_config():
     global STEER_CTRL_MODE, PID_KP, PID_KI, PID_KD, PID_I_MAX_DEG, STEER_GAIN
     global BALLOON_ACTION_MODE, BALLOON_REAL_DIAM_M, BALLOON_STOP_DIST_M, BALLOON_STOP_AREA_PCT, max_GO
@@ -1062,11 +1062,11 @@ def load_pid_config():
             shared_state["targetColorHex"] = TARGET_COLOR_HEX
         add_event_log(
             "CTRL",
-            f"저장된 설정 로드 [{STEER_CTRL_MODE}] Kp={PID_KP}, max_GO={max_GO}, 표적={BALLOON_REAL_DIAM_M}m ({BALLOON_ACTION_MODE}, 정지={BALLOON_STOP_DIST_M}m)",
+            f"Loaded saved settings [{STEER_CTRL_MODE}] Kp={PID_KP}, max_GO={max_GO}, target={BALLOON_REAL_DIAM_M}m ({BALLOON_ACTION_MODE}, stop={BALLOON_STOP_DIST_M}m)",
             "auto",
         )
     except Exception as e:
-        add_event_log("CTRL", f"설정 파일 로드 생략 ({e})", "warn")
+        add_event_log("CTRL", f"Skipped loading settings file ({e})", "warn")
 
 # PID 내부 상태 초기화
 def reset_pid_state():
@@ -1334,7 +1334,7 @@ def sample_color_from_latest_frame(u_norm, v_norm):
     with _cam_lock:
         frame = None if _latest_bgr_frame is None else _latest_bgr_frame.copy()
     if frame is None or not CV_AVAILABLE:
-        return False, "카메라 프레임이 준비되지 않았습니다."
+        return False, "Camera frame is not ready."
 
     h, w = frame.shape[:2]
     cx = int(clamp(round(float(u_norm) * w), 0, w - 1))
@@ -1369,7 +1369,7 @@ def sample_color_from_latest_frame(u_norm, v_norm):
         shared_state["targetColorHex"] = TARGET_COLOR_HEX
 
     save_pid_config()
-    return True, f"화면 클릭 색상 추출 완료 (H:{TARGET_HUE} ±{TARGET_HUE_TOL}, S≥{TARGET_SAT_MIN}, V≥{TARGET_VAL_MIN}, {TARGET_COLOR_HEX})"
+    return True, f"Click color sample complete (H:{TARGET_HUE} ±{TARGET_HUE_TOL}, S≥{TARGET_SAT_MIN}, V≥{TARGET_VAL_MIN}, {TARGET_COLOR_HEX})"
 _cam_reopen_requested = False
 _cam_flip_method = CAM_FLIP_METHOD
 _cam_show_mask = False
@@ -1533,7 +1533,7 @@ def open_camera_with_fallback(flip_method=0):
                     if ret and _frame_looks_valid_bgr(frame):
                         add_event_log(
                             "CAMERA",
-                            f"CSI 카메라 연결 성공 (CAM{sid}/dev/video{sid}, {sw}x{sh}->{CAM_WIDTH}x{CAM_HEIGHT}, flip={flip_method})",
+                            f"CSI camera connected (CAM{sid}/dev/video{sid}, {sw}x{sh}->{CAM_WIDTH}x{CAM_HEIGHT}, flip={flip_method})",
                             "auto",
                         )
                         return cap
@@ -1552,7 +1552,7 @@ def open_camera_with_fallback(flip_method=0):
             if ret and _frame_looks_valid_bgr(frame):
                 add_event_log(
                     "CAMERA",
-                    f"CSI 파이 카메라(gst-launch 파이프) 연결 성공 (CAM{sid}/dev/video{sid}, flip={flip_method})",
+                    f"CSI camera (gst-launch pipe) connected (CAM{sid}/dev/video{sid}, flip={flip_method})",
                     "auto",
                 )
                 return gcap
@@ -1583,14 +1583,14 @@ def open_camera_with_fallback(flip_method=0):
         for dev in ("/dev/video0", 0):
             cap = _try_v4l2(dev)
             if cap is not None:
-                add_event_log("CAMERA", "V4L2 카메라 연결 성공 (/dev/video0)", "auto")
+                add_event_log("CAMERA", "V4L2 camera connected (/dev/video0)", "auto")
                 return cap
 
     # Other USB nodes
     for dev_idx in (1, 2):
         cap = _try_v4l2(dev_idx)
         if cap is not None:
-            add_event_log("CAMERA", f"V4L2/USB 카메라 연결 성공 (/dev/video{dev_idx})", "auto")
+            add_event_log("CAMERA", f"V4L2/USB camera connected (/dev/video{dev_idx})", "auto")
             return cap
 
     # Last-resort CSI attempts (in case video0 naming was unavailable)
@@ -1716,7 +1716,7 @@ def detect_pink_balloon(frame, preset_name="default", flip_v4l2=False, show_mask
 def camera_worker():
     global _latest_bgr_frame, _latest_jpeg_bytes, _latest_jpeg_seq, _cam_reopen_requested, _active_cam_obj, _last_jpeg_encode_t
     if not CV_AVAILABLE:
-        add_event_log("CAMERA", "OpenCV(cv2) 미설치 -> 카메라 비전 비활성화", "warn")
+        add_event_log("CAMERA", "OpenCV (cv2) missing -> camera vision disabled", "warn")
         with state_lock:
             shared_state["lampCam"] = "err"
             shared_state["cameraOk"] = False
@@ -1765,13 +1765,13 @@ def camera_worker():
                         shared_state["lampCam"] = "warn"
                         shared_state["balloonDetected"] = False
                     if not cam_ever_connected and cam_init_fail_count == 2:
-                        add_event_log("CAMERA", "카메라 미장착 감지 -> 비전 탐색 자동 중지 (MANUAL/AUTO 정상 작동)", "warn")
+                        add_event_log("CAMERA", "No camera detected -> vision search stopped (MANUAL/AUTO still OK)", "warn")
             time.sleep(0.1)
             continue
 
         ret, frame = cap.read()
         if not ret or frame is None or frame.size == 0:
-            add_event_log("CAMERA", "파이 카메라 프레임 수신 끊김 -> 재연결 대기", "warn")
+            add_event_log("CAMERA", "Pi camera frames stopped -> waiting to reconnect", "warn")
             try:
                 cap.release()
             except Exception:
@@ -2106,14 +2106,14 @@ def web_server_worker():
         local_ip = get_local_hotspot_ip()
         ts_ip = get_tailscale_ip()
         if ts_ip:
-            add_event_log("WEB", f"웹 관제 서버 시작 -> 원격(Tailscale): http://{ts_ip}:{WEB_PORT} | 로컬: http://{local_ip}:{WEB_PORT}", "auto")
+            add_event_log("WEB", f"Web GCS server started -> remote (Tailscale): http://{ts_ip}:{WEB_PORT} | local: http://{local_ip}:{WEB_PORT}", "auto")
         else:
-            add_event_log("WEB", f"웹 관제 서버 시작 -> http://{local_ip}:{WEB_PORT} (Tailscale 연결 시 100.x.y.z:8080 접속 가능)", "auto")
+            add_event_log("WEB", f"Web GCS server started -> http://{local_ip}:{WEB_PORT} (on Tailscale, try http://100.x.y.z:8080)", "auto")
         server.serve_forever()
     except Exception as e:
-        add_event_log("WEB", f"웹 서버 시작 실패 ({e})", "warn")
+        add_event_log("WEB", f"Web server failed to start ({e})", "warn")
 
-# 50Hz 메인 제어 루프
+# 50Hz 메인 control 루프
 def main_loop():
     global _rc_read_count, _last_cog
     global STEER_CTRL_MODE, PID_KP, PID_KI, PID_KD, PID_I_MAX_DEG, STEER_GAIN, max_GO
@@ -2199,7 +2199,7 @@ def main_loop():
     if CAM_ENABLE:
         threading.Thread(target=camera_worker, daemon=True).start()
 
-    add_event_log("START", "메인 제어 루프 시작 (50Hz, MANUAL)", "auto")
+    add_event_log("START", "Main control loop started (50Hz, MANUAL)", "auto")
     loop_counter = 0
     loop_rate_t = time.time()
 
@@ -2310,19 +2310,19 @@ def main_loop():
               balloon_substate = "IDLE"
               reset_pid_state()
               safe_stop()
-              add_event_log("E-STOP", "비상 정지 작동! 모든 모터 차단", "warn")
+              add_event_log("E-STOP", "E-STOP engaged! All motors cut", "warn")
           elif cmd == "estop_off":
               estop_active = False
               current_mode = "MANUAL"
               balloon_substate = "IDLE"
               reset_pid_state()
               safe_stop()
-              add_event_log("E-STOP", "비상 정지 해제 -> MANUAL 대기", "auto")
+              add_event_log("E-STOP", "E-STOP cleared -> MANUAL idle", "auto")
           elif cmd == "set_mode" and not estop_active:
               if cmd_val == "AUTO" and current_mode != "AUTO":
                   if not gps_ok or not (2 <= fix_status <= 5):
                       safe_stop()
-                      add_event_log("FAILSAFE", f"GPS 미준비(fix={fix_status}) -> AUTO 진입 거부됨", "warn")
+                      add_event_log("FAILSAFE", f"GPS not ready (fix={fix_status}) -> AUTO entry rejected", "warn")
                   else:
                       current_mode = "AUTO"
                       mode_enter_t = now
@@ -2350,22 +2350,22 @@ def main_loop():
                       with state_lock:
                           shared_state["mode"] = current_mode
                           shared_state["targetPath"] = target_path
-                      mode_tag = "자동경로" if path_auto_switch else f"{target_path}고정"
-                      add_event_log("MODE", f"웹 명령 -> AUTO 진입 (WP {current_point + 1}, {target_path} [{mode_tag}])", "auto")
+                      mode_tag = "AUTO-LANE" if path_auto_switch else f"{target_path}-LOCKED"
+                      add_event_log("MODE", f"Web command -> AUTO (WP {current_point + 1}, {target_path} [{mode_tag}])", "auto")
               elif cmd_val == "MANUAL" and current_mode != "MANUAL":
                   current_mode = "MANUAL"
                   balloon_substate = "IDLE"
                   with state_lock:
                       shared_state["mode"] = current_mode
                   safe_stop()
-                  add_event_log("MODE", "웹 명령 -> MANUAL 전환", "warn")
+                  add_event_log("MODE", "Web command -> MANUAL", "warn")
               elif cmd_val == "BALLOON" and current_mode != "BALLOON":
                   with _cam_lock:
                       cam_ready = _vision_state["ok"] and ((now - _vision_state["last_frame_t"]) < CAM_TIMEOUT)
                       b_det_now = _vision_state["detected"]
                   if not cam_ready:
                       safe_stop()
-                      add_event_log("FAILSAFE", "파이 카메라 미준비 -> BALLOON 모드 진입 거부됨", "warn")
+                      add_event_log("FAILSAFE", "Pi camera not ready -> BALLOON entry rejected", "warn")
                   else:
                       current_mode = "BALLOON"
                       mode_enter_t = now
@@ -2381,13 +2381,13 @@ def main_loop():
                       raw_st, raw_th = None, None
                       with state_lock:
                           shared_state["mode"] = current_mode
-                      add_event_log("BALLOON", "웹 명령 -> VISION (광학 표적 추종) 모드 진입", "auto")
+                      add_event_log("BALLOON", "Web command -> VISION (optical target tracking)", "auto")
           elif cmd == "reset_wp":
               current_point = 0
               total_moved_m = 0.0
               auto_start_time = now
               reset_pid_state()
-              add_event_log("WP리셋", "WP 1로 초기화됨", "auto")
+              add_event_log("WP_RESET", "Waypoint reset to WP 1", "auto")
           elif cmd == "set_path":
               if cmd_val == "AUTO":
                   path_auto_switch = True
@@ -2401,7 +2401,7 @@ def main_loop():
                   with state_lock:
                       shared_state["pathAutoSwitch"] = True
                       shared_state["targetPath"] = target_path
-                  add_event_log("PATH", f"자율 경로 자동 전환(AUTO) 활성화 -> 현재 '{target_path}'", "auto")
+                  add_event_log("PATH", f"AUTO lane switching enabled -> current '{target_path}'", "auto")
               elif isinstance(cmd_val, dict):
                   req_p = cmd_val.get("path")
                   req_auto = cmd_val.get("auto")
@@ -2417,8 +2417,8 @@ def main_loop():
                   with state_lock:
                       shared_state["targetPath"] = target_path
                       shared_state["pathAutoSwitch"] = path_auto_switch
-                  mode_str = "외란 자동전환" if path_auto_switch else "수동 고정"
-                  add_event_log("PATH", f"추종 경로 '{target_path}' 설정 ({mode_str})", "auto")
+                  mode_str = "disturbance AUTO switch" if path_auto_switch else "manual lock"
+                  add_event_log("PATH", f"Follow lane '{target_path}' set ({mode_str})", "auto")
               elif cmd_val in PATHS:
                   target_path = cmd_val
                   path_auto_switch = False
@@ -2428,14 +2428,14 @@ def main_loop():
                   with state_lock:
                       shared_state["targetPath"] = target_path
                       shared_state["pathAutoSwitch"] = False
-                  add_event_log("PATH", f"추종 경로 '{target_path}' 수동 고정 (외란 자동전환 해제)", "auto")
+                  add_event_log("PATH", f"Follow lane '{target_path}' locked manually (AUTO disturbance switch off)", "auto")
           elif cmd == "set_ctrl_mode" and cmd_val in ("P", "PID"):
               STEER_CTRL_MODE = cmd_val
               reset_pid_state()
               with state_lock:
                   shared_state["steerCtrlMode"] = STEER_CTRL_MODE
               save_pid_config()
-              add_event_log("CTRL", f"AUTO 조향 제어 방식 변경 및 저장 -> {STEER_CTRL_MODE} 제어", "auto")
+              add_event_log("CTRL", f"AUTO steering mode changed and saved -> {STEER_CTRL_MODE} control", "auto")
           elif cmd == "set_pid_gains" and isinstance(cmd_val, dict):
               try:
                   if cmd_val.get("mode") in ("P", "PID"):
@@ -2460,14 +2460,14 @@ def main_loop():
                   save_pid_config()
                   add_event_log(
                       "CTRL",
-                      f"조향 설정 적용 및 파일 저장 완료 [{STEER_CTRL_MODE}] Kp={PID_KP}, Ki={PID_KI}, Kd={PID_KD}, IMax={PID_I_MAX_DEG}°",
+                      f"Steering settings applied and saved [{STEER_CTRL_MODE}] Kp={PID_KP}, Ki={PID_KI}, Kd={PID_KD}, IMax={PID_I_MAX_DEG}°",
                       "auto",
                   )
               except (ValueError, TypeError) as e:
-                  add_event_log("CTRL", f"PID 파라미터 형식 오류 무시됨 ({e})", "warn")
+                  add_event_log("CTRL", f"PID parameter format error ignored ({e})", "warn")
           elif cmd == "reset_pid_i":
               reset_pid_state()
-              add_event_log("CTRL", "PID 적분(I) 누적값 및 미분 상태가 0으로 초기화되었습니다.", "auto")
+              add_event_log("CTRL", "PID integral (I) and derivative state reset to 0.", "auto")
           elif cmd == "set_max_go":
               try:
                   req_max_go = int(float(cmd_val))
@@ -2484,11 +2484,11 @@ def main_loop():
                   save_pid_config()
                   pct_str = round(((max_GO - STOP) / float(DEFAULT_MAX_GO - STOP)) * 100)
                   if max_GO >= 5200:
-                      add_event_log("DRIVE", f"고출력 프리셋({max_GO}, {pct_str}%) 활성화 -> 전 모드 적용 (10분 이상 연속 주행 금지)", "warn")
+                      add_event_log("DRIVE", f"High-thrust preset ({max_GO}, {pct_str}%) enabled for all modes (do not run >10 min continuous)", "warn")
                   else:
-                      add_event_log("DRIVE", f"모터 최대 전진 속도(max_GO) 변경 -> {max_GO} (기본 대비 {pct_str}%, 전 모드 적용)", "auto")
+                      add_event_log("DRIVE", f"Max forward motor (max_GO) changed -> {max_GO} (vs default {pct_str}%, all modes)", "auto")
               except (ValueError, TypeError) as e:
-                  add_event_log("DRIVE", f"max_GO 설정 오류 무시됨 ({e})", "warn")
+                  add_event_log("DRIVE", f"max_GO setting error ignored ({e})", "warn")
           elif cmd == "set_balloon_config" and isinstance(cmd_val, dict):
               try:
                   if cmd_val.get("actionMode") in ("APPROACH_STOP", "RAM_POP"):
@@ -2514,14 +2514,14 @@ def main_loop():
                       shared_state["balloonStopDistM"] = BALLOON_STOP_DIST_M
                       shared_state["balloonStopAreaPct"] = BALLOON_STOP_AREA_PCT
                   save_pid_config()
-                  mode_kor = "근접 정지(주행완료)" if BALLOON_ACTION_MODE == "APPROACH_STOP" else "돌진 타격(터뜨리기)"
+                  mode_kor = "approach-stop" if BALLOON_ACTION_MODE == "APPROACH_STOP" else "ram-pop"
                   add_event_log(
                       "VISION",
-                      f"표적/추진 설정 저장: [{mode_kor}] 표적직경={BALLOON_REAL_DIAM_M}m, 정지거리={BALLOON_STOP_DIST_M}m, max_GO={max_GO}",
+                      f"Saved target/thrust settings: [{mode_kor}] diam={BALLOON_REAL_DIAM_M}m, stopDist={BALLOON_STOP_DIST_M}m, max_GO={max_GO}",
                       "auto",
                   )
               except (ValueError, TypeError) as e:
-                  add_event_log("VISION", f"비전 표적 설정 형식 오류 무시됨 ({e})", "warn")
+                  add_event_log("VISION", f"Vision target setting format error ignored ({e})", "warn")
           elif cmd == "set_hsv_preset" and cmd_val in HSV_PRESETS:
               _hsv_preset_name = cmd_val
               CUSTOM_COLOR_ENABLE = False
@@ -2529,7 +2529,7 @@ def main_loop():
                   shared_state["hsvPreset"] = _hsv_preset_name
                   shared_state["customColorEnable"] = False
               save_pid_config()
-              add_event_log("CAMERA", f"표적 HSV 프리셋 전환 -> '{_hsv_preset_name}'", "auto")
+              add_event_log("CAMERA", f"Target HSV preset -> '{_hsv_preset_name}'", "auto")
           elif cmd == "set_target_color" and isinstance(cmd_val, dict):
               try:
                   CUSTOM_COLOR_ENABLE = bool(cmd_val.get("customEnable", True))
@@ -2560,11 +2560,11 @@ def main_loop():
                   save_pid_config()
                   add_event_log(
                       "VISION",
-                      f"타겟 색상 지정 완료: H={TARGET_HUE}(±{TARGET_HUE_TOL}), S≥{TARGET_SAT_MIN}, V≥{TARGET_VAL_MIN} [{TARGET_COLOR_HEX}]",
+                      f"Target color set: H={TARGET_HUE}(±{TARGET_HUE_TOL}), S≥{TARGET_SAT_MIN}, V≥{TARGET_VAL_MIN} [{TARGET_COLOR_HEX}]",
                       "auto",
                   )
               except (ValueError, TypeError) as e:
-                  add_event_log("VISION", f"타겟 색상 설정 오류 무시됨 ({e})", "warn")
+                  add_event_log("VISION", f"Target color setting error ignored ({e})", "warn")
           elif cmd == "pick_color_at" and isinstance(cmd_val, dict):
               try:
                   u_n = clamp(float(cmd_val.get("u", 0.5)), 0.0, 1.0)
@@ -2572,30 +2572,30 @@ def main_loop():
                   ok_pick, msg_pick = sample_color_from_latest_frame(u_n, v_n)
                   add_event_log("VISION", msg_pick, "auto" if ok_pick else "warn")
               except (ValueError, TypeError) as e:
-                  add_event_log("VISION", f"클릭 색상 추출 오류 ({e})", "warn")
+                  add_event_log("VISION", f"Click color sample error ({e})", "warn")
           elif cmd == "toggle_cam_flip":
               _cam_flip_method = 2 if _cam_flip_method == 0 else 0
               _cam_reopen_requested = True
               shared_state["camFlip"] = 180 if _cam_flip_method == 2 else 0
-              add_event_log("CAMERA", f"파이 카메라 상하 반전 설정 -> {shared_state['camFlip']}도", "auto")
+              add_event_log("CAMERA", f"Pi camera flip set -> {shared_state['camFlip']} deg", "auto")
           elif cmd == "toggle_cam_mask":
               _cam_show_mask = not _cam_show_mask
               shared_state["camShowMask"] = _cam_show_mask
-              add_event_log("CAMERA", f"파이 카메라 HSV 마스크 전체화면 표시 -> {'ON' if _cam_show_mask else 'OFF'}", "auto")
+              add_event_log("CAMERA", f"Pi camera full-frame HSV mask -> {'ON' if _cam_show_mask else 'OFF'}", "auto")
           elif cmd == "toggle_cam_lte":
               _cam_lte_mode = not _cam_lte_mode
               with state_lock:
                   shared_state["camLteMode"] = _cam_lte_mode
-              mode_txt = "LTE 절약·저지연(12FPS)" if _cam_lte_mode else "고화질(25FPS)"
-              add_event_log("CAMERA", f"카메라 스트리밍 전송 모드 -> {mode_txt}", "auto")
+              mode_txt = "LTE low-latency (12 FPS)" if _cam_lte_mode else "High quality (25 FPS)"
+              add_event_log("CAMERA", f"Camera stream mode -> {mode_txt}", "auto")
           elif cmd == "set_rc_ignore":
               rc_ignore_mode = bool(cmd_val)
               with state_lock:
                   shared_state["rcIgnore"] = rc_ignore_mode
               if rc_ignore_mode:
-                  add_event_log("REMOTE", "웹 단독 제어 활성화 -> 조종기(RC) 전파 간섭·오버라이드 무시", "warn")
+                  add_event_log("REMOTE", "Web-only control ON -> ignore RC interference/override", "warn")
               else:
-                  add_event_log("REMOTE", "조종기(RC) 연동 복구 -> RC 수동 및 비상 오버라이드 활성", "auto")
+                  add_event_log("REMOTE", "RC link restored -> RC manual and emergency override active", "auto")
           elif cmd == "set_link_watchdog":
               gcs_watchdog_enabled = bool(cmd_val)
               if not gcs_watchdog_enabled:
@@ -2604,7 +2604,7 @@ def main_loop():
                   shared_state["linkWatchdog"] = gcs_watchdog_enabled
                   shared_state["linkPaused"] = gcs_link_paused
               save_pid_config()
-              add_event_log("LINK", f"원격 통신 끊김 자동 정지(Watchdog) -> {'ON' if gcs_watchdog_enabled else 'OFF'}", "auto")
+              add_event_log("LINK", f"Link-loss auto-hold (watchdog) -> {'ON' if gcs_watchdog_enabled else 'OFF'}", "auto")
           elif cmd == "set_remote_config" and isinstance(cmd_val, dict):
               try:
                   if cmd_val.get("camLteMode") is not None:
@@ -2632,11 +2632,11 @@ def main_loop():
                   save_pid_config()
                   add_event_log(
                       "REMOTE",
-                      f"원격/저지연 설정 저장: 영상={'LTE(12fps)' if _cam_lte_mode else 'HQ(25fps)'}, 끊김정지={'ON' if gcs_watchdog_enabled else 'OFF'}({GCS_LINK_TIMEOUT_SEC}s), RC무시={'ON' if rc_ignore_mode else 'OFF'}",
+                      f"Remote/low-latency settings saved: video={'LTE(12fps)' if _cam_lte_mode else 'HQ(25fps)'}, linkHold={'ON' if gcs_watchdog_enabled else 'OFF'}({GCS_LINK_TIMEOUT_SEC}s), rcIgnore={'ON' if rc_ignore_mode else 'OFF'}",
                       "auto",
                   )
               except (ValueError, TypeError) as e:
-                  add_event_log("REMOTE", f"원격 설정 형식 오류 무시됨 ({e})", "warn")
+                  add_event_log("REMOTE", f"Remote settings format error ignored ({e})", "warn")
           elif cmd == "web_manual_drive" and isinstance(cmd_val, dict) and not estop_active:
               try:
                   current_mode = "MANUAL"
@@ -2687,14 +2687,14 @@ def main_loop():
                     web_manual_active = False
                     reset_pid_state()
                     safe_stop()
-                    add_event_log("LINK", f"원격 관제 연결 끊김({since_gcs_hb:.1f}초) -> 연결 회복 전까지 제자리 정지", "warn")
+                    add_event_log("LINK", f"GCS link lost ({since_gcs_hb:.1f}s) -> hold stop until link recovers", "warn")
             elif gcs_link_paused and _gcs_hb_streak >= 2:
                 gcs_link_paused = False
                 stall_check_start_t = 0.0
                 heading_none_start_t = now
                 bad_fix_start_t = 0.0
                 reset_pid_state()
-                add_event_log("LINK", f"원격 관제 연결 회복 완료 -> 정지 대기 해제 ({current_mode})", "auto")
+                add_event_log("LINK", f"GCS link recovered -> hold released ({current_mode})", "auto")
         else:
             gcs_link_paused = False
 
@@ -2714,7 +2714,7 @@ def main_loop():
             time.sleep(max(0.001, 0.02 - elapsed))
             continue
 
-        # RC 비상 오버라이드 감시 (웹 단독 제어 시 RC 노이즈 무시)
+        # RC 비상 오버라이드 감시 (웹 단독 control 시 RC 노이즈 무시)
         if current_mode in ("AUTO", "BALLOON") and rc_effective_ok and ST_V is not None and TH_V is not None:
             in_normal_zone = (
                 (ST_OVERRIDE_LEFT <= ST_V <= ST_OVERRIDE_RIGHT)
@@ -2735,9 +2735,9 @@ def main_loop():
                     override_armed = False
                     last_pwm_t = 0.0
                     if prev_mode == "BALLOON":
-                        add_event_log("OVERRIDE", f"조종기 비상 조작 감지(ST:{ST_V}, TH:{TH_V}) -> BALLOON 중단 및 MANUAL 전환", "warn")
+                        add_event_log("OVERRIDE", f"RC emergency input detected (ST:{ST_V}, TH:{TH_V}) -> abort BALLOON, switch to MANUAL", "warn")
                     else:
-                        add_event_log("OVERRIDE", f"조종기 비상 조작 감지(ST:{ST_V}, TH:{TH_V}) -> 즉시 MANUAL 전환", "warn")
+                        add_event_log("OVERRIDE", f"RC emergency input detected (ST:{ST_V}, TH:{TH_V}) -> switch to MANUAL immediately", "warn")
 
         # 원격 통신 끊김 시 연결 회복 전까지 제자리 정지 유지
         if gcs_link_paused:
@@ -2746,10 +2746,10 @@ def main_loop():
             heading_none_start_t = now
             bad_fix_start_t = 0.0
             if now - last_dbg > 1.0:
-                safe_print(f"LINK_HOLD [원격 연결 회복 대기 중 -> 제자리 정지] mode={current_mode} [RTK:{fix_status}]")
+                safe_print(f"LINK_HOLD [waiting for GCS link -> holding stop] mode={current_mode} [RTK:{fix_status}]")
                 last_dbg = now
 
-        # MANUAL 모드 제어 (누르는 동안만 작동하는 모멘터리 웹 조종 & RC 수동 지원)
+        # MANUAL 모드 control (누르는 동안만 작동하는 모멘터리 웹 조종 & RC 수동 지원)
         elif current_mode == "MANUAL":
             if _pid_last_p != 0.0 or _pid_last_i != 0.0 or _pid_last_d != 0.0:
                 reset_pid_state()
@@ -2791,10 +2791,10 @@ def main_loop():
             else:
                 safe_stop()
                 if now - last_dbg > 1.5:
-                    safe_print(f"MANUAL [RC 신호 미수신!] ser={getattr(ser, 'port', None)} pca={'OK' if pca else 'FAIL'} [RTK:{fix_status}]")
+                    safe_print(f"MANUAL [RC signal missing!] ser={getattr(ser, 'port', None)} pca={'OK' if pca else 'FAIL'} [RTK:{fix_status}]")
                     last_dbg = now
 
-        # BALLOON(비전) 모드 제어
+        # BALLOON(비전) 모드 control
         elif current_mode == "BALLOON":
             with _cam_lock:
                 cam_ok = _vision_state["ok"] and ((now - _vision_state["last_frame_t"]) < CAM_TIMEOUT)
@@ -2811,7 +2811,7 @@ def main_loop():
                 safe_stop()
                 current_mode = "MANUAL"
                 balloon_substate = "IDLE"
-                add_event_log("FAILSAFE", "파이 카메라 수신 타임아웃 -> BALLOON 중단 및 MANUAL 전환", "warn")
+                add_event_log("FAILSAFE", "Pi camera timeout -> abort BALLOON, switch to MANUAL", "warn")
             else:
                 if b_detected:
                     balloon_last_seen_t = now
@@ -2835,7 +2835,7 @@ def main_loop():
                         balloon_substate = "FINISH"
                         balloon_arrive_count = 0
                         steer, drive = CENTER, STOP
-                        finish_msg = f"표적 접근 주행 완료! (거리 {b_dist:.2f}m / 면적 {b_area:.1f}%) -> 안전 정지 및 MANUAL 전환"
+                        finish_msg = f"Approach complete! (range {b_dist:.2f}m / area {b_area:.1f}%) -> safe stop and MANUAL"
                         with state_lock:
                             shared_state["balloonFinishSeq"] = shared_state.get("balloonFinishSeq", 0) + 1
                             shared_state["balloonFinishMsg"] = finish_msg
@@ -2874,7 +2874,7 @@ def main_loop():
                             safe_stop()
                             current_mode = "MANUAL"
                             balloon_substate = "IDLE"
-                            add_event_log("BALLOON", f"{int(BALLOON_SEARCH_TIMEOUT_SEC)}초간 분홍 풍선 미발견 -> 안전 정지 및 MANUAL 전환", "warn")
+                            add_event_log("BALLOON", f"{int(BALLOON_SEARCH_TIMEOUT_SEC)}s with no pink balloon found -> safe stop and MANUAL", "warn")
                             steer, drive = CENTER, STOP
                         else:
                             scan_dir = 1 if balloon_last_angle_err >= 0 else -1
@@ -2900,7 +2900,7 @@ def main_loop():
                                 balloon_substate = "IDLE"
                                 stall_check_start_t = 0.0
                                 shared_state["lampStall"] = "err"
-                                add_event_log("STALL", "8초 이상 보트 걸림 감지(BALLOON) -> 안전 정지 및 MANUAL 전환", "warn")
+                                add_event_log("STALL", "Boat stalled ≥8s (BALLOON) -> safe stop and MANUAL", "warn")
                     else:
                         stall_check_start_t = 0.0
 
@@ -2926,17 +2926,17 @@ def main_loop():
                         except Exception:
                             pass
 
-        # AUTO 모드 경로 추종
+        # AUTO 모드 경로 tracking
         else:
             balloon_substate = "IDLE" 
             if current_point >= total_waypoints:
                 safe_stop()
                 current_mode = "MANUAL"
-                add_event_log("FINISH", f"최종 WP {total_waypoints} 도착 -> MANUAL 대기", "auto")
+                add_event_log("FINISH", f"Final WP {total_waypoints} reached -> MANUAL idle", "auto")
             elif not gps_ok:
                 safe_stop()
                 current_mode = "MANUAL"
-                add_event_log("FAILSAFE", "GPS 수신 타임아웃 -> 즉시 정지 및 MANUAL 전환", "warn")
+                add_event_log("FAILSAFE", "GPS timeout -> immediate stop and MANUAL", "warn")
             else:
                 fix_abort = False
                 if not (2 <= fix_status <= 5):
@@ -2947,7 +2947,7 @@ def main_loop():
                         current_mode = "MANUAL"
                         bad_fix_start_t = 0.0
                         fix_abort = True
-                        add_event_log("FAILSAFE", f"GPS 정밀도 하락(fix={fix_status}) -> MANUAL 전환", "warn")
+                        add_event_log("FAILSAFE", f"GPS fix quality dropped (fix={fix_status}) -> switch to MANUAL", "warn")
                 else:
                     bad_fix_start_t = 0.0
 
@@ -2956,12 +2956,12 @@ def main_loop():
                     current_point = advance_index(c_lat, c_lon, target_path, current_point)
 
                     if current_point != prev_wp and current_point < total_waypoints:
-                        add_event_log("NAV", f"WP {prev_wp + 1} 통과 -> WP {current_point + 1} 추종", "auto")
+                        add_event_log("NAV", f"WP {prev_wp + 1} passed -> WP {current_point + 1} tracking", "auto")
 
                     if current_point >= total_waypoints:
                         safe_stop()
                         current_mode = "MANUAL"
-                        add_event_log("FINISH", f"최종 WP {total_waypoints} 완주 -> MANUAL 전환", "auto")
+                        add_event_log("FINISH", f"Final WP {total_waypoints} finished -> MANUAL", "auto")
                     else:
                         cand_path, dists = pick_path(c_lat, c_lon, current_point, target_path)
                         if path_auto_switch and cand_path != target_path:
@@ -2972,7 +2972,7 @@ def main_loop():
                                     path_switch_candidate = cand_path
                                     path_switch_count = 1
                                 if path_switch_count >= 2:
-                                    add_event_log("PATH", f"외란 자동 경로 전환: {target_path} -> {cand_path}", "auto")
+                                    add_event_log("PATH", f"Disturbance AUTO lane switch: {target_path} -> {cand_path}", "auto")
                                     target_path = cand_path
                                     path_switch_count = 0
                                     current_point = min(advance_index(c_lat, c_lon, target_path, current_point), total_waypoints - 1)
@@ -3011,7 +3011,7 @@ def main_loop():
                                 safe_stop()
                                 current_mode = "MANUAL"
                                 heading_abort = True
-                                add_event_log("FAILSAFE", "초기 방향각 미확보(2.5초 초과) -> 안전 정지 및 MANUAL 전환", "warn")
+                                add_event_log("FAILSAFE", "Initial heading not acquired (>2.5s) -> safe stop and MANUAL", "warn")
                             else:
                                 angle_err = 0.0
                                 steer, drive = CENTER, lerp(STOP, max_GO, 0.20)
@@ -3045,7 +3045,7 @@ def main_loop():
                                         stall_check_start_t = 0.0
                                         stall_abort = True
                                         shared_state["lampStall"] = "err"
-                                        add_event_log("STALL", "5초 이상 보트 걸림 감지 -> MANUAL 전환", "warn")
+                                        add_event_log("STALL", "Boat stalled ≥5s -> MANUAL", "warn")
                             else:
                                 stall_check_start_t = 0.0
 
@@ -3073,16 +3073,16 @@ def main_loop():
             high_power_drive_sec += dt_hp
             if high_power_drive_sec >= 300.0 and not high_power_warn_5m:
                 high_power_warn_5m = True
-                add_event_log("THERMAL", "5200 고출력 연속 주행 5분 경과 -> 모터/ESC 발열 주의", "warn")
+                add_event_log("THERMAL", "5200 high thrust for 5 min -> watch motor/ESC heat", "warn")
             if high_power_drive_sec >= 480.0 and not high_power_warn_8m:
                 high_power_warn_8m = True
-                add_event_log("THERMAL", "5200 고출력 연속 주행 8분 경과 -> 2분 후 4800으로 자동 감속", "warn")
+                add_event_log("THERMAL", "5200 high thrust for 8 min -> auto-limit to 4800 in 2 min", "warn")
             if high_power_drive_sec >= MAX_GO_CONTINUOUS_SEC:
                 max_GO = DEFAULT_MAX_GO
                 high_power_drive_sec = 0.0
                 high_power_warn_5m = False
                 high_power_warn_8m = False
-                add_event_log("THERMAL", "5200 고출력 10분 한도 도달 -> 과열 보호를 위해 4800으로 자동 하향", "warn")
+                add_event_log("THERMAL", "5200 high-thrust 10 min limit -> auto-reduce to 4800 for thermal protection", "warn")
         else:
             high_power_drive_sec = max(0.0, high_power_drive_sec - dt_hp * 0.5)
             if high_power_drive_sec < 60.0:
@@ -3144,7 +3144,7 @@ if __name__ == "__main__":
     try:
         main_loop()
     except (KeyboardInterrupt, SystemExit):
-        safe_print("\n[종료] 프로그램 종료 신호를 수신하여 안전 정지합니다.")
+        safe_print("\n[EXIT] Shutdown signal received; performing safe stop.")
     finally:
         safe_stop()
         release_active_camera()
