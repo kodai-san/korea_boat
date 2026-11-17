@@ -27,7 +27,7 @@
     "esc_neutral_us": 1800,
     "esc_fwd_max_us": 1990,
     "esc_rev_max_us": 1650,
-    "auto_throttle_ratio": 0.6
+    "auto_throttle_ratio": 1.0
   },
   "mode_switch": {
     "right_steer_ratio_threshold": 0.75,
@@ -35,7 +35,7 @@
     "full_reverse_ratio_threshold": 0.75
   },
   "autonomous": {
-    "strategy": "02_adaptive_throttle",
+    "strategy": "04_predictive_recovery",
     "02_adaptive_throttle": {
       "full_throttle_cte_m": 0.30,
       "full_throttle_heading_deg": 11.0
