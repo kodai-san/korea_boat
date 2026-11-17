@@ -90,6 +90,13 @@ class GuardedPlannerNavigationTests(unittest.TestCase):
         self.assertEqual(out["planner_throttle_norm"], 1.)
         self.assertTrue(out["reacquire_heading"])
 
+    def test_no_overlap_between_line_limits_and_inset_holds(self):
+        self.line.line_right_m = 0.
+        self.nav.guard_turn_margin_m = 3.3
+        out = self.step(.3, 0.)
+        self.assertEqual(out["planner_hold_reason"], "planner_no_safe_line")
+        self.assertEqual(out["planner_throttle_norm"], 0.)
+
     def test_reverse_timeout_does_not_fall_back_to_unsafe_turn(self):
         self.step(1.6, 90.)
         self.step(1.6, None, t=1.4, speed=.5)

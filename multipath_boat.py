@@ -1639,8 +1639,9 @@ class MultipathNavigator:
         )
         if guarded_plan and margin_valid:
             low, high = low + margin, high - margin
-            if low <= high:
-                line.set_line(max(low, min(high, line.line_offset_m)))
+        line_low, line_high = max(low, -line.line_left_m), min(high, line.line_right_m)
+        if guarded_plan and margin_valid and line_low <= line_high:
+            line.set_line(max(line_low, min(line_high, line.line_offset_m)))
         # 07 retains its measured-bank tolerance. 08's inset already includes
         # the uncertainty allowance and must never spend it as extra turn room.
         tolerance = 0.0 if guarded_plan else opts.get("turn_tolerance_m", 0.0)
@@ -1715,6 +1716,8 @@ class MultipathNavigator:
 
         if guarded_plan and (not margin_valid or low > high):
             return hold_plan("planner_clearance_unavailable")
+        if guarded_plan and line_low > line_high:
+            return hold_plan("planner_no_safe_line")
         if guarded_plan and not low - 1e-8 <= d <= high + 1e-8:
             return hold_plan("planner_insufficient_clearance")
 
