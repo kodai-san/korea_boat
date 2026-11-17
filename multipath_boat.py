@@ -53,6 +53,7 @@ from auto_strategies import (AUTO_STRATEGIES, apply_run_overrides, canonical_aut
                              create_auto_strategy, resolve_recovery_config)
 from gps_heading import MotionHeadingSelector
 from gps_guard import GpsAwareController
+from guarded_planner import GuardedPlannerController
 from gps_accuracy import parse_accuracy_message
 from path_guidance import (StraightLineGuidance, interpolate_lookahead, plan_turn, plan_turn_by_time,
                            square_corners, turn_arc)
@@ -1797,18 +1798,18 @@ def main(session_stamp=None):
     parser.add_argument("--use-04", action="store_true",
                         help="Run 04_predictive_recovery whatever the strategy (same as autonomous.use_04_control)")
     parser.add_argument("--line-limit", type=float, default=None, metavar="X",
-                        help="05/06/07: furthest the straight line may be drawn from the centerline, +-X m on both sides")
+                        help="05-08: furthest the straight line may be drawn from the centerline, +-X m on both sides")
     parser.add_argument("--bank-limit", type=float, default=None, metavar="X",
-                        help="05/06/07: bank limit, +-X m from the centerline on both sides")
+                        help="05-08: bank limit, +-X m from the centerline on both sides")
     for side in ("left", "right"):
         parser.add_argument(f"--line-{side}", type=float, default=None, metavar="X",
-                            help=f"07: line limit on the {side} only, X m from the centerline (JSON line_{side}_m)")
+                            help=f"07/08: line limit on the {side} only, X m from the centerline (JSON line_{side}_m)")
         parser.add_argument(f"--bank-{side}", type=float, default=None, metavar="X",
-                            help=f"07: bank limit on the {side} only, X m from the centerline (JSON bank_{side}_m)")
+                            help=f"07/08: bank limit on the {side} only, X m from the centerline (JSON bank_{side}_m)")
     parser.add_argument("--three-point-turns", action="store_true",
-                        help="07: choose turn right / turn left / reverse-then-turn by estimated time")
+                        help="07/08: choose turn right / turn left / reverse-then-turn by estimated time")
     parser.add_argument("--no-turn-planner", action="store_true",
-                        help="07: turn the short way round instead of planning the turn against the bank limits")
+                        help="07/08: turn the short way round instead of planning the turn against the bank limits")
     parser.add_argument("--test-square", action="store_true",
                         help="05: on AUTO entry drive rectangles on the bank lines, then the line limits, and stop")
     parser.add_argument("--no-recovery", action="store_true",
@@ -1860,7 +1861,9 @@ def main(session_stamp=None):
 
     try:
         navigator = MultipathNavigator(paths, nav_params, strategy=auto_strategy)
-        gps_guard = GpsAwareController(navigator) if guarded else None
+        guard_class = (GuardedPlannerController if getattr(auto_strategy, "guard_with_planner", False)
+                       else GpsAwareController)
+        gps_guard = guard_class(navigator) if guarded else None
     except ValueError as exc:
         parser.error(str(exc))
 
@@ -1959,7 +1962,7 @@ def main(session_stamp=None):
     print(f"  - AUTO throttle  : {auto_strategy.describe_throttle(auto_cruise_us, pwm_cfg['esc_fwd_max_us'])}")
     print(f"  - Finish margin  : {navigator.finish_margin_m:g} m beyond the final waypoint")
     rec_o = recovery.options
-    print(f"  - Stuck recovery : " + ("OFF (mode 06 uses GPS-quality holds)" if guarded else (
+    print(f"  - Stuck recovery : " + ("OFF (GPS-guarded modes 06/08 use GPS-quality holds)" if guarded else (
         f"ON (below {rec_o['stuck_speed_mps']:g} m/s for {rec_o['stuck_sec']:g} s -> reverse "
         f"{100 * rec_o['reverse_throttle']:.0f}% for {rec_o['reverse_sec']:g} s, up to {rec_o['max_attempts']} tries)"
         if recovery.enabled else "OFF")))

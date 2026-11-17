@@ -26,9 +26,10 @@ The numbers follow creation order and stay fixed as more strategies are added.
 | 5 | `05_straight_line` | Race line: one straight line drawn where AUTO is engaged (moved toward the centerline near a bank), full throttle, GPS-course line-of-sight steering with a PI loop on course error, and bank protection inside a +-2.5 m band. No lanes. |
 | 6 | `06_gps_aware` | Straight-line steering with position-jump rejection, GPS-quality and clearance checks, absolute power limits, and automatic recovery after consistent observations return. Full power requires qualified RTK FIX. |
 | 7 | `07_turn_planner` | 05 plus a turn planner: large turns (start, takeover, collision) go the way that stays inside the bank limits, reversing first when no turn fits; separate left/right bank and line limits; the line starts where the turn onto the race direction ends. |
+| 8 | `08_guarded_turn_planner` | 06's GPS guard in front of 07's turn planner: only fresh, consistent positions steer; power is capped by GPS quality; planned turns run at full power and reverses happen only on qualified RTK FIX. |
 
 The original names `constant_cruise`, `adaptive_throttle`,
-`gps_course_progressive`, `predictive_recovery`, `straight_line`, `gps_aware`, and `turn_planner` remain accepted aliases for
+`gps_course_progressive`, `predictive_recovery`, `straight_line`, `gps_aware`, `turn_planner`, and `guarded_turn_planner` remain accepted aliases for
 their corresponding numbered strategies in JSON selectors, option-block keys,
 and CLI arguments. Defaults, new logs, and files saved by the calibration tool
 use the numbered names. Existing logs retain their recorded names.
@@ -709,6 +710,39 @@ round like 05 and keep the line at the entry point; the per-side limits stay.
 | `three_point_turns` | false | Choose turn right / turn left / reverse-then-turn by estimated time. |
 | `plan_cruise_mps`, `plan_reverse_mps`, `plan_restart_sec` | 1.6, 0.5, 0.6 | Speeds and the stop-start penalty used in that estimate. |
 | other options | as 05 | Line following, PI steering, bank guard, test square. |
+
+## 08 — GPS-guarded turn planner (`08_guarded_turn_planner`)
+
+08 runs 07's navigation (per-side limits, turn planner, optional
+`three_point_turns`, line drawn where the turn ends) behind 06's GPS guard
+(`guarded_planner.GuardedPlannerController`, built on `gps_guard.GpsAwareController`).
+Select it with `--auto-strategy 08_guarded_turn_planner`; settings live in
+`autonomous["08_guarded_turn_planner"]` and are the union of 07's and 06's.
+
+Everything 06 checks still applies: fresh, in-order, jump-free positions;
+2 s and 5 consistent fixes before navigation; uncertainty floors per fix
+quality; FLOAT/DGPS/GPS power caps; neutral hold on faults; bounded launch;
+automatic resume; no automatic stuck reverse; no test square. What changes so
+that 07's planner can work:
+
+| Situation | 06 | 08 |
+| --- | --- | --- |
+| Clearance | to the symmetric band | to each side's bank limit |
+| Low clearance on qualified RTK FIX | neutral hold | planner, bank guard and hard limit steer away (power capped at `boundary_throttle`) |
+| Low clearance on any weaker fix | neutral hold, qualification restarts | same (on FIX the hold keeps counting, so a start near the bank can qualify) |
+| Planned full-lock turn | 35% cap (heading error > 20 deg) | `race_throttle` on qualified FIX, the quality cap otherwise (measured radii are for full throttle) |
+| Planner reverse | not possible | only on qualified FIX; otherwise neutral |
+| No measured course during a planned turn or reverse | neutral hold | planner continues from its remembered bow heading; after a reverse a measured course steers again only after fresh forward thrust |
+| A guard hold during a manoeuvre | — | ends the manoeuvre; the planner plans again after resuming |
+
+Line limits default to -1.7 / +2.5 m (bank limits -3.2 / +4.0 m as in 07):
+full power needs `race_clearance_m` (0.75 m) after FIX uncertainty (0.25 m) and
+hull margin (0.25 m), so the line must stay within -1.95 / +2.75 m; 0.25 m is
+kept spare. 06's power ramp (`throttle_rise_per_sec`, 0.5/s) also applies to
+planned turns, so a turn from low power starts wider than the full-throttle
+radius the planner assumes. `gps_guard_state` adds `TURN` and `MANEUVER`;
+`gps_guard_reason` adds `planned_turn`, `planner_neutral`, `planner_reverse`
+and `reverse_needs_fix`.
 
 ## Stuck recovery (all strategies)
 

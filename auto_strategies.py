@@ -545,14 +545,20 @@ class GpsAwareStrategy(StraightLineStrategy):
     @classmethod
     def validate_options(cls, options):
         resolved = super().validate_options(options)
+        return GpsAwareStrategy.validate_guard_options(cls.name, resolved, resolved["band_half_width_m"],
+                                                       "band_half_width_m")
+
+    @staticmethod
+    def validate_guard_options(name, resolved, narrowest_bank_m, bank_key):
+        """GPS-guard option checks shared by 06 and 08; ``narrowest_bank_m`` is the closest bank limit."""
         if resolved["test_square"]:
-            raise ValueError(f"autonomous.{cls.name}.test_square is unsupported; use 05_straight_line")
+            raise ValueError(f"autonomous.{name}.test_square is unsupported; use 05_straight_line")
         for key in ("auto_resume", "retain_stale_accuracy"):
             if not isinstance(resolved[key], bool):
-                raise ValueError(f"autonomous.{cls.name}.{key} must be true or false")
+                raise ValueError(f"autonomous.{name}.{key} must be true or false")
         for key, minimum in (("qualification_fixes", 2), ("min_satellites", 4)):
             if not isinstance(resolved[key], int) or isinstance(resolved[key], bool) or resolved[key] < minimum:
-                raise ValueError(f"autonomous.{cls.name}.{key} must be an integer >= {minimum}")
+                raise ValueError(f"autonomous.{name}.{key} must be an integer >= {minimum}")
         for key in ("position_max_age_sec", "accuracy_max_age_sec", "accuracy_max_skew_sec",
                     "throttle_rise_per_sec", "qualification_sec", "max_hdop", "max_correction_age_sec",
                     "fixed_uncertainty_m", "accuracy_multiplier", "uncertainty_growth_mps",
@@ -560,7 +566,7 @@ class GpsAwareStrategy(StraightLineStrategy):
                     "source_clock_tolerance_sec", "max_reacquire_shift_m", "launch_timeout_sec",
                     "launch_heading_memory_sec"):
             if resolved[key] <= 0.0:
-                raise ValueError(f"autonomous.{cls.name}.{key} must be greater than zero")
+                raise ValueError(f"autonomous.{name}.{key} must be greater than zero")
         for smaller, larger in (
                 ("gps_throttle", "dgps_throttle"), ("dgps_throttle", "float_throttle"),
                 ("float_throttle", "race_throttle"), ("boundary_throttle", "race_throttle"),
@@ -575,14 +581,14 @@ class GpsAwareStrategy(StraightLineStrategy):
                 ("min_clearance_m", "degraded_launch_min_clearance_m"),
                 ("forward_acquire_sec", "launch_timeout_sec")):
             if resolved[smaller] > resolved[larger]:
-                raise ValueError(f"autonomous.{cls.name}.{larger} must be >= {smaller}")
+                raise ValueError(f"autonomous.{name}.{larger} must be >= {smaller}")
         if resolved["max_speed_mps"] <= resolved["min_course_speed_mps"]:
-            raise ValueError(f"autonomous.{cls.name}.max_speed_mps must exceed min_course_speed_mps")
+            raise ValueError(f"autonomous.{name}.max_speed_mps must exceed min_course_speed_mps")
         for key in ("race_clearance_m", "launch_min_clearance_m"):
-            if resolved[key] + resolved["fixed_uncertainty_m"] + resolved["hull_margin_m"] >= resolved["band_half_width_m"]:
-                raise ValueError(f"autonomous.{cls.name}.{key} plus FIX uncertainty and hull margin must fit inside band_half_width_m")
-        if resolved["race_max_cte_m"] >= resolved["band_half_width_m"]:
-            raise ValueError(f"autonomous.{cls.name}.race_max_cte_m must be inside band_half_width_m")
+            if resolved[key] + resolved["fixed_uncertainty_m"] + resolved["hull_margin_m"] >= narrowest_bank_m:
+                raise ValueError(f"autonomous.{name}.{key} plus FIX uncertainty and hull margin must fit inside {bank_key}")
+        if resolved["race_max_cte_m"] >= narrowest_bank_m:
+            raise ValueError(f"autonomous.{name}.race_max_cte_m must be inside {bank_key}")
         return resolved
 
     def update(self, **kwargs):
@@ -697,11 +703,62 @@ class TurnPlannerStrategy(StraightLineStrategy):
         )
 
 
+class GuardedTurnPlannerStrategy(TurnPlannerStrategy):
+    """07's turn planner and per-side limits behind 06's GPS guard.
+
+    The guard (guarded_planner.GuardedPlannerController) accepts only fresh, consistent positions and sets an
+    absolute power cap from GPS quality; within that, 07's planner chooses turns and reverses. Planned turns run
+    at full power on qualified RTK FIX (the measured turn radii are for full throttle), and the planner may
+    reverse only on qualified FIX. The line limits are narrower than 07's so that the line keeps the guard's
+    race clearance after FIX uncertainty and hull margin (full power needs race_clearance_m).
+    """
+
+    name = "08_guarded_turn_planner"
+    uses_gps_guard = True
+    guard_with_planner = True
+    default_options = dict(
+        TurnPlannerStrategy.default_options,
+        # Bank limits as 07. Full power needs bank - |d| - fixed_uncertainty - hull_margin >= race_clearance
+        # (3.2/4.0 - 0.25 - 0.25 - 0.75), so the line stays within -1.95/+2.75 m; 0.25 m is kept spare.
+        line_left_m=1.7,
+        line_right_m=2.5,
+        **GpsAwareStrategy.guard_default_options
+    )
+    option_limits = dict(TurnPlannerStrategy.option_limits, **{
+        key: (0.0, 1.0 if key.endswith("_throttle") else
+              180.0 if key == "race_max_heading_error_deg" else None)
+        for key, value in GpsAwareStrategy.guard_default_options.items() if not isinstance(value, bool)
+    })
+
+    @classmethod
+    def validate_options(cls, options):
+        resolved = super().validate_options(options)
+        for key in ("auto_resume", "retain_stale_accuracy"):
+            if not isinstance(resolved[key], bool):
+                raise ValueError(f"autonomous.{cls.name}.{key} must be true or false")
+        return GpsAwareStrategy.validate_guard_options(
+            cls.name, resolved, min(resolved["bank_left_m"], resolved["bank_right_m"]), "the nearer bank limit")
+
+    def describe_throttle(self, cruise_us, full_us):
+        o = self.options
+        return (
+            f"GPS-guarded straight line with the 07 turn planner; up to {100 * o['race_throttle']:.0f}% forward "
+            f"({full_us} us maximum) only after FIX qualification (planned turns too); "
+            f"FLOAT <= {100 * o['float_throttle']:.0f}%, DGPS <= {100 * o['dgps_throttle']:.0f}%, "
+            f"GPS <= {100 * o['gps_throttle']:.0f}%; line within -{o['line_left_m']:.1f}/+{o['line_right_m']:.1f} m, "
+            f"bank limits -{o['bank_left_m']:.1f}/+{o['bank_right_m']:.1f} m; "
+            + ("turn planner on" + (" with three-point turns" if o["three_point_turns"] else "")
+               if o["turn_planner"] else "turn planner off")
+            + "; planner reverse only on qualified FIX; automatic stuck reverse disabled"
+        )
+
+
 # Numbers are permanent creation-order identifiers. Append 05, 06, ... for new
 # strategies; never renumber existing modes when adding or retiring one.
 AUTO_STRATEGIES = {
     cls.name: cls for cls in (ConstantCruiseStrategy, AdaptiveThrottleStrategy, GpsCourseProgressiveStrategy,
-                            PredictiveRecoveryStrategy, StraightLineStrategy, GpsAwareStrategy, TurnPlannerStrategy)
+                            PredictiveRecoveryStrategy, StraightLineStrategy, GpsAwareStrategy, TurnPlannerStrategy,
+                            GuardedTurnPlannerStrategy)
 }
 
 AUTO_STRATEGY_ALIASES = {
@@ -712,6 +769,7 @@ AUTO_STRATEGY_ALIASES = {
     "straight_line": StraightLineStrategy.name,
     "gps_aware": GpsAwareStrategy.name,
     "turn_planner": TurnPlannerStrategy.name,
+    "guarded_turn_planner": GuardedTurnPlannerStrategy.name,
 }
 
 
@@ -766,10 +824,10 @@ def apply_run_overrides(config, strategy=None, use_04=False, line_limit_m=None, 
                         bank_left_m=None, bank_right_m=None, turn_planner=None, three_point_turns=None):
     """Return a copy of the autonomous section with command-line choices applied (None keeps the JSON).
 
-    The line/bank limit and test-square choices go to the selected strategy's block when that is 06 or 07,
+    The line/bank limit and test-square choices go to the selected strategy's block when that is 06, 07 or 08,
     otherwise to 05's.
     line_limit_m / bank_limit_m set both sides; the per-side values, turn_planner and three_point_turns exist
-    only in 07.
+    only in 07 and 08.
     """
     config = normalize_autonomous_config(config)
     if strategy is not None:
@@ -778,15 +836,16 @@ def apply_run_overrides(config, strategy=None, use_04=False, line_limit_m=None, 
         config["use_04_control"] = True
     per_side = {"line_left_m": line_left_m, "line_right_m": line_right_m, "bank_left_m": bank_left_m,
                 "bank_right_m": bank_right_m, "turn_planner": turn_planner, "three_point_turns": three_point_turns}
-    if config["strategy"] == TurnPlannerStrategy.name:
-        target = TurnPlannerStrategy.name
+    if config["strategy"] in (TurnPlannerStrategy.name, GuardedTurnPlannerStrategy.name):
+        target = config["strategy"]
         line_options = {"line_left_m": line_limit_m, "line_right_m": line_limit_m, "bank_left_m": bank_limit_m,
                         "bank_right_m": bank_limit_m, "test_square": test_square}
         line_options.update({key: value for key, value in per_side.items() if value is not None})
     else:
         if any(value is not None for value in per_side.values()):
             raise ValueError("per-side limits, the turn planner switch and three-point turns apply to "
-                             f"{TurnPlannerStrategy.name} only (select it with --auto-strategy)")
+                             f"{TurnPlannerStrategy.name} and {GuardedTurnPlannerStrategy.name} only "
+                             "(select one with --auto-strategy)")
         target = GpsAwareStrategy.name if config["strategy"] == GpsAwareStrategy.name else StraightLineStrategy.name
         line_options = {"line_max_offset_m": line_limit_m, "band_half_width_m": bank_limit_m,
                         "test_square": test_square}
