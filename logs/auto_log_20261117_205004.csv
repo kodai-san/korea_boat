@@ -1,0 +1,4 @@
+Time,Mode,Path,WP,Distance,Error,Lat,Lon,RTK,Speed_mps,PWM_Steer,PWM_Thr,CTE_m,Strategy,ThrottleBlend,HeadingSrc,WallGuard
+20:50:06.821,MANUAL,Center,1,377.0,0.0,35.0750956,129.0862759,2,0.27,4500,4443,,,,,
+20:50:07.331,MANUAL,Center,1,376.6,0.0,35.0750981,129.0862674,2,0.25,4500,4443,,,,,
+20:50:07.841,MANUAL,Center,1,377.4,0.0,35.0751028,129.0862752,2,0.32,4500,4443,,,,,

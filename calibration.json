@@ -38,7 +38,7 @@
     "finish_margin_m": 1.0
   },
   "autonomous": {
-    "strategy": "05_straight_line",
+    "strategy": "08_gps_aware_turn_planner",
     "use_04_control": false,
     "recovery": {
       "enabled": true,
