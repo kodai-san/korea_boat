@@ -52,7 +52,7 @@ import time
 from auto_strategies import (AUTO_STRATEGIES, apply_run_overrides, canonical_auto_strategy_name,
                              create_auto_strategy, resolve_recovery_config)
 from gps_heading import MotionHeadingSelector
-from path_guidance import StraightLineGuidance, interpolate_lookahead, square_corners
+from path_guidance import StraightLineGuidance, interpolate_lookahead, plan_turn, square_corners, turn_arc
 from recovery import StuckRecovery
 from spresense_stream import (
     SpresenseGPSStreamer, reserved_spresense_ports, same_serial_port,
@@ -1027,9 +1027,9 @@ class MultipathNavigator:
         self.line_guidance = None
         if getattr(self.strategy, "uses_straight_line", False) is True:
             center = [latlon_to_enu(lat, lon, self.ref_lat, self.ref_lon) for (_, lat, lon) in paths_dict["center"]]
+            o = self.strategy.options
             self.line_guidance = StraightLineGuidance(
-                center[0], center[-1], self.strategy.options["band_half_width_m"],
-                self.strategy.options["line_max_offset_m"])
+                center[0], center[-1], o["bank_left_m"], o["bank_right_m"], o["line_left_m"], o["line_right_m"])
 
         self.active_lane = "center"
         # False keeps the boat on its lane (boat.py "fixed path"); wall guards still apply.
@@ -1092,11 +1092,18 @@ class MultipathNavigator:
             line.draw_line(bx, by)
             self.active_lane = "line"
             self.strategy.reset()
+            # Turn planner state: plan once the first forward course is known.
+            self.plan_pending = True
+            self.turn_dir = 0
+            self.rev_phase = None
+            self.rev_end = 0.0
+            self.reverses = 0
             opts = self.strategy.options
             if opts["test_square"]:
                 s0 = line.frame(bx, by)[0] + opts["test_lead_m"]
+                limits = (("bank", line.bank_left_m, line.bank_right_m), ("line", line.line_left_m, line.line_right_m))
                 self.test_targets = [line.point(s, d) + (label,) for s, d, label in square_corners(
-                    s0, (opts["band_half_width_m"], opts["line_max_offset_m"]), opts["test_leg_length_m"])]
+                    s0, limits, opts["test_leg_length_m"])]
                 self.test_leg = 0
                 self.test_leg_start = (bx, by)
                 self.active_lane = "test"
@@ -1249,8 +1256,8 @@ class MultipathNavigator:
         line = self.line_guidance
         if self.active_lane == "test":
             o = self.strategy.options
-            return (f"[TEST SQUARE] {o['test_leg_length_m']:g} m rectangles on +-{o['band_half_width_m']:.2f} m "
-                    f"(bank lines) then +-{o['line_max_offset_m']:.2f} m (line limits) from the centerline, "
+            return (f"[TEST SQUARE] {o['test_leg_length_m']:g} m rectangles on -{line.bank_left_m:.2f}/+{line.bank_right_m:.2f} m "
+                    f"(bank limits) then -{line.line_left_m:.2f}/+{line.line_right_m:.2f} m (line limits) from the centerline, "
                     f"starting {o['test_lead_m']:g} m ahead; throttle {100 * o['test_throttle']:.0f}%; "
                     f"entry {line.entry_offset_m:+.2f} m from centerline")
         moved = line.line_offset_m - line.entry_offset_m
@@ -1301,14 +1308,18 @@ class MultipathNavigator:
             "lookahead_m": lookahead, "lookahead_target_e_m": tx, "lookahead_target_n_m": ty,
             "cte_rate_mps": None, "predicted_cte_m": None,
             "prediction_status": f"square leg {self.test_leg + 1}: {label}",
-            "prediction_corridor_clearance_m": opts["band_half_width_m"] - abs(d), "throttle_target_blend": None,
+            "prediction_corridor_clearance_m": line.bank_limit(d) - abs(d), "throttle_target_blend": None,
         }
 
     def _update_straight_line(self, bx, by, boat_heading_deg, now_mono, heading_confident, motion):
-        """One straight line from AUTO entry: line-of-sight course command with bank protection."""
+        """One straight line from AUTO entry: line-of-sight course command with bank protection.
+
+        When the course is far from the race direction, a turn planner picks the full-lock turn (left or right)
+        that stays inside the bank limits in the shortest arc, reverses first if neither fits and the boat is
+        heading toward the side it would leave, and draws the line where the turn ends.
+        """
         line = self.line_guidance
         opts = self.strategy.options
-        band = opts["band_half_width_m"]
         s, d = line.frame(bx, by)
         cte = d - line.line_offset_m
         wp_number = self._line_wp_number(s)
@@ -1320,22 +1331,107 @@ class MultipathNavigator:
         speed = motion.get("speed_mps") if isinstance(motion, dict) else None
         speed_ok = isinstance(speed, (int, float)) and math.isfinite(speed)
         lookahead = self.strategy.lookahead_distance(speed if speed_ok else None)
+
+        def result(status, steer_norm, target_bearing, guard=False, throttle_blend=1.0, **extra):
+            lx, ly = line.point(s + lookahead, line.line_offset_m)
+            out = {
+                "finished": False, "active_lane": self.active_lane, "shifted_to": None, "wp_number": wp_number,
+                "cte_right_m": d - line.line_offset_m, "steer_norm": steer_norm, "target_bearing_deg": target_bearing,
+                "boundary_guard": guard, "throttle_blend": throttle_blend,
+                "lookahead_m": lookahead, "lookahead_target_e_m": lx, "lookahead_target_n_m": ly,
+                "cte_rate_mps": None, "predicted_cte_m": None, "prediction_status": status,
+                "prediction_corridor_clearance_m": line.bank_limit(d) - abs(d), "throttle_target_blend": throttle_blend,
+            }
+            out.update(extra)
+            return out
+
+        # 1) Reverse chosen by the planner: neutral, reverse with the rudder centered, neutral (ESC direction change).
+        reacquire = False
+        if self.rev_phase is not None:
+            following = {"plan_neutral_in": ("plan_reverse", opts["plan_reverse_sec"]),
+                         "plan_reverse": ("plan_neutral_out", opts["plan_neutral_sec"]),
+                         "plan_neutral_out": (None, 0.0)}
+            while self.rev_phase is not None and now_mono >= self.rev_end:
+                self.rev_phase, duration = following[self.rev_phase]
+                self.rev_end += duration
+            if self.rev_phase is not None:
+                self.strategy.suspend()
+                throttle = -opts["plan_reverse_throttle"] if self.rev_phase == "plan_reverse" else 0.0
+                return result(self.rev_phase, 0.0, line.bearing_deg, throttle_blend=0.0, throttle_norm=throttle)
+            # The course measured while reversing points backward: plan again from fresh forward motion.
+            self.plan_pending = True
+            reacquire = True
+            boat_heading_deg = None
+
+        phi = None if boat_heading_deg is None else wrap_180(boat_heading_deg - line.bearing_deg)
+        moving = speed_ok and speed >= opts["min_course_speed_mps"]
+
+        # 2) Turn planner: when far off course, or once on the first forward course after entry or a reverse.
+        if opts["turn_planner"] and phi is not None and moving and self.turn_dir == 0:
+            far = abs(phi) > opts["turn_plan_deg"]
+            if far or self.plan_pending:
+                first = self.plan_pending
+                self.plan_pending = False
+                lead = speed * opts["turn_delay_sec"]
+                if far:
+                    arc, fits = plan_turn(d, phi, lead, opts["turn_radius_left_m"], opts["turn_radius_right_m"],
+                                          -line.bank_left_m, line.bank_right_m)
+                    heading_toward_violation = math.sin(math.radians(phi)) * arc["violation_side"] > 0
+                    if not fits and heading_toward_violation and self.reverses < opts["plan_max_reverses"]:
+                        self.reverses += 1
+                        self.rev_phase, self.rev_end = "plan_neutral_in", now_mono + opts["plan_neutral_sec"]
+                        log_event(f"[TURN PLAN] course {phi:+.0f} deg off at {d:+.2f} m: no turn fits the bank limits "
+                                  f"and the boat is heading toward the {'right' if arc['violation_side'] > 0 else 'left'} "
+                                  f"limit -> reverse {opts['plan_reverse_sec']:g} s "
+                                  f"(attempt {self.reverses}/{int(opts['plan_max_reverses'])})")
+                        self.strategy.suspend()
+                        return result("plan_neutral_in", 0.0, line.bearing_deg, throttle_blend=0.0, throttle_norm=0.0)
+                    self.turn_dir = arc["direction"]
+                    line.set_line(arc["end_d"])
+                    log_event(f"[TURN PLAN] course {phi:+.0f} deg off at {d:+.2f} m: turn "
+                              f"{'right' if self.turn_dir > 0 else 'left'} {arc['sweep_deg']:.0f} deg, predicted "
+                              f"{arc['min_d']:+.2f}..{arc['max_d']:+.2f} m "
+                              + ("(inside the bank limits)" if fits else
+                                 f"(least bad: {arc['violation_m']:.2f} m past a bank limit)")
+                              + f"; line {line.line_offset_m:+.2f} m")
+                elif first:
+                    # The turn onto the race direction ends here, so start the line there.
+                    direction = 1 if phi < 0 else -1
+                    radius = opts["turn_radius_right_m"] if direction > 0 else opts["turn_radius_left_m"]
+                    line.set_line(turn_arc(d, phi, radius, direction, lead)["end_d"])
+                    log_event(f"[AUTO LINE] first course {phi:+.0f} deg off at {d:+.2f} m; "
+                              f"line {line.line_offset_m:+.2f} m")
+                cte = d - line.line_offset_m
+
+        # 3) Planned turn: full lock in the chosen direction until the course is within turn_exit_deg.
+        if self.turn_dir != 0:
+            if phi is not None and abs(phi) <= opts["turn_exit_deg"]:
+                self.turn_dir = 0
+            else:
+                command = self.strategy.update(cte_right_m=cte, heading_error_deg=90.0 * self.turn_dir,
+                                               boundary_guard=False, now_mono=now_mono, heading_confident=False,
+                                               speed_mps=None)
+                return result("turn_right" if self.turn_dir > 0 else "turn_left", command["steer_norm"],
+                              line.bearing_deg, throttle_blend=command["throttle_blend"],
+                              reacquire_heading=reacquire)
+
+        # 4) Normal line following with bank protection.
         rate = future = None
         if boat_heading_deg is not None and speed_ok:
             rate = line.lateral_rate(speed, boat_heading_deg)
             future = d + opts["prediction_horizon_sec"] * rate
         outward = rate is not None and d * rate > 0
 
-        # Soft zone near a bank: steeper intercept and boosted gain. Hard limit: the 1 s forecast leaves
-        # the band while moving outward, so steer straight back toward the centerline.
+        # Soft zone near a bank limit: steeper intercept and boosted gain. Hard limit: the 1 s forecast passes
+        # the bank limit while moving outward, so steer straight back toward the centerline.
         status = "line" if abs(cte) <= 0.3 else "merging"
         guard = False
         intercept = opts["max_intercept_deg"]
-        if future is not None and outward and abs(future) >= band:
+        if future is not None and outward and abs(future) >= line.bank_limit(future):
             status, guard = "hard_limit", True
             target_bearing = (line.bearing_deg + math.copysign(opts["recovery_intercept_deg"], -d)) % 360.0
         else:
-            if abs(d) >= band - opts["guard_zone_m"] and (rate is None or outward):
+            if abs(d) >= line.bank_limit(d) - opts["guard_zone_m"] and (rate is None or outward):
                 status, guard = "bank_guard", True
                 intercept = opts["recovery_intercept_deg"]
             target_bearing = line.desired_course(d, lookahead, intercept)
@@ -1346,17 +1442,11 @@ class MultipathNavigator:
         command = self.strategy.update(cte_right_m=cte, heading_error_deg=heading_err, boundary_guard=guard,
                                        now_mono=now_mono, heading_confident=heading_confident,
                                        speed_mps=speed if speed_ok else None)
-        lx, ly = line.point(s + lookahead, line.line_offset_m)
-        clearance = band - abs(future if future is not None else d)
-        return {
-            "finished": False, "active_lane": self.active_lane, "shifted_to": None, "wp_number": wp_number,
-            "cte_right_m": cte, "steer_norm": command["steer_norm"], "target_bearing_deg": target_bearing,
-            "boundary_guard": guard, "throttle_blend": command["throttle_blend"],
-            "lookahead_m": lookahead, "lookahead_target_e_m": lx, "lookahead_target_n_m": ly,
-            "cte_rate_mps": rate, "predicted_cte_m": None if future is None else future - line.line_offset_m,
-            "prediction_status": status, "prediction_corridor_clearance_m": clearance,
-            "throttle_target_blend": command["throttle_blend"],
-        }
+        x = future if future is not None else d
+        return result(status, command["steer_norm"], target_bearing, guard=guard,
+                      throttle_blend=command["throttle_blend"], cte_rate_mps=rate,
+                      predicted_cte_m=None if future is None else future - line.line_offset_m,
+                      prediction_corridor_clearance_m=line.bank_limit(x) - abs(x), reacquire_heading=reacquire)
 
     def update(self, boat_lat, boat_lon, boat_heading_deg, now_mono=None, heading_confident=False,
                motion=None):
@@ -1619,9 +1709,16 @@ def main(session_stamp=None):
     parser.add_argument("--use-04", action="store_true",
                         help="Run 04_predictive_recovery whatever the strategy (same as autonomous.use_04_control)")
     parser.add_argument("--line-limit", type=float, default=None, metavar="X",
-                        help="05: furthest the straight line may be drawn from the centerline, +-X m (default JSON, 1.5)")
+                        help="05: furthest the straight line may be drawn from the centerline, +-X m on both sides")
     parser.add_argument("--bank-limit", type=float, default=None, metavar="X",
-                        help="05: bank boundary, +-X m from the centerline (default JSON, 2.5)")
+                        help="05: bank limit, +-X m from the centerline on both sides")
+    for side in ("left", "right"):
+        parser.add_argument(f"--line-{side}", type=float, default=None, metavar="X",
+                            help=f"05: line limit on the {side} only, X m from the centerline (JSON line_{side}_m)")
+        parser.add_argument(f"--bank-{side}", type=float, default=None, metavar="X",
+                            help=f"05: bank limit on the {side} only, X m from the centerline (JSON bank_{side}_m)")
+    parser.add_argument("--no-turn-planner", action="store_true",
+                        help="05: turn the short way round instead of planning the turn against the bank limits")
     parser.add_argument("--test-square", action="store_true",
                         help="05: on AUTO entry drive rectangles on the bank lines, then the line limits, and stop")
     parser.add_argument("--no-recovery", action="store_true",
@@ -1635,7 +1732,9 @@ def main(session_stamp=None):
         auto_config = apply_run_overrides(
             auto_config, strategy=args.auto_strategy, use_04=args.use_04, line_limit_m=args.line_limit,
             bank_limit_m=args.bank_limit, test_square=True if args.test_square else None,
-            recovery=False if args.no_recovery else None)
+            recovery=False if args.no_recovery else None, line_left_m=args.line_left, line_right_m=args.line_right,
+            bank_left_m=args.bank_left, bank_right_m=args.bank_right,
+            turn_planner=False if args.no_turn_planner else None)
         auto_strategy = create_auto_strategy(auto_config, nav_params)
         recovery = StuckRecovery(resolve_recovery_config(auto_config))
     except ValueError as exc:
@@ -1990,6 +2089,11 @@ def main(session_stamp=None):
                         heading_confident=heading_info["confident"],
                         motion=heading_info,
                     )
+
+                    if nav_info.get("reacquire_heading"):
+                        gps.reset_heading_anchor()
+                        if heading_selector is not None:
+                            heading_selector.suspend()
 
                     if nav_info["shifted_to"] is not None:
                         print(

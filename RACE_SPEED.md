@@ -39,7 +39,8 @@ Rollback: select another strategy in `calibration.json` (`autonomous.strategy`) 
 ```sh
 python3 multipath_boat.py                      # 05_straight_line (calibration.json), stuck recovery on
 python3 multipath_boat.py --use-04             # back to 04
-python3 multipath_boat.py --line-limit 1.0 --bank-limit 3.0
+python3 multipath_boat.py --bank-left 3.0 --bank-right 4.0 --line-left 2.4 --line-right 3.4
+python3 multipath_boat.py --no-turn-planner
 python3 multipath_boat.py --test-square        # drive the boundary rectangles, then stop
 python3 analyse_square.py logs/multipath_log_<stamp>.csv
 python3 multipath_boat.py --no-recovery
@@ -51,7 +52,7 @@ python3 multipath_boat.py --no-recovery
   simulation (still ~1 m short of the observed banks). Pointed straight, a start 2.0 m off center stays inside.
 - **Fresh battery for every timed run.** Speed at full throttle varied 0.87-1.14x between logs.
 - **Wait for RTK FIX before starting** (event log `[GPS STATE] fix_quality=4`).
-- With 05, engage AUTO wherever the boat should race (within 1.5 m of the centerline); the event log line
+- With 05, engage AUTO wherever the boat should race (within the line limits, -2.6/+3.4 m); the event log line
   `[AUTO LINE]` shows where the line was drawn.
 
 ## Remaining levers

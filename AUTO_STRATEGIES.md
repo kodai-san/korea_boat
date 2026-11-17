@@ -383,22 +383,45 @@ Quick changes at the water (each also has a JSON setting):
 
 ```sh
 python3 multipath_boat.py --use-04            # back to 04 control (JSON: autonomous.use_04_control)
-python3 multipath_boat.py --line-limit 1.0    # straight line within +-1.0 m of the centerline (line_max_offset_m)
-python3 multipath_boat.py --bank-limit 3.0    # bank boundary at +-3.0 m (band_half_width_m)
+python3 multipath_boat.py --line-limit 2.0    # line within +-2.0 m of the centerline, both sides (line_left_m, line_right_m)
+python3 multipath_boat.py --bank-limit 3.0    # bank limits at +-3.0 m, both sides (bank_left_m, bank_right_m)
+python3 multipath_boat.py --bank-right 4.5 --line-left 2.0   # one side only; also --bank-left, --line-right
+python3 multipath_boat.py --no-turn-planner   # turn the short way round (turn_planner)
 python3 multipath_boat.py --test-square       # boundary test pattern (test_square)
 python3 multipath_boat.py --no-recovery       # stuck recovery off (autonomous.recovery.enabled)
 ```
 
-`line limit + guard_zone_m (0.5)` must stay inside the bank limit, otherwise the
-controller refuses to start and says why.
+On each side, `line limit + guard_zone_m (0.5)` must stay inside the bank limit,
+otherwise the controller refuses to start and says why.
 
 **Line.** On AUTO entry the boat's RTK position defines a line parallel to the
-course (the bearing of `center.csv`, first to last waypoint). If the entry is
-more than `line_max_offset_m` from the centerline, the line is drawn at that
-offset instead and the boat merges onto it while driving forward, never
-turning more than `max_intercept_deg` off the course. Re-engaging AUTO draws a
-new line. Lanes, lane switching and `left.csv`/`right.csv` are not used. The
-event log records `[AUTO LINE]` with the entry and line offsets.
+course (the bearing of `center.csv`, first to last waypoint). Once the first
+forward course is known, the line moves to where the boat's turn onto the race
+direction will end (full-lock radius plus `turn_delay_sec` of travel). The line
+never lies further out than `line_left_m` / `line_right_m`; beyond that the boat
+merges onto it while driving forward, never turning more than
+`max_intercept_deg` off the course. Re-engaging AUTO draws a new line. Lanes,
+lane switching and `left.csv`/`right.csv` are not used. The event log records
+`[AUTO LINE]` with the entry and line offsets.
+
+**Turn planner.** When the course is more than `turn_plan_deg` (60) off the race
+direction (at entry, after a takeover, or after a collision), the navigator
+works out both full-lock turns with the measured radii (`turn_radius_left_m`
+3.0, `turn_radius_right_m` 2.3) and chooses the one that stays inside the bank
+limits in the shortest arc. The short way round can point the boat straight at
+the bank (17 Nov routes 2, 3 and 6). The boat holds full lock in that direction
+until the course is within `turn_exit_deg` (25), even when the other way
+becomes shorter, and the line is drawn where the turn ends. If neither turn
+fits and the boat is heading toward the limit it would cross, it goes neutral
+(`plan_neutral_sec`), reverses at `plan_reverse_throttle` for
+`plan_reverse_sec` with the rudder centered, goes neutral, and plans again from
+fresh forward motion (at most `plan_max_reverses` times per AUTO run; then the
+least-bad turn). The event log records `[TURN PLAN]` with the choice and the
+predicted sideways range; `prediction_status` shows `turn_right`, `turn_left`,
+`plan_neutral_in`, `plan_reverse` or `plan_neutral_out`. Full throttle is kept
+while turning: the measured turns are tighter at full throttle (about 2.2 m)
+than at 60% (2.1-6.9 m), because the propeller wash drives the rudder. Reversing
+needs a land check first (does this ESC reverse after the neutral pause?).
 
 **Steering.** Outer loop: line-of-sight course
 `course_cmd = course_bearing - clamp(atan(cte / lookahead), +-max_intercept_deg)`,
@@ -412,11 +435,11 @@ zones, and when the course error exceeds `integral_max_error_deg`. Without a
 course the rudder holds the learned trim (zero at launch).
 
 **Bank protection.** The banks are straight and parallel to the centerline;
-`band_half_width_m` is the allowed distance from it. Within `guard_zone_m` of
-the band edge and not already moving back, `prediction_status` is
+`bank_left_m` / `bank_right_m` are the allowed distances from it. Within
+`guard_zone_m` of a bank limit and not already moving back, `prediction_status` is
 `bank_guard`: boosted gain (`boundary_gain_boost`) and up to
 `recovery_intercept_deg` of intercept. If the 1 s forecast
-(`prediction_horizon_sec`) leaves the band while moving outward, the status is
+(`prediction_horizon_sec`) passes a bank limit while moving outward, the status is
 `hard_limit` and the boat steers `recovery_intercept_deg` back toward the
 centerline. Throttle stays full: turning radius does not shrink at low speed.
 
@@ -427,9 +450,14 @@ waypoint, measured along the course.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `band_half_width_m` | 2.5 | Allowed distance from the centerline (observed banks: ~4.2 m left, ~5.2 m right). |
-| `line_max_offset_m` | 1.5 | Furthest from the centerline a line may be drawn. |
-| `guard_zone_m` | 0.5 | Width of the bank-guard zone inside the band edge. |
+| `bank_left_m`, `bank_right_m` | 3.2, 4.0 | Bank limits from the centerline. Measured banks (RTK bank hits): left 4.20 m, right 5.11 m. |
+| `line_left_m`, `line_right_m` | 2.6, 3.4 | Furthest from the centerline a line may be drawn on each side. |
+| `guard_zone_m` | 0.5 | Width of the bank-guard zone inside each bank limit. |
+| `turn_planner` | true | Plan large turns against the bank limits (`--no-turn-planner` turns the short way). |
+| `turn_plan_deg`, `turn_exit_deg` | 60, 25 | Plan a turn when the course is further off than this; hand back to line following below this. |
+| `turn_radius_left_m`, `turn_radius_right_m` | 3.0, 2.3 | Full-lock, full-throttle turn radii (measured 2.1-2.3 m right/left on 17 Nov, left 2.9-3.5 m on 16 Nov). |
+| `turn_delay_sec` | 0.4 | Straight travel before a turn bites (servo slew and GPS delay). |
+| `plan_neutral_sec`, `plan_reverse_sec`, `plan_reverse_throttle`, `plan_max_reverses` | 0.3, 1.5, 0.5, 2 | The reverse-then-turn manoeuvre. |
 | `max_intercept_deg` | 15.0 | Largest angle off the course while merging onto the line. |
 | `recovery_intercept_deg` | 40.0 | Intercept in the bank zones and the hard-limit turn. |
 | `lookahead_time_sec`, `lookahead_min_m`, `lookahead_max_m` | 1.8, 2.4, 5.0 | Speed-dependent line-of-sight distance. |
@@ -441,11 +469,10 @@ waypoint, measured along the course.
 | `integral_max_error_deg` | 20.0 | No integration while the course error is larger. |
 | `min_course_speed_mps`, `course_max_age_sec`, `position_heading_max_age_sec`, `forward_acquire_sec`, `forward_memory_sec` | as 03/04 | GPS-course heading selection. |
 
-`line_max_offset_m + guard_zone_m` must be inside `band_half_width_m`. Telemetry
-uses the existing columns: `lane` is `line`, `cte_right_m` is the error to the
-line, `prediction_status` is `line`, `merging`, `bank_guard`, `hard_limit` or
-`heading_unavailable`, and `prediction_corridor_clearance_m` is the forecast
-distance to the band edge. Compare strategies offline with
+Telemetry uses the existing columns: `lane` is `line`, `cte_right_m` is the
+error to the line, `prediction_status` is `line`, `merging`, `bank_guard`,
+`hard_limit`, `heading_unavailable` or one of the turn-planner states above, and
+`prediction_corridor_clearance_m` is the forecast distance to the bank limit. Compare strategies offline with
 `python3 benchmark.py compare` and
 `python3 simulate_boat.py auto --strategy 05_straight_line` (see `RACE_SPEED.md`).
 
@@ -453,8 +480,8 @@ distance to the band edge. Compare strategies offline with
 
 With `test_square` true (or `--test-square`), AUTO does not race. From the
 entry point it drives two rectangles at `test_throttle` (0.6 = 60% forward):
-first with long sides on the bank lines (d = -band, +band), then on the line
-limits (d = -line limit, +line limit). Each rectangle starts `test_lead_m`
+first with long sides on the bank limits (d = -bank_left_m, +bank_right_m), then
+on the line limits (d = -line_left_m, +line_right_m). Each rectangle starts `test_lead_m`
 ahead, runs `test_leg_length_m` forward along the left line, crosses to the
 right line, comes back along it and crosses back; every corner is a right turn
 (the hull's tighter direction). A corner counts as reached within
@@ -462,7 +489,7 @@ right line, comes back along it and crosses back; every corner is a right turn
 limits; engage it in open water near the start of the course, pointed down the
 course, and keep the transmitter ready (full reverse returns to MANUAL).
 
-`prediction_status` names the leg (`square leg 2: +-2.50 m left line`) and the
+`prediction_status` names the leg (`square leg 2: bank -3.20/+4.00 m left line`) and the
 event log records each leg. Afterwards:
 
 ```sh
