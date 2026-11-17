@@ -228,7 +228,7 @@ BALLOON_STEER_GAIN = 50.0
 BALLOON_STEER_KD = 3.5
 BALLOON_MIN_AREA = 110
 BALLOON_CHARGE_ANGLE_DEG = 18.0
-BALLOON_MEMORY_SEC = 1.0
+BALLOON_MEMORY_SEC = 5.0              # balloon lost: hold course straight this long (wave dropouts) before the search turn
 BALLOON_POP_FOLLOW_SEC = 1.2
 BALLOON_SEARCH_TIMEOUT_SEC = 25.0
 
@@ -2840,10 +2840,10 @@ def main_loop():
                         steer = balloon_steer(angle_err, 0.0)
                         drive = max_GO
                     elif since_seen <= BALLOON_MEMORY_SEC:
-                        # 일시 소실 시 직전 방향 유지
+                        # Brief loss (waves): keep going straight, rudder centred, until BALLOON_MEMORY_SEC
                         balloon_substate = "TRACKING"
-                        angle_err = balloon_last_angle_err * 0.8
-                        steer = balloon_steer(angle_err, 0.0)
+                        angle_err = 0.0
+                        steer = CENTER
                         drive = lerp(STOP, max_GO, 0.65)
                     else:
                         # 미검출 시 저속 선회 탐색
