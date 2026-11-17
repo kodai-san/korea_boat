@@ -1,3 +1,14 @@
+"""Boat dashboard controller with persistent RC takeover.
+
+MANUAL: move either RC stick to take ownership from the dashboard.
+AUTO/BALLOON: full steering either way (85%) or full reverse (calibrated
+threshold) takes ownership without an arming delay. Web-only mode and GCS
+link hold do not disable takeover. Ownership persists at neutral and after
+RC loss (which commands stop after 0.5 s). To hand back to the dashboard,
+center the sticks and explicitly select a mode. E-stop remains authoritative.
+This software path requires a running controller and working RC/I2C hardware.
+"""
+
 import os
 import sys
 import csv
@@ -39,17 +50,7 @@ except Exception:
     serial = None
     SERIAL_ERR_TYPES = (OSError,)
 
-try:
-    import board
-    import busio
-    from adafruit_pca9685 import PCA9685
-    HW_AVAILABLE = True
-except Exception:
-    board = None
-    busio = None
-    PCA9685 = None
-    HW_AVAILABLE = False
-
+# Motor output uses the same smbus2 driver as multipath_boat.py.
 import subprocess
 import shutil
 
@@ -65,10 +66,12 @@ except Exception:
 # AUTO path following uses the same navigator, strategies and heading selector as multipath_boat.py
 from multipath_boat import (
     MultipathNavigator, ZEDF9PReceiver, resolve_navigation_params, latlon_to_enu,
-    normalize_axis, detect_serial_ports,
+    normalize_axis, detect_serial_ports, PCA9685Driver, SMBus,
 )
 from auto_strategies import create_auto_strategy
 from gps_heading import MotionHeadingSelector
+
+HW_AVAILABLE = SMBus is not None
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -170,7 +173,7 @@ RC_OVERRIDE_STEER_RATIO = 0.85
 RC_OVERRIDE_REVERSE_RATIO = HW["rev_ratio"]
 
 RC_VALID_MIN = 750
-RC_VALID_MAX = 2050
+RC_VALID_MAX = 2200
 PWM_WRITE_MIN_DELTA = 15
 PWM_PERIOD = 0.05
 RC_FILTER = 0.25
@@ -183,7 +186,7 @@ ARRIVE_DIST_M = 1.5
 LOOKAHEAD_MIN_M = 1.5
 HEADING_INIT_MOVE_M = 0.35
 
-RC_TIMEOUT = 1.0
+RC_TIMEOUT = 0.5
 GPS_TIMEOUT = 1.0
 BAD_FIX_TIMEOUT = 1.0
 MAX_GPS_GLITCH_DIST_M = 2.5
@@ -412,39 +415,31 @@ def open_gps_serial():
     _, gps_port = detect_serial_ports(RC_PORT, GPS_PORT, excluded_ports=(other,) if other else ())
     return _open_serial_port(gps_port, GPS_BAUD)
 
-# PCA9685 초기화 및 버스 자동 탐색 (Bus 0 / Bus 1)
+# Initialize PCA9685 on the calibrated I2C bus.
 def init_pca9685():
-    global pca
+    global pca, _last_steer, _last_drive, _need_safe_stop_retry
     if not HW_AVAILABLE:
+        add_event_log("I2C", "Motor output unavailable: install smbus2", "warn")
         return False
-    builders = []
     try:
-        from adafruit_extended_bus import ExtendedI2C
-        for bus_no in sorted((0, 1), key=lambda b: b != PCA_I2C_BUS):  # configured bus first
-            builders.append((f"ExtendedI2C({bus_no})", lambda b=bus_no: ExtendedI2C(b)))
-    except Exception:
-        pass
-    if hasattr(board, "SCL_1") and hasattr(board, "SDA_1"):
-        builders.append(("board.SCL_1/SDA_1(Bus0)", lambda: busio.I2C(board.SCL_1, board.SDA_1)))
-    if hasattr(board, "SCL") and hasattr(board, "SDA"):
-        builders.append(("board.SCL/SDA(Bus1)", lambda: busio.I2C(board.SCL, board.SDA)))
-
-    last_err = None
-    for name, fn in builders:
-        try:
-            b = fn()
-            cand = PCA9685(b, address=PCA_ADDR)
-            cand.frequency = PCA_FREQ_HZ
-            pca = cand
-            shared_state["lampSerial"] = "ok"
-            add_event_log("I2C", f"PCA9685 motor driver connected ({name}, 0x{PCA_ADDR:02x})", "auto")
-            return True
-        except Exception as e:
-            last_err = e
-    pca = None
-    shared_state["lampSerial"] = "err"
-    add_event_log("I2C", f"PCA9685 not responding (bus 0/1 failed: {last_err}) -> check I2C wiring/power!", "warn")
-    return False
+        pca = PCA9685Driver(bus_num=PCA_I2C_BUS, address=PCA_ADDR, freq_hz=PCA_FREQ_HZ)
+        _last_steer = _last_drive = None
+        _need_safe_stop_retry = True
+        # Initialize neutral before accepting commands after startup/reconnection.
+        pca.set_pwm_us(SERVO_CH, HW["servo_center"])
+        pca.set_pwm_us(ESC_CH, HW["esc_neutral"])
+        add_event_log("I2C", f"PCA9685 connected (bus {PCA_I2C_BUS}, 0x{PCA_ADDR:02x})", "auto")
+        return True
+    except Exception as e:
+        if pca is not None:
+            try:
+                pca.close()
+            except Exception:
+                pass
+        pca = None
+        shared_state["lampSerial"] = "err"
+        add_event_log("I2C", f"PCA9685 unavailable: {e}", "warn")
+        return False
 
 # 주변장치(RC, GPS, PCA9685) 초기화
 def init_peripherals():
@@ -530,6 +525,15 @@ def rc_to_logical(st_pulse, th_pulse):
     else:
         drive = STOP + (-th_n) * (max_BACK - STOP)
     return int(round(steer)), int(round(drive))
+
+
+def rc_takeover_requested(mode, steer_pulse, throttle_pulse):
+    """Any stick in MANUAL; full steering or reverse in autonomous modes."""
+    steer = rc_steer_norm(steer_pulse)
+    throttle = rc_throttle_norm(throttle_pulse)
+    if mode == "MANUAL":
+        return steer != 0.0 or throttle != 0.0
+    return abs(steer) >= RC_OVERRIDE_STEER_RATIO or throttle <= -RC_OVERRIDE_REVERSE_RATIO
 
 
 # 각도 정규화 (-180 ~ +180)
@@ -1054,18 +1058,17 @@ def set_pwm(steer, drive, force=False):
     )
 
     if pca is None:
-        _last_steer = steer
-        _last_drive = target_drive
-        shared_state["steerPwm"] = _last_steer
-        shared_state["drivePwm"] = _last_drive
+        _last_steer = _last_drive = None
+        _need_safe_stop_retry = True
+        shared_state["lampSerial"] = "err"
         return
 
     try:
         if steer_need:
-            pca.channels[SERVO_CH].duty_cycle = steer_duty(steer)
+            pca.set_pwm_us(SERVO_CH, steer_us(steer))
             _last_steer = steer
         if drive_need:
-            pca.channels[ESC_CH].duty_cycle = drive_duty(target_drive)
+            pca.set_pwm_us(ESC_CH, drive_us(target_drive))
             _last_drive = target_drive
         _need_safe_stop_retry = False
         _pca_err_streak = 0
@@ -1090,8 +1093,8 @@ def safe_stop():
 
     for _ in range(3):
         try:
-            pca.channels[SERVO_CH].duty_cycle = steer_duty(CENTER)
-            pca.channels[ESC_CH].duty_cycle = drive_duty(STOP)
+            pca.set_pwm_us(SERVO_CH, steer_us(CENTER))
+            pca.set_pwm_us(ESC_CH, drive_us(STOP))
             _last_steer, _last_drive = CENTER, STOP
             _need_safe_stop_retry = False
             return
@@ -2244,14 +2247,13 @@ def main_loop():
     balloon_last_angle_err = 0.0
     balloon_substate = "IDLE"
     balloon_arrive_count = 0
-    mode_enter_t = 0.0
-    override_armed = False
     web_manual_steer = CENTER
     web_manual_drive = STOP
     web_manual_until_t = 0.0
     web_manual_active = False
     web_manual_stop_hold_t = 0.0
     rc_ignore_mode = False
+    rc_manual_latched = False
     gcs_watchdog_enabled = True
     gcs_link_paused = False
 
@@ -2316,8 +2318,8 @@ def main_loop():
             elif pca is None:
                 shared_state["lampSerial"] = "err"
 
-        # 1. RC 수신 (웹 단독 모드 시 불필요한 시리얼 재연결 폴링 생략)
-        raw_st, raw_th = (None, None) if rc_ignore_mode else read_latest_rc()
+        # Always receive RC, including web-only operation.
+        raw_st, raw_th = read_latest_rc()
         if raw_st is not None and raw_th is not None:
             last_rc_t = now
             last_raw_st, last_raw_th = raw_st, raw_th
@@ -2400,15 +2402,17 @@ def main_loop():
               reset_pid_state()
               safe_stop()
               add_event_log("E-STOP", "E-STOP cleared -> MANUAL idle", "auto")
-          elif cmd == "set_mode" and not estop_active:
+          elif cmd == "set_mode" and cmd_val in ("MANUAL", "AUTO", "BALLOON") and not estop_active:
+              # A takeover is released only by an explicit mode selection at neutral.
+              if rc_manual_latched and rc_ok and (rc_steer_norm(last_raw_st) != 0 or rc_throttle_norm(last_raw_th) != 0):
+                  continue
+              rc_manual_latched = False
               if cmd_val == "AUTO" and current_mode != "AUTO":
                   if not gps_ok or not (2 <= fix_status <= 5):
                       safe_stop()
                       add_event_log("FAILSAFE", f"GPS not ready (fix={fix_status}) -> AUTO entry rejected", "warn")
                   else:
                       current_mode = "AUTO"
-                      mode_enter_t = now
-                      override_armed = False
                       reset_pid_state()
                       heading_none_start_t = now
                       stall_check_start_t = 0.0
@@ -2416,9 +2420,7 @@ def main_loop():
                       auto_start_time = now
                       # 진입 직후 오버라이드 오작동 방지
                       filt_st, filt_th = float(ST_NEU), float(TH_NEU)
-                      last_raw_st, last_raw_th = ST_NEU, TH_NEU
                       ST_V, TH_V = ST_NEU, TH_NEU
-                      raw_st, raw_th = None, None
                       # 저속 진입 시 COG만 초기화
                       if spd_mps < 0.5:
                           _last_cog = None
@@ -2469,17 +2471,13 @@ def main_loop():
                       add_event_log("FAILSAFE", "Pi camera not ready -> BALLOON entry rejected", "warn")
                   else:
                       current_mode = "BALLOON"
-                      mode_enter_t = now
-                      override_armed = False
                       stall_check_start_t = 0.0
                       balloon_arrive_count = 0
                       balloon_mode_start_t = now
                       balloon_last_seen_t = now if b_det_now else 0.0
                       balloon_substate = "TRACKING" if b_det_now else "SEARCHING"
                       filt_st, filt_th = float(ST_NEU), float(TH_NEU)
-                      last_raw_st, last_raw_th = ST_NEU, TH_NEU
                       ST_V, TH_V = ST_NEU, TH_NEU
-                      raw_st, raw_th = None, None
                       with state_lock:
                           shared_state["mode"] = current_mode
                       add_event_log("BALLOON", "Web command -> VISION (optical target tracking)", "auto")
@@ -2706,7 +2704,7 @@ def main_loop():
               with state_lock:
                   shared_state["rcIgnore"] = rc_ignore_mode
               if rc_ignore_mode:
-                  add_event_log("REMOTE", "Web-only control ON -> ignore RC interference/override", "warn")
+                  add_event_log("REMOTE", "Web-only control ON -> idle RC suppressed; RC takeover remains active", "warn")
               else:
                   add_event_log("REMOTE", "RC link restored -> RC manual and emergency override active", "auto")
           elif cmd == "set_link_watchdog":
@@ -2750,7 +2748,7 @@ def main_loop():
                   )
               except (ValueError, TypeError) as e:
                   add_event_log("REMOTE", f"Remote settings format error ignored ({e})", "warn")
-          elif cmd == "web_manual_drive" and isinstance(cmd_val, dict) and not estop_active:
+          elif cmd == "web_manual_drive" and isinstance(cmd_val, dict) and not estop_active and not rc_manual_latched:
               try:
                   current_mode = "MANUAL"
                   balloon_substate = "IDLE"
@@ -2762,12 +2760,9 @@ def main_loop():
                   web_manual_until_t = now + dur_s
                   web_manual_stop_hold_t = 0.0
                   web_manual_active = True
-                  if ready:
-                      set_pwm(web_manual_steer, web_manual_drive, force=True)
-                      last_pwm_t = now
               except Exception:
                   pass
-          elif cmd == "web_manual_stop":
+          elif cmd == "web_manual_stop" and not rc_manual_latched:
               web_manual_until_t = 0.0
               web_manual_active = False
               web_manual_steer = CENTER
@@ -2816,6 +2811,7 @@ def main_loop():
         shared_state["linkWatchdog"] = gcs_watchdog_enabled
         shared_state["linkTimeoutSec"] = GCS_LINK_TIMEOUT_SEC
         shared_state["rcIgnore"] = rc_ignore_mode
+        shared_state["rcManualActive"] = rc_manual_latched
 
         if estop_active:
             safe_stop()
@@ -2827,38 +2823,30 @@ def main_loop():
             time.sleep(max(0.001, 0.02 - elapsed))
             continue
 
-        # RC 비상 오버라이드 감시 (웹 단독 control 시 RC 노이즈 무시)
-        if current_mode in ("AUTO", "BALLOON") and rc_effective_ok and ST_V is not None and TH_V is not None:
-            def _steer_full(p):
-                return abs(rc_steer_norm(p)) >= RC_OVERRIDE_STEER_RATIO
-
-            def _rev_full(p):
-                return rc_throttle_norm(p) <= -RC_OVERRIDE_REVERSE_RATIO
-
-            in_normal_zone = (
-                not _steer_full(ST_V) and not _rev_full(TH_V)
-                and (raw_st is None or not _steer_full(raw_st))
-                and (raw_th is None or not _rev_full(raw_th))
-            )
-            if in_normal_zone:
-                override_armed = True
-
-            if override_armed and (now - mode_enter_t) >= 0.50:
-                filt_steer_full = _steer_full(ST_V)
-                filt_rev_full = _rev_full(TH_V)
-                if filt_steer_full or filt_rev_full:
-                    prev_mode = current_mode
-                    current_mode = "MANUAL"
-                    balloon_substate = "IDLE"
-                    override_armed = False
-                    last_pwm_t = 0.0
-                    if prev_mode == "BALLOON":
-                        add_event_log("OVERRIDE", f"RC emergency input detected (ST:{ST_V}, TH:{TH_V}) -> abort BALLOON, switch to MANUAL", "warn")
-                    else:
-                        add_event_log("OVERRIDE", f"RC emergency input detected (ST:{ST_V}, TH:{TH_V}) -> switch to MANUAL immediately", "warn")
+        # Raw RC always remains available, even in web-only mode and link hold.
+        if rc_ok and rc_takeover_requested(current_mode, last_raw_st, last_raw_th):
+            if not rc_manual_latched:
+                add_event_log("OVERRIDE", "RC takeover -> MANUAL (dashboard control released)", "warn")
+            rc_manual_latched = True
+            shared_state["rcManualActive"] = True
+            shared_state["lampRc"] = "ok"
+            current_mode = "MANUAL"
+            balloon_substate = "IDLE"
+            web_manual_until_t = web_manual_stop_hold_t = 0.0
+            web_manual_active = False
+            reset_pid_state()
 
         # 원격 통신 끊김 시 연결 회복 전까지 제자리 정지 유지
-        if gcs_link_paused:
+        if rc_manual_latched:
+            # Keep ownership through neutral and RC loss; never resume web/AUTO implicitly.
+            if rc_ok:
+                steer, drive = rc_to_logical(last_raw_st, last_raw_th)
+                if ready and (now - last_pwm_t) >= PWM_PERIOD:
+                    set_pwm(steer, drive)
+                    last_pwm_t = now
+            else:
+                safe_stop()
+        elif gcs_link_paused:
             safe_stop()
             stall_check_start_t = 0.0
             heading_none_start_t = now
@@ -3290,7 +3278,7 @@ if __name__ == "__main__":
             pass
         if pca is not None:
             try:
-                pca.deinit()
+                pca.close()
             except Exception:
                 pass
         if ser is not None:
