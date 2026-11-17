@@ -104,6 +104,46 @@ python3 multipath_boat.py --no-spresense
 
 ## Verification
 
+The terminal and event log distinguish three sender states:
+
+- `Connected to ...: 921600 baud`: the host opened the selected serial port.
+- `USB port is open but no GPS GGA sample has arrived`: no CSV is being sent.
+  This warning repeats every 30 seconds while waiting. A no-fix GGA is enough
+  to start sending; a position fix is not required.
+- `Host write OK: ... bytes`: the host serial driver accepted a complete CSV
+  row. This appears on the first successful write after connection and every
+  30 seconds while sending. It does not acknowledge receipt by the receiver.
+
+To test raw reception indoors without relying on GPS data, stop the boat
+controller first, then run this on the Jetson. Replace `/dev/ttyUSB0` with the
+confirmed Spresense port if it differs. This sends three synthetic **no-fix**
+rows (no coordinates) five seconds apart and does not initialize boat controls:
+
+```sh
+python3 - <<'PY'
+import time
+import serial
+
+with serial.Serial("/dev/ttyUSB0", 921600, bytesize=8, parity="N", stopbits=1,
+                   timeout=0, write_timeout=0.5, xonxoff=False, rtscts=False,
+                   dsrdtr=False, exclusive=True) as port:
+    for _ in range(3):
+        row = b"000000.00,0,,,0,\n"
+        written = port.write(row)
+        print(f"Host accepted {written}/{len(row)} bytes", flush=True)
+        if written != len(row):
+            raise RuntimeError("Incomplete diagnostic write")
+        time.sleep(5)
+PY
+```
+
+Watch the receiver's raw byte count during this test. Complete host writes with
+zero received bytes rule out missing GPS samples as the cause of the test's
+silence; verify the selected device, the physical USB connection, and which
+serial interface the receiver firmware reads at 921600 baud, 8N1, no flow control.
+If test bytes arrive but normal streaming stays silent, use the sender state
+messages above to check GPS input and any write/reconnection errors.
+
 Run the offline tests without connecting motors, GPS, or a network:
 
 ```sh

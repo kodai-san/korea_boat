@@ -76,6 +76,7 @@ class SpresenseGPSStreamer:
     RETRY_SEC = 1.0
     WRITE_TIMEOUT_SEC = 0.5
     WARNING_INTERVAL_SEC = 30.0
+    WRITE_LOG_INTERVAL_SEC = 30.0
 
     def __init__(self, sample_provider, port="auto", serial_number=None,
                  excluded_ports=(), logger=None):
@@ -90,6 +91,7 @@ class SpresenseGPSStreamer:
         self._identity = None
         self._warning = None
         self._warning_time = 0.0
+        self._last_write_log_time = None
 
     def _log(self, message, level=logging.INFO):
         # Diagnostics must not terminate this optional worker, even when an
@@ -169,6 +171,7 @@ class SpresenseGPSStreamer:
         if info is not None and self._identity is None:
             self._identity = self._usb_identity(info)
         self._warning = None
+        self._last_write_log_time = None
         self._log(f"[SPRESENSE] Connected to {path}: {self.BAUDRATE} baud, 8N1; GPS CSV every 5 seconds.")
         return True
 
@@ -202,6 +205,17 @@ class SpresenseGPSStreamer:
                         written = self._serial.write(payload)
                         if written != len(payload):
                             raise OSError(f"Incomplete CSV write ({written}/{len(payload)} bytes)")
+                        self._warning = None
+                        now = time.monotonic()
+                        if (self._last_write_log_time is None
+                                or now - self._last_write_log_time >= self.WRITE_LOG_INTERVAL_SEC):
+                            self._log(f"[SPRESENSE] Host write OK: {written} bytes; "
+                                      f"timestamp={sample['timestamp']!r}, fix_quality={sample['fix_quality']}. "
+                                      "Receiver receipt is not confirmed.")
+                            self._last_write_log_time = now
+                    else:
+                        self._warn("USB port is open but no GPS GGA sample has arrived; "
+                                   "no CSV is being sent. A position fix is not required.")
                     next_send = send_started + self.INTERVAL_SEC
                     # Missed intervals are dropped; never burst stale samples.
                     if next_send <= time.monotonic():
