@@ -325,6 +325,8 @@ shared_state = {
     "cameraOk": False,
     "balloonDetected": False,
     "balloonState": "IDLE",
+    "balloonGpsActive": False,
+    "balloonGpsDistM": 0.0,
     "balloonX": 0.0,
     "balloonY": 0.0,
     "balloonRadius": 0.0,
@@ -768,6 +770,160 @@ def nav_throttle_to_pwm(blend):
     return int(round(cruise + b * (max_GO - cruise)))
 
 _rc_last_pkt_mono = 0.0
+
+# ---------------------------------------------------------------------------
+# BALLOON GPS fallback. If the camera has not seen the balloon for vision_lost_sec,
+# steer to a known GPS position of the balloon instead (same heading-error law as AUTO).
+# Configured in calibration.json; stays off until "enabled" is true and lat/lon are set:
+#   "balloon_gps_fallback": {"enabled": true, "lat": 35.0, "lon": 129.0, "vision_lost_sec": 20.0,
+#                            "arrive_radius_m": null, "thrust_ratio": 0.5, "timeout_sec": 120.0}
+# arrive_radius_m null = the vision stop distance (APPROACH_STOP) or 1.5 m (RAM_POP).
+# ---------------------------------------------------------------------------
+BALLOON_GPS_FALLBACK_DEFAULTS = {
+    "enabled": False, "lat": None, "lon": None, "vision_lost_sec": 20.0,
+    "arrive_radius_m": None, "thrust_ratio": 0.5, "timeout_sec": 120.0,
+}
+BALLOON_GPS_RAM_RADIUS_M = 1.5
+
+
+def _fallback_number(name, value, low, high=None):
+    if (isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value)
+            or value < low or (high is not None and value > high)):
+        bounds = f"{low:g} to {high:g}" if high is not None else f">= {low:g}"
+        raise ValueError(f"balloon_gps_fallback.{name} must be a finite number {bounds}")
+    return float(value)
+
+
+def load_balloon_gps_fallback():
+    """Validated GPS-fallback settings from calibration.json, or None when it is disabled."""
+    cfg_path = resolve_path(AUTO_CONFIG_FILE)
+    raw = {}
+    if os.path.exists(cfg_path):
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            raw = json.load(f).get("balloon_gps_fallback", {})
+    if not isinstance(raw, dict):
+        raise ValueError("balloon_gps_fallback must be a JSON object")
+    unknown = raw.keys() - BALLOON_GPS_FALLBACK_DEFAULTS.keys()
+    if unknown:
+        raise ValueError(f"unknown balloon_gps_fallback option(s): {', '.join(sorted(unknown))}")
+    cfg = dict(BALLOON_GPS_FALLBACK_DEFAULTS, **raw)
+    if not isinstance(cfg["enabled"], bool):
+        raise ValueError("balloon_gps_fallback.enabled must be true or false")
+    if not cfg["enabled"]:
+        return None
+    if cfg["lat"] is None or cfg["lon"] is None:
+        raise ValueError("balloon_gps_fallback is enabled but lat and lon are not set")
+    cfg["lat"] = _fallback_number("lat", cfg["lat"], -90.0, 90.0)
+    cfg["lon"] = _fallback_number("lon", cfg["lon"], -180.0, 180.0)
+    cfg["vision_lost_sec"] = _fallback_number("vision_lost_sec", cfg["vision_lost_sec"], 1.0)
+    cfg["thrust_ratio"] = _fallback_number("thrust_ratio", cfg["thrust_ratio"], 0.2, 1.0)
+    cfg["timeout_sec"] = _fallback_number("timeout_sec", cfg["timeout_sec"], 5.0)
+    if cfg["arrive_radius_m"] is not None:
+        cfg["arrive_radius_m"] = _fallback_number("arrive_radius_m", cfg["arrive_radius_m"], 0.3)
+    return cfg
+
+
+try:
+    BALLOON_GPS_FALLBACK = load_balloon_gps_fallback()
+except (ValueError, OSError) as e:
+    raise SystemExit(f"balloon_gps_fallback config error ({AUTO_CONFIG_FILE}): {e}")
+
+
+def balloon_gps_command(c_lat, c_lon, heading_deg, tgt_lat, tgt_lon, thrust_ratio):
+    """Steer/drive toward a GPS target. Returns (steer, drive, distance_m, bearing_deg, heading_error_deg).
+
+    The heading error is None when no heading is available: the boat then goes straight at low
+    thrust so the GPS course can establish one. The steering law is AUTO's (full rudder at
+    max_steer_angle_deg of error); thrust is reduced during large turns.
+    """
+    dist = haversine(c_lat, c_lon, tgt_lat, tgt_lon)
+    bearing = gps_bearing(c_lat, c_lon, tgt_lat, tgt_lon)
+    if heading_deg is None:
+        return CENTER, lerp(STOP, max_GO, min(thrust_ratio, 0.35)), dist, bearing, None
+    err = wrap180(bearing - heading_deg)
+    steer = nav_steer_to_pwm(clamp(err / NAVIGATOR.params["max_steer_angle_deg"], -1.0, 1.0))
+    ratio = thrust_ratio * (0.6 if abs(err) > 45.0 else 1.0)
+    return steer, lerp(STOP, max_GO, ratio), dist, bearing, err
+
+# NMEA XOR 체크섬 검증
+def verify_nmea_checksum(line):
+    if not line or not line.startswith("$") or "*" not in line:
+        return False
+    body, _, chk_str = line[1:].partition("*")
+    chk_str = chk_str.strip()[:2]
+    if len(chk_str) != 2:
+        return False
+    try:
+        expected = int(chk_str, 16)
+    except ValueError:
+        return False
+    calc = 0
+    for ch in body:
+        calc ^= ord(ch)
+    return calc == expected
+
+# NMEA GGA 파싱
+def parse_gga(line):
+    if not (line.startswith("$GNGGA") or line.startswith("$GPGGA")) or not verify_nmea_checksum(line):
+        return None
+    parts = line.split(",")
+    if len(parts) < 10 or not parts[6]:
+        return None
+    try:
+        fix = int(parts[6])
+        sats = int(parts[7]) if parts[7] else 0
+        hdop = float(parts[8]) if parts[8] else 99.9
+        if not parts[2] or not parts[4]:
+            return None, None, fix, sats, hdop
+        lat = float(parts[2][:2]) + float(parts[2][2:]) / 60.0
+        if parts[3] == "S":
+            lat = -lat
+        lon = float(parts[4][:3]) + float(parts[4][3:]) / 60.0
+        if parts[5] == "W":
+            lon = -lon
+        return lat, lon, fix, sats, hdop
+    except (ValueError, IndexError):
+        return None
+
+# NMEA RMC 파싱
+def parse_rmc(line):
+    if not (line.startswith("$GNRMC") or line.startswith("$GPRMC")) or not verify_nmea_checksum(line):
+        return None
+    parts = line.split(",")
+    if len(parts) < 10 or parts[2] != "A" or not parts[3] or not parts[5]:
+        return None
+    try:
+        lat = float(parts[3][:2]) + float(parts[3][2:]) / 60.0
+        if parts[4] == "S":
+            lat = -lat
+        lon = float(parts[5][:3]) + float(parts[5][3:]) / 60.0
+        if parts[6] == "W":
+            lon = -lon
+        cog = float(parts[8]) if parts[8] else None
+        spd_kn = float(parts[7]) if parts[7] else 0.0
+        return lat, lon, cog, spd_kn
+    except (ValueError, IndexError):
+        return None
+
+# 아두이노 RC 펄스 파싱
+def get_arduino_data(data_str):
+    if not data_str:
+        return None, None
+    try:
+        s = data_str.replace("ST:", "").replace("TH:", "")
+        parts = s.split(",")
+        if len(parts) >= 2:
+            st = int(float(parts[0].strip()))
+            th = int(float(parts[1].strip()))
+            if not (RC_VALID_MIN <= st <= RC_VALID_MAX and RC_VALID_MIN <= th <= RC_VALID_MAX):
+                return None, None
+            return st, th
+    except (ValueError, TypeError):
+        pass
+    return None, None
+
+_last_rc_reconnect_t = 0.0
+_last_gps_reconnect_t = 0.0
 _rc_read_count = 0
 
 
@@ -2058,6 +2214,9 @@ def main_loop():
 
     balloon_last_seen_t = 0.0
     balloon_mode_start_t = 0.0
+    balloon_gps_active = False
+    balloon_gps_start_t = 0.0
+    balloon_gps_heading_none_t = 0.0
     balloon_last_angle_err = 0.0
     balloon_substate = "IDLE"
     balloon_arrive_count = 0
@@ -2101,6 +2260,16 @@ def main_loop():
 
     if CAM_ENABLE:
         threading.Thread(target=camera_worker, daemon=True).start()
+
+    if BALLOON_GPS_FALLBACK is not None:
+        add_event_log(
+            "BALLOON",
+            f"GPS fallback ON: target ({BALLOON_GPS_FALLBACK['lat']:.7f}, {BALLOON_GPS_FALLBACK['lon']:.7f}) "
+            f"after {BALLOON_GPS_FALLBACK['vision_lost_sec']:g}s without the balloon in view",
+            "auto",
+        )
+    else:
+        add_event_log("BALLOON", "GPS fallback off (balloon_gps_fallback in calibration.json)", "auto")
 
     add_event_log("START", "Main control loop started (50Hz, MANUAL)", "auto")
     loop_counter = 0
@@ -2324,6 +2493,8 @@ def main_loop():
                       stall_check_start_t = 0.0
                       balloon_arrive_count = 0
                       balloon_mode_start_t = now
+                      balloon_gps_active = False
+                      balloon_gps_heading_none_t = 0.0
                       balloon_last_seen_t = now if b_det_now else 0.0
                       balloon_substate = "TRACKING" if b_det_now else "SEARCHING"
                       filt_st, filt_th = float(ST_NEU), float(TH_NEU)
@@ -2793,6 +2964,9 @@ def main_loop():
                 add_event_log("FAILSAFE", "Pi camera timeout -> abort BALLOON, switch to MANUAL", "warn")
             else:
                 if b_detected:
+                    if balloon_gps_active:
+                        balloon_gps_active = False
+                        add_event_log("BALLOON", "Camera re-acquired the balloon -> vision tracking", "auto")
                     balloon_last_seen_t = now
                     balloon_last_angle_err = b_ang_err
                     t_dist = b_dist
@@ -2849,7 +3023,65 @@ def main_loop():
                         # 미검출 시 저속 선회 탐색
                         balloon_substate = "SEARCHING"
                         ref_t = balloon_last_seen_t if balloon_last_seen_t > 0.0 else balloon_mode_start_t
-                        if (now - ref_t) >= BALLOON_SEARCH_TIMEOUT_SEC:
+                        gps_fb = BALLOON_GPS_FALLBACK
+                        use_gps = (
+                            gps_fb is not None and (now - ref_t) >= gps_fb["vision_lost_sec"]
+                            and gps_ok and 2 <= fix_status <= 5
+                        )
+                        if not use_gps:
+                            balloon_gps_active = False
+                        if use_gps:
+                            # Vision has lost the balloon: steer to the configured GPS position instead
+                            if not balloon_gps_active:
+                                balloon_gps_active = True
+                                balloon_gps_start_t = now
+                                balloon_gps_heading_none_t = 0.0
+                                add_event_log(
+                                    "BALLOON",
+                                    f"Balloon not seen for {now - ref_t:.0f}s -> GPS fallback to "
+                                    f"({gps_fb['lat']:.7f}, {gps_fb['lon']:.7f}), "
+                                    f"{haversine(c_lat, c_lon, gps_fb['lat'], gps_fb['lon']):.1f} m away",
+                                    "warn",
+                                )
+                            steer, drive, t_dist, target_angle, gps_err = balloon_gps_command(
+                                c_lat, c_lon, heading, gps_fb["lat"], gps_fb["lon"], gps_fb["thrust_ratio"]
+                            )
+                            angle_err = gps_err if gps_err is not None else 0.0
+                            balloon_substate = "GPS_FALLBACK"
+                            arrive_m = gps_fb["arrive_radius_m"]
+                            if arrive_m is None:
+                                arrive_m = BALLOON_STOP_DIST_M if BALLOON_ACTION_MODE == "APPROACH_STOP" else BALLOON_GPS_RAM_RADIUS_M
+                            if gps_err is None:
+                                if balloon_gps_heading_none_t == 0.0:
+                                    balloon_gps_heading_none_t = now
+                            else:
+                                balloon_gps_heading_none_t = 0.0
+                            if t_dist <= arrive_m:
+                                safe_stop()
+                                current_mode = "MANUAL"
+                                balloon_substate = "FINISH"
+                                balloon_gps_active = False
+                                steer, drive = CENTER, STOP
+                                finish_msg = f"Reached the GPS balloon position ({t_dist:.1f} m) -> safe stop and MANUAL"
+                                with state_lock:
+                                    shared_state["balloonFinishSeq"] = shared_state.get("balloonFinishSeq", 0) + 1
+                                    shared_state["balloonFinishMsg"] = finish_msg
+                                add_event_log("FINISH", finish_msg, "auto")
+                            elif (now - balloon_gps_start_t) >= gps_fb["timeout_sec"]:
+                                safe_stop()
+                                current_mode = "MANUAL"
+                                balloon_substate = "IDLE"
+                                balloon_gps_active = False
+                                steer, drive = CENTER, STOP
+                                add_event_log("BALLOON", f"GPS fallback timed out after {gps_fb['timeout_sec']:g}s ({t_dist:.1f} m left) -> safe stop and MANUAL", "warn")
+                            elif balloon_gps_heading_none_t > 0.0 and (now - balloon_gps_heading_none_t) > HEADING_INIT_MAX_SEC:
+                                safe_stop()
+                                current_mode = "MANUAL"
+                                balloon_substate = "IDLE"
+                                balloon_gps_active = False
+                                steer, drive = CENTER, STOP
+                                add_event_log("FAILSAFE", f"No heading for GPS fallback (>{HEADING_INIT_MAX_SEC:g}s) -> safe stop and MANUAL", "warn")
+                        elif (now - ref_t) >= BALLOON_SEARCH_TIMEOUT_SEC:
                             safe_stop()
                             current_mode = "MANUAL"
                             balloon_substate = "IDLE"
@@ -2863,7 +3095,7 @@ def main_loop():
 
                 if current_mode == "BALLOON":
                     # 고출력 전진 중 걸림(Stall) 감시
-                    if gps_ok and balloon_substate in ("CHARGE", "TRACKING") and drive > STOP + 160:
+                    if gps_ok and balloon_substate in ("CHARGE", "TRACKING", "GPS_FALLBACK") and drive > STOP + 160:
                         if stall_check_start_t == 0.0 or stall_ref_lat is None:
                             stall_check_start_t = now
                             stall_ref_lat, stall_ref_lon = c_lat, c_lon
@@ -3118,6 +3350,8 @@ def main_loop():
             shared_state["targetAngle"] = round(target_angle, 1)
             shared_state["angleErr"] = round(angle_err, 1)
             shared_state["balloonState"] = balloon_substate
+            shared_state["balloonGpsActive"] = bool(balloon_gps_active and current_mode == "BALLOON")
+            shared_state["balloonGpsDistM"] = round(t_dist, 1) if (balloon_gps_active and current_mode == "BALLOON") else 0.0
             shared_state["steerCtrlMode"] = STEER_CTRL_MODE
             shared_state["pidKp"] = PID_KP
             shared_state["pidKi"] = PID_KI

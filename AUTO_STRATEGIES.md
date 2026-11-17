@@ -114,6 +114,45 @@ reads `hardware`, `rc`, `pwm`, `mode_switch`, `autonomous` and `navigation` from
 The web page's P/PID steering gains no longer affect AUTO. The camera BALLOON
 mode is unchanged.
 
+### BALLOON GPS fallback
+
+If the camera loses the balloon, boat.py can steer to a known GPS position of the
+balloon instead. It is off until you set it up in the `balloon_gps_fallback`
+section of `calibration.json`:
+
+```json
+"balloon_gps_fallback": {
+  "enabled": true,
+  "lat": 35.0727498,
+  "lon": 129.0826989,
+  "vision_lost_sec": 20.0,
+  "arrive_radius_m": null,
+  "thrust_ratio": 0.5,
+  "timeout_sec": 120.0
+}
+```
+
+| Setting | Meaning |
+| --- | --- |
+| `enabled` | `false` (default) keeps the old behaviour: turn to search for 25 s, then stop. |
+| `lat`, `lon` | The balloon's position in decimal degrees. Required when enabled. |
+| `vision_lost_sec` | Time without seeing the balloon before the GPS takes over (default 20). |
+| `arrive_radius_m` | Stop when this close to the position. `null` uses the vision stop distance in APPROACH_STOP, or 1.5 m in RAM_POP. |
+| `thrust_ratio` | Thrust between stop and the web page's max thrust (default 0.5). It is reduced during turns of more than 45 degrees. |
+| `timeout_sec` | Longest time in the GPS phase before it gives up and returns to MANUAL (default 120). |
+
+- **Trigger:** the balloon has not been detected for `vision_lost_sec`, and the GPS
+  has a usable fix (2, 4 or 5). Without a usable fix it keeps searching and stops
+  after 25 s as before.
+- **Steering:** the same law as AUTO: heading error divided by `max_steer_angle_deg`
+  (35 degrees), using the boat's GPS heading. With no heading yet it drives straight
+  at low thrust, and stops if there is still none after 5 s.
+- **When the camera finds the balloon again:** vision takes over immediately.
+- **At the position:** it stops and returns to MANUAL, like a normal approach finish.
+- **Web page:** the badge shows `GPS FALLBACK` with the distance to the target.
+- **Applying changes:** restart boat.py after editing the file. A mistake in this
+  section stops start-up with a message before anything moves.
+
 ## Finish margin
 
 Set `navigation.finish_margin_m` in `calibration.json` to continue past the finish

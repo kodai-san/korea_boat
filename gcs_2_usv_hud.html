@@ -2985,6 +2985,10 @@
         detectLabel.textContent = "COMPLETE";
         stateBadge.className = "gps-status-pill gps-fix";
         stateBadge.innerHTML = `<span>COMPLETE</span><span class="mono" style="font-size:11px; color:var(--text-secondary);">STOP AT ${state.balloonStopDistM.toFixed(1)}m</span>`;
+      } else if (state.balloonState === "GPS_FALLBACK") {
+        detectLabel.textContent = "GPS FALLBACK";
+        stateBadge.className = "gps-status-pill balloon-search-pill";
+        stateBadge.innerHTML = `<span>GPS FALLBACK</span><span class="mono" style="font-size:11px; color:var(--text-secondary);">${(state.balloonGpsDistM || 0).toFixed(1)}m TO TARGET</span>`;
       } else if (state.balloonState === "CHARGE" || (state.balloonDetected && Math.abs(state.balloonAngleErr) <= 18.0)) {
         detectLabel.textContent = "TARGET LOCKED";
         stateBadge.className = "gps-status-pill balloon-charge-pill";
@@ -4186,6 +4190,7 @@
         if (typeof data.cameraOk === "boolean") state.cameraOk = data.cameraOk;
         if (typeof data.balloonDetected === "boolean") state.balloonDetected = data.balloonDetected;
         if (data.balloonState) state.balloonState = data.balloonState;
+        if (typeof data.balloonGpsDistM === "number") state.balloonGpsDistM = data.balloonGpsDistM;
         if (typeof data.balloonX === "number") state.balloonX = data.balloonX;
         if (typeof data.balloonY === "number") state.balloonY = data.balloonY;
         if (typeof data.balloonRadius === "number") state.balloonRadius = data.balloonRadius;

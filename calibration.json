@@ -111,5 +111,14 @@
       "test_throttle": 0.6,
       "test_accept_m": 1.0
     }
+  },
+  "balloon_gps_fallback": {
+    "enabled": false,
+    "lat": null,
+    "lon": null,
+    "vision_lost_sec": 20.0,
+    "arrive_radius_m": null,
+    "thrust_ratio": 0.5,
+    "timeout_sec": 120.0
   }
 }

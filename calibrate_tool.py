@@ -297,6 +297,10 @@ def load_config(path):
         for section in cfg:
             if section in loaded and isinstance(loaded[section], dict):
                 cfg[section].update(loaded[section])
+        # Keep sections this tool does not edit (e.g. balloon_gps_fallback used by boat.py).
+        for section, value in loaded.items():
+            if section not in cfg:
+                cfg[section] = value
         print(f"[LOADED] Read the existing configuration file ({path}).")
     return cfg
 
