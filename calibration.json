@@ -73,6 +73,27 @@
       "prediction_min_convergence_mps": 0.05,
       "prediction_max_path_turn_deg": 15.0,
       "prediction_corridor_margin_m": 0.2
+    },
+    "05_straight_line": {
+      "min_course_speed_mps": 0.45,
+      "course_max_age_sec": 0.6,
+      "position_heading_max_age_sec": 0.8,
+      "forward_acquire_sec": 0.6,
+      "forward_memory_sec": 4.0,
+      "band_half_width_m": 2.5,
+      "line_max_offset_m": 1.5,
+      "guard_zone_m": 0.5,
+      "max_intercept_deg": 15.0,
+      "recovery_intercept_deg": 40.0,
+      "lookahead_time_sec": 1.8,
+      "lookahead_min_m": 2.4,
+      "lookahead_max_m": 5.0,
+      "prediction_horizon_sec": 1.0,
+      "course_gain": 1.0,
+      "course_integral_gain": 0.3,
+      "integral_limit_deg": 20.0,
+      "integral_delay_sec": 2.0,
+      "integral_max_error_deg": 20.0
     }
   }
 }

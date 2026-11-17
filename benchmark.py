@@ -131,7 +131,7 @@ def sample_scenarios(n, seed, course, meta):
         _, _, bearing = course.project(x0, y0)
         dgps = rng.random() < 0.2
         out.append({
-            "id": k, "kind": kind, "lane": str(lane), "target_lateral": off,
+            "id": k, "kind": kind, "lane": str(lane), "target_lateral": off, "dgps": bool(dgps),
             "state0": (x0, y0, bearing + math.radians(herr), u0, r0),
             "yaw_bias": rng.uniform(*rngs["yaw_bias"]),
             "speed_scale": rng.uniform(*rngs["speed_scale"]),
@@ -157,7 +157,7 @@ class Episode:
         x, y, psi, u, _ = self.state
         vx, vy = u * math.sin(psi) + sc["drift"][0], u * math.cos(psi) + sc["drift"][1]
         self.gps = GPSEmulator(noise_m=sc["gps_noise"], bias_walk_m=sc["gps_bias_walk"], seed=sc["seed"],
-                               heading_source=heading_source)
+                               heading_source=heading_source, fix_quality=2 if sc.get("dgps") else 4)
         self.gps.update(0.0, x, y, vx, vy)
         self.gps.reset_heading_anchor()     # As on AUTO entry: heading unknown until 0.25 m of movement
         self.gps_hist = [(x, y, vx, vy)] * (int(round(GPS_LATENCY_SEC / DT)) + 1)
@@ -177,7 +177,8 @@ class Episode:
         lat, lon = g.latlon()
         cog = g.cog if (g.cog is not None and g.sog >= 0.3) else None
         return {"t": self.t, "x": g.x, "y": g.y, "lat": lat, "lon": lon, "heading_deg": g.heading_deg,
-                "sog": g.sog, "cog_deg": cog, "course": self.course, "target_lateral": self.sc["target_lateral"]}
+                "sog": g.sog, "cog_deg": cog, "course": self.course, "target_lateral": self.sc["target_lateral"],
+                "gps": g}
 
     def step(self, steer_norm, throttle):
         """steer_norm in [-1, 1] (+ = right), throttle in [0, 1] (0 = ESC neutral, 1 = esc_fwd_max_us)."""
@@ -290,25 +291,28 @@ class PursuitController(Controller):
 
 
 class NavigatorController(Controller):
-    """The boat's real MultipathNavigator (lane switching, wall guard and an AUTO strategy).
-    strategy/options override calibration.json's autonomous section; heading_source ("blend"/"cog") selects the
-    receiver heading estimate (NAV_PARAMS["heading_source"]) emulated for this controller."""
+    """The boat's real MultipathNavigator and AUTO strategy, called as the main loop does (simulate_boat.AutoDriver,
+    including the GPS-course heading selector). strategy/options override calibration.json's autonomous section;
+    cruise_ratio overrides pwm.auto_throttle_ratio; heading_source ("blend"/"cog") selects the legacy receiver
+    heading estimate (NAV_PARAMS["heading_source"]) emulated for strategies 01/02."""
 
-    def __init__(self, name="boat_code", strategy=None, options=None, heading_source=None):
+    def __init__(self, name="boat_code", strategy=None, options=None, heading_source=None, cruise_ratio=None):
         self.name = name
         self.strategy, self.options, self.heading_source = strategy, options or {}, heading_source
+        self.cruise_ratio = cruise_ratio
 
     def reset(self, obs, cal):
-        from simulate_boat import make_navigator
+        from simulate_boat import AutoDriver, make_navigator
         paths = {lane: mb.load_waypoints_csv(p) for lane, p in mb.PATH_FILES.items()}
         if self.strategy is not None:
             cal = dict(cal, autonomous={"strategy": self.strategy, self.strategy: dict(self.options)})
         self.nav = make_navigator(mb.MultipathNavigator, paths, cal)
-        self.nav.enter_auto_mode(obs["lat"], obs["lon"], now_mono=obs["t"])
-        self.cruise = cal["pwm"]["auto_throttle_ratio"]
+        self.driver = AutoDriver(self.nav)
+        self.driver.enter(obs["gps"], obs["t"], moving=obs["sog"] >= 0.45)
+        self.cruise = cal["pwm"]["auto_throttle_ratio"] if self.cruise_ratio is None else self.cruise_ratio
 
     def act(self, obs):
-        info = self.nav.update(obs["lat"], obs["lon"], obs["heading_deg"], now_mono=obs["t"])
+        info = self.driver.update(obs["gps"], obs["t"])
         if info["finished"]:
             return 0.0, 0.0
         blend = max(0.0, min(1.0, info.get("throttle_blend", 0.0)))
@@ -317,7 +321,14 @@ class NavigatorController(Controller):
 
 def builtin_controllers():
     ctrls = [
-        NavigatorController("boat_code (lanes + configured strategy)"),
+        NavigatorController("boat_code configured (calibration.json)"),
+        NavigatorController("01_constant_cruise @0.6", "01_constant_cruise", cruise_ratio=0.6),
+        NavigatorController("02_adaptive_throttle @0.6 (run A)", "02_adaptive_throttle", cruise_ratio=0.6),
+        NavigatorController("02_adaptive_throttle @1.0 (run B)", "02_adaptive_throttle", cruise_ratio=1.0),
+        NavigatorController("03_gps_course_progressive @1.0", "03_gps_course_progressive", cruise_ratio=1.0),
+        NavigatorController("04_predictive_recovery @1.0", "04_predictive_recovery", cruise_ratio=1.0),
+        NavigatorController("05_straight_line", "05_straight_line"),
+        NavigatorController("05_straight_line no integral", "05_straight_line", {"course_integral_gain": 0.0}),
         PursuitController("cruise_60 (constant 60%)", throttle="cruise"),
         PursuitController("adaptive (full if |CTE|<=0.3 & |herr|<=11)", throttle="adaptive"),
         PursuitController("full (always 100%)", throttle="full"),

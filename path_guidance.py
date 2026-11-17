@@ -72,3 +72,60 @@ def interpolate_lookahead(points, segment_index, boat_x, boat_y, distance_m):
             remaining -= length
         start_x, start_y = end_x, end_y
     return len(path) - 1, path[-1]
+
+
+class StraightLineGuidance:
+    """A straight race line parallel to the course, drawn from the AUTO entry point.
+
+    Coordinates are local ENU meters. The course frame measures ``s`` along the
+    course from its start point and ``d`` to the right of the course centerline.
+    The banks are straight and parallel to the centerline, so the safe water is
+    the band ``|d| <= band_half_width_m``. The line keeps the entry offset unless
+    that is beyond ``line_max_offset_m``, in which case it is drawn that far from
+    the centerline and the boat merges onto it while moving forward.
+    """
+
+    def __init__(self, start_xy, end_xy, band_half_width_m, line_max_offset_m):
+        sx = _finite_number(start_xy[0], "start x")
+        sy = _finite_number(start_xy[1], "start y")
+        ex = _finite_number(end_xy[0], "end x")
+        ey = _finite_number(end_xy[1], "end y")
+        self.length = math.hypot(ex - sx, ey - sy)
+        if self.length <= 0:
+            raise ValueError("course start and end must differ")
+        self.band_half_width_m = _finite_number(band_half_width_m, "band_half_width_m")
+        self.line_max_offset_m = _finite_number(line_max_offset_m, "line_max_offset_m")
+        if not 0 <= self.line_max_offset_m < self.band_half_width_m:
+            raise ValueError("line_max_offset_m must be nonnegative and inside the band")
+        self.start_x, self.start_y = sx, sy
+        self.ux, self.uy = (ex - sx) / self.length, (ey - sy) / self.length
+        self.bearing_deg = (math.degrees(math.atan2(self.ux, self.uy)) + 360.0) % 360.0
+        self.line_offset_m = 0.0
+        self.entry_offset_m = 0.0
+
+    def frame(self, x, y):
+        """Return ``(s, d)``: distance along the course and offset right of the centerline."""
+        px, py = x - self.start_x, y - self.start_y
+        return px * self.ux + py * self.uy, px * self.uy - py * self.ux
+
+    def point(self, s, d):
+        """Inverse of ``frame``."""
+        return (self.start_x + s * self.ux + d * self.uy,
+                self.start_y + s * self.uy - d * self.ux)
+
+    def draw_line(self, x, y):
+        """Start a new line at the boat, clamped toward the centerline; return its offset."""
+        _, d = self.frame(x, y)
+        self.entry_offset_m = d
+        self.line_offset_m = max(-self.line_max_offset_m, min(self.line_max_offset_m, d))
+        return self.line_offset_m
+
+    def desired_course(self, d, lookahead_m, max_intercept_deg):
+        """Line-of-sight course toward the line, intercepting at no more than ``max_intercept_deg``."""
+        intercept = math.degrees(math.atan2(d - self.line_offset_m, max(lookahead_m, 1e-3)))
+        intercept = max(-max_intercept_deg, min(max_intercept_deg, intercept))
+        return (self.bearing_deg - intercept) % 360.0
+
+    def lateral_rate(self, speed_mps, course_deg):
+        """Rate of change of ``d`` (m/s, + = moving right) for a velocity over ground."""
+        return speed_mps * math.sin(math.radians(course_deg - self.bearing_deg))

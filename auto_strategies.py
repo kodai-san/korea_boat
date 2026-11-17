@@ -349,11 +349,124 @@ class PredictiveRecoveryStrategy(GpsCourseProgressiveStrategy):
         )
 
 
+class StraightLineStrategy(ConstantCruiseStrategy):
+    """Race line: one straight line from the AUTO entry point, full throttle, GPS-course PI steering.
+
+    The navigator draws a line parallel to the course through the entry point,
+    moved toward the centerline when the entry is near a bank, and passes the
+    line-of-sight course error. Course over ground already includes current,
+    so the outer loop has no integral; the integral here acts on course error
+    and removes rudder trim. It is frozen while launching, slow, without a
+    trusted course, near a bank, or far from the commanded course.
+    """
+
+    name = "05_straight_line"
+    uses_gps_course = True
+    uses_straight_line = True
+    default_options = {
+        "min_course_speed_mps": 0.45,
+        "course_max_age_sec": 0.6,
+        "position_heading_max_age_sec": 0.8,
+        "forward_acquire_sec": 0.6,
+        "forward_memory_sec": 4.0,
+        "band_half_width_m": 2.5,
+        "line_max_offset_m": 1.5,
+        "guard_zone_m": 0.5,
+        "max_intercept_deg": 15.0,
+        "recovery_intercept_deg": 40.0,
+        "lookahead_time_sec": 1.8,
+        "lookahead_min_m": 2.4,
+        "lookahead_max_m": 5.0,
+        "prediction_horizon_sec": 1.0,
+        "course_gain": 1.0,
+        "course_integral_gain": 0.3,
+        "integral_limit_deg": 20.0,
+        "integral_delay_sec": 2.0,
+        "integral_max_error_deg": 20.0,
+    }
+    option_limits = {
+        key: (0.0, 90.0 if key.endswith("_deg") else None)
+        for key in default_options
+    }
+
+    @classmethod
+    def validate_options(cls, options):
+        resolved = super().validate_options(options)
+        for key in ("min_course_speed_mps", "course_max_age_sec", "position_heading_max_age_sec",
+                    "forward_acquire_sec", "forward_memory_sec", "band_half_width_m", "max_intercept_deg",
+                    "recovery_intercept_deg", "lookahead_time_sec", "lookahead_min_m", "lookahead_max_m",
+                    "prediction_horizon_sec", "course_gain"):
+            if resolved[key] <= 0.0:
+                raise ValueError(f"autonomous.{cls.name}.{key} must be greater than zero")
+        if resolved["line_max_offset_m"] + resolved["guard_zone_m"] >= resolved["band_half_width_m"]:
+            raise ValueError(f"autonomous.{cls.name}.line_max_offset_m + guard_zone_m must be inside band_half_width_m")
+        if resolved["lookahead_max_m"] < resolved["lookahead_min_m"]:
+            raise ValueError(f"autonomous.{cls.name}.lookahead_max_m must be >= lookahead_min_m")
+        if resolved["recovery_intercept_deg"] < resolved["max_intercept_deg"]:
+            raise ValueError(f"autonomous.{cls.name}.recovery_intercept_deg must be >= max_intercept_deg")
+        return resolved
+
+    def reset(self):
+        super().reset()
+        self.integral_deg_s = 0.0
+        self.last_update_mono = None
+        self.entry_mono = None
+
+    def suspend(self):
+        # The servo is centered during a neutral hold; keep the learned trim.
+        self.prev_steer_norm = 0.0
+        self.last_update_mono = None
+
+    def lookahead_distance(self, speed_mps=None):
+        """Speed-dependent line-of-sight distance; missing speed uses the fixed default."""
+        if (isinstance(speed_mps, (int, float)) and not isinstance(speed_mps, bool)
+                and math.isfinite(speed_mps) and speed_mps >= 0):
+            requested = speed_mps * self.options["lookahead_time_sec"]
+        else:
+            requested = self.nav_params.get("lookahead_dist_m", 3.5)
+        return max(self.options["lookahead_min_m"], min(self.options["lookahead_max_m"], requested))
+
+    def update(self, *, cte_right_m, heading_error_deg, boundary_guard, now_mono,
+               heading_confident=False, speed_mps=None):
+        if self.entry_mono is None:
+            self.entry_mono = now_mono
+        dt = 0.0 if self.last_update_mono is None else max(0.0, min(0.2, now_mono - self.last_update_mono))
+        self.last_update_mono = now_mono
+        ki = self.options["course_integral_gain"]
+        valid = (heading_error_deg is not None and not isinstance(heading_error_deg, bool)
+                 and math.isfinite(heading_error_deg))
+        fast = (isinstance(speed_mps, (int, float)) and math.isfinite(speed_mps)
+                and speed_mps >= self.options["min_course_speed_mps"])
+        if (ki > 0 and valid and heading_confident and fast and not boundary_guard
+                and now_mono - self.entry_mono >= self.options["integral_delay_sec"]
+                and abs(heading_error_deg) <= self.options["integral_max_error_deg"]):
+            limit = self.options["integral_limit_deg"] / ki
+            self.integral_deg_s = max(-limit, min(limit, self.integral_deg_s + heading_error_deg * dt))
+        trim_deg = ki * self.integral_deg_s
+        # Without a course the rudder holds only the learned trim (zero until it has been learned).
+        effective = self.options["course_gain"] * heading_error_deg + trim_deg if valid else trim_deg
+        command = super().update(cte_right_m=cte_right_m, heading_error_deg=effective,
+                                 boundary_guard=boundary_guard, now_mono=now_mono)
+        command["trim_deg"] = trim_deg
+        return command
+
+    def throttle_blend(self, cte_right_m, heading_error_deg):
+        return 1.0
+
+    def describe_throttle(self, cruise_us, full_us):
+        o = self.options
+        return (
+            f"full {full_us} us whenever AUTO is steering; straight line from AUTO entry "
+            f"(within +-{o['line_max_offset_m']:.1f} m of the centerline, band +-{o['band_half_width_m']:.1f} m); "
+            f"course PI, integral {o['course_integral_gain']:.2f}/s"
+        )
+
+
 # Numbers are permanent creation-order identifiers. Append 05, 06, ... for new
 # strategies; never renumber existing modes when adding or retiring one.
 AUTO_STRATEGIES = {
     cls.name: cls for cls in (ConstantCruiseStrategy, AdaptiveThrottleStrategy, GpsCourseProgressiveStrategy,
-                            PredictiveRecoveryStrategy)
+                            PredictiveRecoveryStrategy, StraightLineStrategy)
 }
 
 AUTO_STRATEGY_ALIASES = {
@@ -361,6 +474,7 @@ AUTO_STRATEGY_ALIASES = {
     "adaptive_throttle": AdaptiveThrottleStrategy.name,
     "gps_course_progressive": GpsCourseProgressiveStrategy.name,
     "predictive_recovery": PredictiveRecoveryStrategy.name,
+    "straight_line": StraightLineStrategy.name,
 }
 
 

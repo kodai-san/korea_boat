@@ -216,7 +216,8 @@ class GPSEmulator:
     and the same movement-based heading estimator as ZEDF9PReceiver._update_movement_heading.
     """
 
-    def __init__(self, rate_hz=5.0, noise_m=0.02, bias_walk_m=0.0, seed=0, vel_noise_mps=0.025, heading_source=None):
+    def __init__(self, rate_hz=5.0, noise_m=0.02, bias_walk_m=0.0, seed=0, vel_noise_mps=0.025, heading_source=None,
+                 fix_quality=4):
         self.period = 1.0 / rate_hz
         self.noise_m = noise_m
         self.bias_walk_m = bias_walk_m
@@ -231,6 +232,12 @@ class GPSEmulator:
         self._anchor = None
         self.heading_deg = None
         self._prev_fix = None
+        self.fix_quality = fix_quality
+        self.fix_t = None
+        self._pos_anchor = None            # (x, y, t) for the RTK displacement heading (ZEDF9PReceiver)
+        self.position_heading_deg = None
+        self.position_heading_t = None
+        self.position_speed_mps = None
 
     def reset_heading_anchor(self):
         self._anchor = None if self.x is None else (self.x, self.y)
@@ -251,6 +258,8 @@ class GPSEmulator:
         vy = true_vy + self.rng.normal(0.0, self.vel_noise)
         self.sog = math.hypot(vx, vy)
         self.cog = (math.degrees(math.atan2(vx, vy)) + 360.0) % 360.0
+        self.fix_t = t
+        self._update_position_heading(t)
 
         if self.heading_source == "cog" and self._anchor is not None and self.sog >= NAV_PARAMS["sog_cog_blend_mps"]:
             self.heading_deg = self.cog
@@ -269,6 +278,39 @@ class GPSEmulator:
             else:
                 self.heading_deg = vec
         return True
+
+    def _update_position_heading(self, t):
+        """Displacement bearing between RTK fixes 0.25 m apart, like ZEDF9PReceiver._update_position_observation."""
+        if self.fix_quality not in (4, 5):
+            self._pos_anchor = None
+            self.position_heading_deg = self.position_heading_t = self.position_speed_mps = None
+            return
+        if self._pos_anchor is None:
+            self._pos_anchor = (self.x, self.y, t)
+            return
+        ax, ay, at = self._pos_anchor
+        moved = math.hypot(self.x - ax, self.y - ay)
+        if moved >= NAV_PARAMS["min_heading_move_m"]:
+            if t > at:
+                self.position_heading_deg = (math.degrees(math.atan2(self.x - ax, self.y - ay)) + 360.0) % 360.0
+                self.position_heading_t = t
+                self.position_speed_mps = moved / (t - at)
+            self._pos_anchor = (self.x, self.y, t)
+
+    def snapshot(self, now):
+        """The fields of ZEDF9PReceiver.get_snapshot() that the main loop and MotionHeadingSelector read."""
+        lat, lon = self.latlon()
+        age = now - self.fix_t
+        course = self.cog if self.sog >= 0.05 else None   # Receivers leave COG blank when nearly stopped
+        return {
+            "valid": True, "lat": lat, "lon": lon, "fix_quality": self.fix_quality, "age_sec": age,
+            "heading_deg": self.heading_deg, "sog_mps": self.sog, "cog_deg": self.cog,
+            "course_deg": course, "course_speed_mps": self.sog, "course_valid": course is not None,
+            "course_time_mono": self.fix_t, "course_age_sec": age, "course_gga_skew_sec": 0.0,
+            "position_heading_deg": self.position_heading_deg, "position_heading_time_mono": self.position_heading_t,
+            "position_heading_age_sec": None if self.position_heading_t is None else now - self.position_heading_t,
+            "position_speed_mps": self.position_speed_mps,
+        }
 
     def latlon(self):
         lat = REF_LAT + math.degrees(self.y / 6_378_137.0)

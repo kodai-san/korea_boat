@@ -23,9 +23,10 @@ The numbers follow creation order and stay fixed as more strategies are added.
 | 2 | `02_adaptive_throttle` | Existing branch behavior: the same steering, with full throttle when absolute cross-track error is at most 0.30 m and absolute heading error is at most 11 degrees; cruise otherwise. |
 | 3 | `03_gps_course_progressive` | Experimental fresh GPS-course steering, validated forward-motion handover, and progressive power between cruise and full throttle. |
 | 4 | `04_predictive_recovery` | GPS-course handover with predictive recovery power and continuous, speed-dependent lookahead along the selected path. |
+| 5 | `05_straight_line` | Race line: one straight line drawn where AUTO is engaged (moved toward the centerline near a bank), full throttle, GPS-course line-of-sight steering with a PI loop on course error, and bank protection inside a +-2.5 m band. No lanes. |
 
 The original names `constant_cruise`, `adaptive_throttle`,
-`gps_course_progressive`, and `predictive_recovery` remain accepted aliases for
+`gps_course_progressive`, `predictive_recovery`, and `straight_line` remain accepted aliases for
 their corresponding numbered strategies in JSON selectors, option-block keys,
 and CLI arguments. Defaults, new logs, and files saved by the calibration tool
 use the numbered names. Existing logs retain their recorded names.
@@ -317,3 +318,67 @@ Add offline tests for the new strategy, its configuration, and mode transitions:
 ```sh
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_*.py' -v
 ```
+
+## 05 — Straight line (race line)
+
+Select `"05_straight_line"` in `autonomous.strategy`, or run
+`python3 multipath_boat.py --auto-strategy 05_straight_line`. Settings live in
+`autonomous["05_straight_line"]`. Point the boat down the course before
+engaging AUTO: the boat has no heading until it is moving.
+
+**Line.** On AUTO entry the boat's RTK position defines a line parallel to the
+course (the bearing of `center.csv`, first to last waypoint). If the entry is
+more than `line_max_offset_m` from the centerline, the line is drawn at that
+offset instead and the boat merges onto it while driving forward, never
+turning more than `max_intercept_deg` off the course. Re-engaging AUTO draws a
+new line. Lanes, lane switching and `left.csv`/`right.csv` are not used. The
+event log records `[AUTO LINE]` with the entry and line offsets.
+
+**Steering.** Outer loop: line-of-sight course
+`course_cmd = course_bearing - clamp(atan(cte / lookahead), +-max_intercept_deg)`,
+with the speed-dependent lookahead of 04. GPS course over ground already
+includes current, so this loop has no integral. Inner loop: proportional
+steering on course error (`course_gain` x the 01-04 gain) plus an integral
+(`course_integral_gain`, 1/s, contribution capped at `integral_limit_deg`)
+that removes rudder trim. The integral is frozen for `integral_delay_sec` after
+entry, below `min_course_speed_mps`, without an RTK-trusted course, in the bank
+zones, and when the course error exceeds `integral_max_error_deg`. Without a
+course the rudder holds the learned trim (zero at launch).
+
+**Bank protection.** The banks are straight and parallel to the centerline;
+`band_half_width_m` is the allowed distance from it. Within `guard_zone_m` of
+the band edge and not already moving back, `prediction_status` is
+`bank_guard`: boosted gain (`boundary_gain_boost`) and up to
+`recovery_intercept_deg` of intercept. If the 1 s forecast
+(`prediction_horizon_sec`) leaves the band while moving outward, the status is
+`hard_limit` and the boat steers `recovery_intercept_deg` back toward the
+centerline. Throttle stays full: turning radius does not shrink at low speed.
+
+**Throttle and finish.** Full forward (`esc_fwd_max_us`) whenever AUTO is
+steering, whatever `pwm.auto_throttle_ratio` is. AUTO ends
+`navigation.finish_margin_m` past the finish line through the last centerline
+waypoint, measured along the course.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `band_half_width_m` | 2.5 | Allowed distance from the centerline (observed banks: ~4.2 m left, ~5.2 m right). |
+| `line_max_offset_m` | 1.5 | Furthest from the centerline a line may be drawn. |
+| `guard_zone_m` | 0.5 | Width of the bank-guard zone inside the band edge. |
+| `max_intercept_deg` | 15.0 | Largest angle off the course while merging onto the line. |
+| `recovery_intercept_deg` | 40.0 | Intercept in the bank zones and the hard-limit turn. |
+| `lookahead_time_sec`, `lookahead_min_m`, `lookahead_max_m` | 1.8, 2.4, 5.0 | Speed-dependent line-of-sight distance. |
+| `prediction_horizon_sec` | 1.0 | Forecast for the hard limit. |
+| `course_gain` | 1.0 | Multiplier on the proportional steering gain. |
+| `course_integral_gain` | 0.3 | Integral gain on course error (1/s); 0 disables it. 0.3 matched 0.6 on trim robustness in simulation and cost 0.2-0.5 s less per race. |
+| `integral_limit_deg` | 20.0 | Cap on the integral's steering contribution. |
+| `integral_delay_sec` | 2.0 | No integration for this long after entry. |
+| `integral_max_error_deg` | 20.0 | No integration while the course error is larger. |
+| `min_course_speed_mps`, `course_max_age_sec`, `position_heading_max_age_sec`, `forward_acquire_sec`, `forward_memory_sec` | as 03/04 | GPS-course heading selection. |
+
+`line_max_offset_m + guard_zone_m` must be inside `band_half_width_m`. Telemetry
+uses the existing columns: `lane` is `line`, `cte_right_m` is the error to the
+line, `prediction_status` is `line`, `merging`, `bank_guard`, `hard_limit` or
+`heading_unavailable`, and `prediction_corridor_clearance_m` is the forecast
+distance to the band edge. Compare strategies offline with
+`python3 benchmark.py compare` and
+`python3 simulate_boat.py auto --strategy 05_straight_line` (see `RACE_SPEED.md`).

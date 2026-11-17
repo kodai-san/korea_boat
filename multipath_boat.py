@@ -51,7 +51,7 @@ import time
 
 from auto_strategies import AUTO_STRATEGIES, canonical_auto_strategy_name, create_auto_strategy
 from gps_heading import MotionHeadingSelector
-from path_guidance import interpolate_lookahead
+from path_guidance import StraightLineGuidance, interpolate_lookahead
 from spresense_stream import (
     SpresenseGPSStreamer, reserved_spresense_ports, same_serial_port,
 )
@@ -1011,6 +1011,15 @@ class MultipathNavigator:
                     raise ValueError(f"Cannot extend finish for '{name}': path has no nonzero segment")
             self.enu_paths[name] = pts
 
+        # Straight-line strategies follow one line drawn at AUTO entry instead of the three lanes.
+        # The course frame comes from the unextended centerline CSV; the banks are parallel to it.
+        self.line_guidance = None
+        if getattr(self.strategy, "uses_straight_line", False) is True:
+            center = [latlon_to_enu(lat, lon, self.ref_lat, self.ref_lon) for (_, lat, lon) in paths_dict["center"]]
+            self.line_guidance = StraightLineGuidance(
+                center[0], center[-1], self.strategy.options["band_half_width_m"],
+                self.strategy.options["line_max_offset_m"])
+
         self.active_lane = "center"
         self.target_idx = 1
         self.guidance_segment_idx = 0    # Continuous projection progress, independent of waypoint arrival radius.
@@ -1062,6 +1071,14 @@ class MultipathNavigator:
             now_mono = time.monotonic()
 
         bx, by = latlon_to_enu(boat_lat, boat_lon, self.ref_lat, self.ref_lon)
+
+        if self.line_guidance is not None:
+            line = self.line_guidance
+            line.draw_line(bx, by)
+            self.active_lane = "line"
+            self.strategy.reset()
+            return self.active_lane, self._line_wp_number(line.frame(bx, by)[0]), abs(
+                line.entry_offset_m - line.line_offset_m)
 
         best_lane = "center"
         best_dist = float("inf")
@@ -1199,6 +1216,72 @@ class MultipathNavigator:
         return dict(motion, path_bearing_deg=path_bearing_deg, corridor_clear=clearance >= 0,
                     corridor_clearance_m=clearance, path_turn_deg=max_turn)
 
+    def _line_wp_number(self, s):
+        """Centerline waypoint number just ahead of along-course distance s (for display and logs)."""
+        wps = self.paths["center"]
+        k = int(math.ceil(max(0.0, s) / self.line_guidance.length * (len(wps) - 1)))
+        return wps[max(0, min(len(wps) - 1, k))][0]
+
+    def describe_line(self):
+        line = self.line_guidance
+        moved = line.line_offset_m - line.entry_offset_m
+        return (f"[AUTO LINE] bearing {line.bearing_deg:.1f} deg, entry {line.entry_offset_m:+.2f} m from centerline, "
+                f"line {line.line_offset_m:+.2f} m" + (f" (moved {moved:+.2f} m toward the centerline)" if moved else ""))
+
+    def _update_straight_line(self, bx, by, boat_heading_deg, now_mono, heading_confident, motion):
+        """One straight line from AUTO entry: line-of-sight course command with bank protection."""
+        line = self.line_guidance
+        opts = self.strategy.options
+        band = opts["band_half_width_m"]
+        s, d = line.frame(bx, by)
+        cte = d - line.line_offset_m
+        wp_number = self._line_wp_number(s)
+        if s >= line.length + self.finish_margin_m:
+            return {"finished": True, "active_lane": self.active_lane, "shifted_to": None, "wp_number": wp_number,
+                    "cte_right_m": cte, "steer_norm": 0.0, "target_bearing_deg": line.bearing_deg,
+                    "boundary_guard": False, "throttle_blend": 0.0}
+
+        speed = motion.get("speed_mps") if isinstance(motion, dict) else None
+        speed_ok = isinstance(speed, (int, float)) and math.isfinite(speed)
+        lookahead = self.strategy.lookahead_distance(speed if speed_ok else None)
+        rate = future = None
+        if boat_heading_deg is not None and speed_ok:
+            rate = line.lateral_rate(speed, boat_heading_deg)
+            future = d + opts["prediction_horizon_sec"] * rate
+        outward = rate is not None and d * rate > 0
+
+        # Soft zone near a bank: steeper intercept and boosted gain. Hard limit: the 1 s forecast leaves
+        # the band while moving outward, so steer straight back toward the centerline.
+        status = "line" if abs(cte) <= 0.3 else "merging"
+        guard = False
+        intercept = opts["max_intercept_deg"]
+        if future is not None and outward and abs(future) >= band:
+            status, guard = "hard_limit", True
+            target_bearing = (line.bearing_deg + math.copysign(opts["recovery_intercept_deg"], -d)) % 360.0
+        else:
+            if abs(d) >= band - opts["guard_zone_m"] and (rate is None or outward):
+                status, guard = "bank_guard", True
+                intercept = opts["recovery_intercept_deg"]
+            target_bearing = line.desired_course(d, lookahead, intercept)
+        if boat_heading_deg is None:
+            status = "heading_unavailable"
+
+        heading_err = None if boat_heading_deg is None else wrap_180(target_bearing - boat_heading_deg)
+        command = self.strategy.update(cte_right_m=cte, heading_error_deg=heading_err, boundary_guard=guard,
+                                       now_mono=now_mono, heading_confident=heading_confident,
+                                       speed_mps=speed if speed_ok else None)
+        lx, ly = line.point(s + lookahead, line.line_offset_m)
+        clearance = band - abs(future if future is not None else d)
+        return {
+            "finished": False, "active_lane": self.active_lane, "shifted_to": None, "wp_number": wp_number,
+            "cte_right_m": cte, "steer_norm": command["steer_norm"], "target_bearing_deg": target_bearing,
+            "boundary_guard": guard, "throttle_blend": command["throttle_blend"],
+            "lookahead_m": lookahead, "lookahead_target_e_m": lx, "lookahead_target_n_m": ly,
+            "cte_rate_mps": rate, "predicted_cte_m": None if future is None else future - line.line_offset_m,
+            "prediction_status": status, "prediction_corridor_clearance_m": clearance,
+            "throttle_target_blend": command["throttle_blend"],
+        }
+
     def update(self, boat_lat, boat_lon, boat_heading_deg, now_mono=None, heading_confident=False,
                motion=None):
         """
@@ -1210,6 +1293,9 @@ class MultipathNavigator:
             now_mono = time.monotonic()
 
         bx, by = latlon_to_enu(boat_lat, boat_lon, self.ref_lat, self.ref_lon)
+
+        if self.line_guidance is not None:
+            return self._update_straight_line(bx, by, boat_heading_deg, now_mono, heading_confident, motion)
 
         # 1) Calculate the closest segment and CTE on the current path.
         predictive = getattr(self.strategy, "uses_predictive_guidance", False) is True
@@ -1715,6 +1801,8 @@ def main(session_stamp=None):
                             lane, wp_no, init_dist = navigator.enter_auto_mode(
                                 gps_snap["lat"], gps_snap["lon"], now_mono=loop_t0
                             )
+                            if navigator.line_guidance is not None:
+                                log_event(navigator.describe_line())
                             mode = "AUTO"
                             servo_us = pwm_cfg["servo_center_us"]
                             esc_us = auto_cruise_us
