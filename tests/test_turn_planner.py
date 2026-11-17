@@ -250,6 +250,21 @@ class ThreePointTurnTest(unittest.TestCase):
         self.assertEqual(turn["prediction_status"], "turn_left")
         self.assertLess(turn["steer_norm"], 0.0)
 
+    def test_navigator_turns_without_reversing_when_that_is_quicker(self):
+        nav_test = PlannerNavigatorTest("test_line_limits_are_per_side")
+        nav_test.setUp(three_point_turns=True)
+        nav_test.nav.enter_auto_mode(*nav_test.latlon(14.0, 3.28), now_mono=0.0)
+        info = nav_test.step(14.0, 3.28, 137.0, 0.7, speed=1.4)             # Route 6: the right turn is quickest
+        self.assertEqual(info["prediction_status"], "turn_right")
+        self.assertEqual(nav_test.nav.reverses, 0)
+
+    def test_navigator_falls_back_when_nothing_fits(self):
+        nav_test = PlannerNavigatorTest("test_line_limits_are_per_side")
+        nav_test.setUp(three_point_turns=True)
+        nav_test.nav.enter_auto_mode(*nav_test.latlon(40.0, 0.5), now_mono=0.0)
+        info = nav_test.step(40.0, 0.5, 180.0, 0.7, speed=1.0)              # Backwards mid-channel: least-bad turn
+        self.assertIn(info["prediction_status"], ("turn_right", "turn_left"))
+
     def test_flag_off_keeps_the_forward_only_planner(self):
         nav_test = PlannerNavigatorTest("test_line_limits_are_per_side")
         nav_test.setUp()

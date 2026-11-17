@@ -1442,17 +1442,21 @@ class MultipathNavigator:
                                                  f"reverse about {best['reverse_m']:.1f} m then turn {side} "
                                                  f"{best['arc']['sweep_deg']:.0f} deg (estimated {best['cost_sec']:.1f} s"
                                                  f"{alternative})")
-                        if best is not None:
-                            arc, fits = best["arc"], True
-                    # Reversing only gains room when the bow points clearly toward the limit the turn would cross.
-                    gains_room = math.sin(math.radians(phi)) * arc["violation_side"] > 0.3
-                    if not fits and gains_room and self.reverses < opts["plan_max_reverses"]:
-                        return start_reverse(phi, 0,
-                                             f"[TURN PLAN] course {phi:+.0f} deg off at {d:+.2f} m: no turn fits the bank "
-                                             f"limits and the bow points toward the "
-                                             f"{'right' if arc['violation_side'] > 0 else 'left'} limit -> reverse until a "
-                                             f"turn fits")
-                    start_turn(arc, fits, phi, "")
+                    else:
+                        best = None
+                    if best is not None:
+                        # Three-point planning found a forward turn that is quickest: no reverse.
+                        start_turn(best["arc"], True, phi, "")
+                    else:
+                        # Reversing only gains room when the bow points clearly toward the limit the turn would cross.
+                        gains_room = math.sin(math.radians(phi)) * arc["violation_side"] > 0.3
+                        if not fits and gains_room and self.reverses < opts["plan_max_reverses"]:
+                            return start_reverse(phi, 0,
+                                                 f"[TURN PLAN] course {phi:+.0f} deg off at {d:+.2f} m: no turn fits the "
+                                                 f"bank limits and the bow points toward the "
+                                                 f"{'right' if arc['violation_side'] > 0 else 'left'} limit -> reverse "
+                                                 f"until a turn fits")
+                        start_turn(arc, fits, phi, "")
                 elif first:
                     # The turn onto the race direction ends here, so start the line there.
                     direction = 1 if phi < 0 else -1
