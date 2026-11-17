@@ -1,0 +1,558 @@
+<title>Haesucheon Bank Map</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: survey sheet. Summary strip, one wide course map (water between banks, land outside), evidence chart, method notes. */
+:root {
+  --bg: #f3f5f6;
+  --surface: #fcfcfb;
+  --ink: #12181d;
+  --ink-2: #47525c;
+  --muted: #6f7b86;
+  --rule: #dce2e6;
+  --grid: rgba(18, 24, 29, 0.07);
+  --water: #dcebf5;
+  --land: #e9e3d4;
+  --unmapped: #eceef0;
+  --manual: #2a78d6;
+  --auto: #eb6834;
+  --carried: #7a6a48;
+  --lane: #13865e;
+  --bank: #7b1fa2;
+  --good: #0ca30c;
+  --warning: #b07a00;
+  --font-body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --font-data: "IBM Plex Mono", ui-monospace, Consolas, monospace;
+  --radius: 6px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #111315; --surface: #1a1a19; --ink: #eef0f1; --ink-2: #b8c0c7; --muted: #8a949d; --rule: #2d3236;
+    --grid: rgba(238, 240, 241, 0.07); --water: #15283a; --land: #2a261d; --unmapped: #1f2225;
+    --manual: #3987e5; --auto: #d95926; --carried: #b9a57a; --bank: #e2b8ff; --warning: #fab219; --lane: #2fbf8a; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #111315; --surface: #1a1a19; --ink: #eef0f1; --ink-2: #b8c0c7; --muted: #8a949d; --rule: #2d3236;
+  --grid: rgba(238, 240, 241, 0.07); --water: #15283a; --land: #2a261d; --unmapped: #1f2225;
+  --manual: #3987e5; --auto: #d95926; --carried: #b9a57a; --bank: #e2b8ff; --warning: #fab219; --lane: #2fbf8a; color-scheme: dark;
+}
+body { background: var(--bg); color: var(--ink); font-family: var(--font-body); font-size: 14px; line-height: 1.45; }
+.page { max-width: 1320px; margin: 0 auto; padding-block: 20px 48px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  display: flex; flex-direction: column; gap: 16px; }
+h1 { font-size: 22px; font-weight: 600; margin: 0; letter-spacing: -0.01em; text-wrap: balance; }
+h2 { font-size: 14px; font-weight: 600; margin: 0; }
+p { margin: 0; max-width: 72ch; }
+.eyebrow { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); font-weight: 500; }
+.sub { color: var(--muted); font-family: var(--font-data); font-size: 12px; margin-top: 2px; }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 1px; background: var(--rule); border: 1px solid var(--rule); border-radius: var(--radius); overflow: hidden; }
+.stat { background: var(--surface); padding: 10px 12px; display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.stat .v { font-family: var(--font-data); font-size: 19px; font-weight: 500; font-variant-numeric: tabular-nums; }
+.stat .k { font-size: 12px; color: var(--muted); }
+.pill { display: inline-block; border-radius: 999px; padding: 1px 8px; font-size: 11px; font-weight: 600; letter-spacing: 0.03em; border: 1px solid currentColor; width: fit-content; }
+.pill.good { color: var(--good); }
+.pill.warn { color: var(--warning); }
+.card { background: var(--surface); border: 1px solid var(--rule); border-radius: var(--radius); padding: 12px; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+.card-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 16px; align-items: center; }
+.controls { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; }
+.seg { display: inline-flex; border: 1px solid var(--rule); border-radius: var(--radius); overflow: hidden; background: var(--surface); }
+.seg button { border: 0; background: transparent; padding: 6px 10px; cursor: pointer; font: inherit; font-size: 13px; color: var(--ink); }
+.seg button + button { border-left: 1px solid var(--rule); }
+.seg button[aria-pressed="true"] { background: var(--ink); color: var(--surface); }
+.seg button:hover:not([aria-pressed="true"]) { background: var(--grid); }
+select { font: inherit; font-size: 13px; color: var(--ink); background: var(--surface); border: 1px solid var(--rule); border-radius: var(--radius); padding: 6px 8px; max-width: 100%; }
+button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid var(--manual); outline-offset: 2px; }
+.lbl { font-size: 12px; color: var(--muted); }
+.chk { display: inline-flex; gap: 6px; align-items: center; font-size: 13px; color: var(--ink-2); cursor: pointer; }
+.note { color: var(--muted); font-size: 12px; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--ink-2); }
+.key { display: inline-flex; align-items: center; gap: 6px; }
+.key i { display: inline-block; width: 16px; height: 10px; border-radius: 2px; }
+.key i.line { height: 0; border-top: 3px solid var(--bank); border-radius: 0; }
+.key i.dash { height: 0; border-top: 2px dashed var(--muted); border-radius: 0; }
+.key i.carry { height: 0; border-top: 2px dashed var(--carried); border-radius: 0; }
+canvas { display: block; width: 100%; }
+.readout { font-family: var(--font-data); font-size: 12px; color: var(--ink-2); min-height: 18px; font-variant-numeric: tabular-nums; }
+.two { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 16px; }
+@media (max-width: 900px) { .two { grid-template-columns: minmax(0, 1fr); } }
+ul { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 6px; max-width: 72ch; }
+.tablewrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--rule); white-space: nowrap; }
+th { color: var(--muted); font-weight: 500; font-size: 12px; }
+td.num { font-family: var(--font-data); font-variant-numeric: tabular-nums; }
+</style>
+
+<div class="page">
+  <header>
+    <div class="eyebrow">Haesucheon autonomous boat · course survey from telemetry</div>
+    <h1>Haesucheon Bank Map</h1>
+    <div class="sub" id="subline"></div>
+  </header>
+
+  <div class="stats" id="stats"></div>
+
+  <section class="card" id="runCard">
+    <div class="card-head">
+      <h2>AUTO runs <span class="note" id="runDay"></span></h2>
+      <div class="controls">
+        <span class="lbl" id="runLbl">Show</span>
+        <div class="seg" role="group" aria-labelledby="runLbl" id="runSeg"></div>
+      </div>
+    </div>
+    <div class="tablewrap"><table>
+      <thead><tr><th>Run</th><th>Start</th><th>Length</th><th>Waypoints</th><th>Strategy</th><th>Speed</th><th>Full throttle</th><th>Max CTE</th><th>Closest to left bank</th><th>Closest to right bank</th><th>RTK fix</th><th>How it ended</th></tr></thead>
+      <tbody id="runTable"></tbody>
+    </table></div>
+    <p class="note">Pick a run (or click its row) to see it alone on the map. Closest distances are at the GPS antenna, RTK-fix positions only; the hull is about half a beam closer.</p>
+    <div id="runDetail" hidden>
+      <h2 id="runTitle"></h2>
+      <p class="note">Distance from the boat to each bank along the course. The lower a line gets, the closer the boat came to that bank.</p>
+      <canvas id="runChart" aria-label="Distance to each bank along the course for the selected run"></canvas>
+      <div class="legend"><span class="key"><i style="height:0;border-top:2px solid var(--ink);border-radius:0"></i>To left bank</span><span class="key"><i class="dash" style="border-top-color:var(--ink)"></i>To right bank</span><span class="key"><i style="height:0;border-top:2px dotted var(--muted);border-radius:0"></i>Not RTK fix (less accurate)</span></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <h2>Course map</h2>
+      <div class="controls">
+        <span class="lbl" id="viewLbl">Area</span>
+        <div class="seg" role="group" aria-labelledby="viewLbl" id="viewSeg">
+          <button type="button" data-v="course" aria-pressed="true">Course</button>
+          <button type="button" data-v="straight" aria-pressed="false">Straight stretch</button>
+          <button type="button" data-v="all" aria-pressed="false">Everything logged</button>
+        </div>
+        <span class="lbl" id="scaleLbl">Sideways scale</span>
+        <div class="seg" role="group" aria-labelledby="scaleLbl" id="scaleSeg">
+          <button type="button" data-s="1" aria-pressed="false">True</button>
+          <button type="button" data-s="2" aria-pressed="true">×2</button>
+          <button type="button" data-s="4" aria-pressed="false">×4</button>
+        </div>
+        <label class="lbl" for="sess">Session</label>
+        <select id="sess"><option value="">All sessions</option></select>
+        <label class="chk" for="showLand"><input type="checkbox" id="showLand" checked> Show carried / idle</label>
+      </div>
+    </div>
+    <div class="legend">
+      <span class="key"><i style="background:var(--water)"></i>Water between the estimated banks</span>
+      <span class="key"><i style="background:var(--land)"></i>Land beyond the banks</span>
+      <span class="key"><i class="line"></i>Bank, from where the boat hit it</span>
+      <span class="key"><i class="dash" style="border-top-color:var(--lane)"></i>Lanes centred between the banks (WP1 → WP65)</span>
+      <span class="key"><i class="dash" style="border-top:1px dashed var(--muted)"></i>Lanes in the waypoint files now</span>
+      <span class="key"><i style="background:var(--manual)"></i>Under power, manual</span>
+      <span class="key"><i style="background:var(--auto)"></i>Under power, AUTO</span>
+      <span class="key"><b style="color:var(--bank);font-size:15px;line-height:1">×</b>Bank hit (faint: not used)</span>
+      <span class="key"><b style="font-size:13px;line-height:1">◌</b>Long stop on the bank (dashed: anomaly)</span>
+      <span class="key"><i class="carry"></i>Carried on land (not used)</span>
+      <span class="key"><i style="background:var(--muted)"></i>Idle (not used)</span>
+    </div>
+    <canvas id="map" aria-label="Course map with boat tracks and estimated banks"></canvas>
+    <div class="readout" id="readout">Hover the map to read the position and the distance to each bank.</div>
+    <p class="note">Drawn in course coordinates: left to right is WP1 → WP65, down is the right-hand side. Only RTK-fix positions (about 2 cm accuracy) are shown. Banks are modelled as straight lines parallel to the course, one channel width apart. Powered tracks drawn on the land are anomalies left out of the estimate.</p>
+  </section>
+
+  <div class="two">
+    <section class="card">
+      <h2>How far out the boat has been under power</h2>
+      <p class="note">For each 2 m station on the course: the furthest left and right the boat has been under its own power, over every log. The water reaches at least this far, so the banks lie outside this band.</p>
+      <canvas id="env" aria-label="Outermost powered positions per station"></canvas>
+    </section>
+    <section class="card">
+      <h2>Evidence</h2>
+      <div class="tablewrap"><table>
+        <thead><tr><th>What</th><th>From center lane</th><th>Where</th><th>When</th></tr></thead>
+        <tbody id="evid"></tbody>
+      </table></div>
+      <h2 style="margin-top:6px">Method</h2>
+      <ul id="method"></ul>
+    </section>
+  </div>
+</div>
+
+<script>
+const D = /*__DATA__*/null;
+(function () {
+  "use strict";
+  const $ = (id) => document.getElementById(id);
+  const css = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+  const B = D.banks, LB = B.left_bank.off_m, RB = B.right_bank.off_m;
+  const [V0, V1] = B.valid_along_m, CL = B.course_frame.length_m;
+  const LA = B.lanes_adjusted, LN = LA ? LA.off_m : B.lanes_off_m, LN0 = B.lanes_off_m;   // LN: drawn lanes; LN0: lanes the boat follows now
+  const OP = B.outermost_powered, PC = B.position_classes;
+  const sgn = (v, nd) => (v > 0 ? "+" : v < 0 ? "−" : "") + Math.abs(v).toFixed(nd);
+  const fmtSess = (id, t) => `${id.slice(0, 4)}-${id.slice(4, 6)}-${id.slice(6, 8)} ${t}`;
+  let view = "course", vscale = 2, sess = "", showLand = true, run = "";
+  const RUNS = D.runs || [];
+  const runBy = (l) => RUNS.find((r) => r.label === l);
+
+  $("subline").textContent = `Course ${CL.toFixed(1)} m on bearing ${B.course_frame.bearing_deg.toFixed(1)}° · ${B.sources.logs} logs · ${B.sources.rtk_fix_points.toLocaleString()} RTK-fix positions · built ${B.sources.built}`;
+
+  // ---------- summary ----------
+  const HITS = B.bank_hits || [];
+  const goodHits = (sd) => HITS.filter((h) => h.side === sd && !h.anomaly);
+  const contact = B.contacts.find((c) => !c.anomaly && (Math.abs(c.off - LB) < 0.3 || Math.abs(c.off - RB) < 0.3));
+  const pillFor = (sd, bk, other) => goodHits(sd).length >= 2 ? ["good", `✓ boat hit it ${goodHits(sd).length} times`]
+    : contact && Math.abs(contact.off - bk) < 0.3 ? ["good", `✓ boat pressed against it ${Math.round(contact.seconds / 60)} min`]
+    : ["warn", `one channel width from the ${other} bank`];
+  const leftPill = pillFor("left", LB, "right"), rightPill = pillFor("right", RB, "left");
+  [[sgn(LB, 2) + " m", "Left bank from center lane", leftPill],
+   [sgn(RB, 2) + " m", "Right bank from center lane", rightPill],
+   [B.channel_width_m.toFixed(1) + " m", B.channel_width_range_m
+      ? `Channel width, measured between the bank hits (${B.channel_width_range_m[0].toFixed(1)}–${B.channel_width_range_m[1].toFixed(1)} m from their spread; on-site estimate about ${B.channel_width_given_m} m)`
+      : `Channel width (given ${B.channel_width_given_m} m; data needs ≥ ${B.min_width_from_data_m.toFixed(2)} m)`, null],
+   [(LN.left - LB).toFixed(1) + " m · " + (RB - LN.right).toFixed(1) + " m", LA && Math.abs(LA.shift_m) > 0.01 ? `Left lane to left bank · right lane to right bank (lanes moved ${sgn(LA.shift_m, 2)} m to centre them)` : "Left lane to left bank · right lane to right bank", null],
+   [PC.powered.toLocaleString(), `Positions under power used (${PC.carried.toLocaleString()} carried and ${PC.idle.toLocaleString()} idle left out)`, null]]
+    .forEach(([v, k, pill]) => {
+      const d = document.createElement("div"); d.className = "stat";
+      const a = document.createElement("span"); a.className = "v"; a.textContent = v;
+      const b = document.createElement("span"); b.className = "k"; b.textContent = k;
+      d.append(a, b);
+      if (pill) { const p = document.createElement("span"); p.className = "pill " + pill[0]; p.textContent = pill[1]; d.appendChild(p); }
+      $("stats").appendChild(d);
+    });
+
+  // ---------- evidence + method ----------
+  const rows = [];
+  HITS.forEach((h) => rows.push([`${h.anomaly ? "Not used: " : ""}${h.side} bank hit${h.auto ? " in AUTO" : ""} (in at ${h.approach_deg}°, ${h.speed_in_mps.toFixed(1)} m/s${h.stuck_s >= 3 ? `, stuck ${Math.round(h.stuck_s)} s` : ""}${h.anomaly && h.why_not_used ? "; " + h.why_not_used : ""})`, h.off, h.along, fmtSess(h.session, h.time)]));
+  B.contacts.forEach((c) => rows.push([`${c.anomaly ? "Anomaly: " : ""}still ${Math.round(c.seconds / 60)} min with the motor pushing ${c.pushing_pct}% of the time`, c.off, c.along, fmtSess(c.session, c.time)]));
+  rows.push([`Furthest left under power${OP.left.off < LB - 0.1 ? " (anomaly, beyond the bank)" : ""}`, OP.left.off, OP.left.along, fmtSess(OP.left.session, OP.left.time)]);
+  rows.push([`Furthest right under power (${OP.right.auto ? "AUTO" : "manual"})`, OP.right.off, OP.right.along, fmtSess(OP.right.session, OP.right.time)]);
+  rows.forEach(([what, off, along, when]) => {
+    const tr = document.createElement("tr");
+    [[what], [sgn(off, 2) + " m", 1], [`${along.toFixed(1)} m along`, 1], [when, 1]]
+      .forEach(([v, num]) => { const td = document.createElement("td"); if (num) td.className = "num"; td.textContent = v; tr.appendChild(td); });
+    $("evid").appendChild(tr);
+  });
+  const bp = B.bank_path_check;
+  [
+    "Only RTK-fix positions are used. Float, DGPS and plain GPS positions can be metres off.",
+    "The logs keep recording while the boat is carried to the water or lifted out in manual mode. Positions are only used when the motor was on in the last second, or the boat was coasting up to 6 s after. Moving at walking pace with the motor off counts as carried, and standing still with the motor off as idle; both are left out.",
+    "Banks are estimated on the course itself (WP1 to WP65). Before WP1 is the launch area, where the motor often runs while people hold or lower the boat.",
+    "A bank hit is the boat heading out toward one side under power (at least 20° to the course line), stopping at its furthest point, reverse being used, and the boat moving back off within 20 s (it may sit stuck first). To rule out reverse turns in open water, it must also be the furthest out the boat has ever been under power within 6 m along the course. On each side the hits that agree within 0.5 m form the bank; the rest are not used.",
+    `${B.placement[0].toUpperCase() + B.placement.slice(1)}. The bank line is where the GPS antenna stopped, so the bow touches the bank slightly before the antenna reaches it.`,
+    B.channel_width_range_m
+      ? `The width is measured, not assumed: ${B.channel_width_m.toFixed(2)} m between the two banks, against an on-site estimate of about ${B.channel_width_given_m} m.`
+      : `The furthest right the boat has gone under power is ${sgn(OP.right.off, 2)} m, ${B.right_bank.room_m.toFixed(2)} m inside the right bank. Without the anomalies, the data needs a channel of at least ${B.min_width_from_data_m.toFixed(2)} m.`,
+    bp ? `The path the boat was carried along beside the right bank runs at ${sgn(bp.angle_deg, 2)}° to the course (${bp.scatter_m.toFixed(2)} m scatter), which supports the banks running parallel to the course.` : "",
+    LA && Math.abs(LA.shift_m) > 0.01 ? `The lanes are drawn centred between the banks: moved ${sgn(LA.shift_m, 2)} m with their ${(LN0.right - LN0.center).toFixed(2)} m spacing kept, leaving ${LA.room_to_bank_m.left.toFixed(2)} m and ${LA.room_to_bank_m.right.toFixed(2)} m to the banks. The boat still follows the lanes in left/center/right.csv (faint dashed); the centred waypoints are in course_banks.json.` : "",
+    `Offsets are at the GPS antenna. The hull reaches about ${B.boat_half_width_m} m further out (assumed half-beam; measure it).`,
+    ...B.notes,
+  ].filter(Boolean).forEach((t) => { const li = document.createElement("li"); li.textContent = t; $("method").appendChild(li); });
+
+  // ---------- AUTO runs ----------
+  const stratName = (s) => s.replace(/^\d+_/, "").replace(/_/g, " ");
+  if (!RUNS.length) { $("runCard").hidden = true; }
+  else {
+    const d = RUNS[0].session;
+    $("runDay").textContent = `· ${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6, 8)}, ${RUNS.length} runs of 30 s or more`;
+    [["", "All logs"], ...RUNS.map((r) => [r.label, `Run ${r.label}`])].forEach(([v, txt]) => {
+      const b = document.createElement("button"); b.type = "button"; b.dataset.r = v; b.textContent = txt;
+      b.setAttribute("aria-pressed", String(v === "")); $("runSeg").appendChild(b);
+    });
+    const fmtM = (v) => (v == null ? "—" : v.toFixed(2) + " m");
+    RUNS.forEach((r) => {
+      const tr = document.createElement("tr"); tr.tabIndex = 0; tr.dataset.r = r.label;
+      [[r.label], [r.start, 1], [r.duration_s.toFixed(1) + " s", 1], [r.wp ? `#${r.wp[0]} → #${r.wp[1]}` : "—", 1], [stratName(r.strategy)],
+       [r.speed_mps != null ? r.speed_mps.toFixed(2) + " m/s" : "—", 1], [r.full_throttle_pct + "%", 1], [fmtM(r.max_cte_m), 1],
+       [fmtM(r.min_to_left_m), 1], [fmtM(r.min_to_right_m), 1], [r.rtk_fix_pct + "%", 1], [r.end]]
+        .forEach(([v, num]) => { const td = document.createElement("td"); if (num) td.className = "num"; td.textContent = v; tr.appendChild(td); });
+      tr.addEventListener("click", () => selectRun(r.label));
+      tr.addEventListener("keydown", (e) => { if (e.key === "Enter") selectRun(r.label); });
+      $("runTable").appendChild(tr);
+    });
+    $("runSeg").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) selectRun(b.dataset.r); });
+  }
+  function selectRun(label) {
+    run = label;
+    $("runSeg").querySelectorAll("button").forEach((x) => x.setAttribute("aria-pressed", String(x.dataset.r === label)));
+    $("runTable").querySelectorAll("tr").forEach((tr) => { tr.style.background = tr.dataset.r === label ? "var(--grid)" : ""; });
+    const r = runBy(label);
+    $("runDetail").hidden = !r;
+    if (r) {
+      $("runTitle").textContent = `Run ${r.label} · ${r.start} · ${stratName(r.strategy)} · ${r.end}`;
+      view = "course";
+      $("viewSeg").querySelectorAll("button").forEach((x) => x.setAttribute("aria-pressed", String(x.dataset.v === "course")));
+    }
+    drawMap(); drawRunChart();
+  }
+
+  function drawRunChart() {
+    const r = runBy(run); if (!r) return;
+    const c = $("runChart"), H = 220, [ctx, W] = sizeCanvas(c, H);
+    const m = { l: 52, r: 12, t: 12, b: 30 }, pw = W - m.l - m.r, ph = H - m.t - m.b;
+    const x0 = -5, x1 = CL + 5, width = RB - LB, y0 = 0, y1 = width;
+    const X = (a) => m.l + (a - x0) / (x1 - x0) * pw, Y = (v) => m.t + (1 - (v - y0) / (y1 - y0)) * ph;
+    const ink = css("--ink"), muted = css("--muted");
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = css("--water"); ctx.fillRect(m.l, m.t, pw, ph);
+    ctx.strokeStyle = css("--grid"); ctx.lineWidth = 1; ctx.font = `11px ${css("--font-data")}`; ctx.fillStyle = muted;
+    const gx = niceStep(x1 - x0, 6), gy = niceStep(y1 - y0, 5);
+    for (let v = Math.ceil(x0 / gx) * gx; v <= x1; v += gx) { ctx.beginPath(); ctx.moveTo(X(v), m.t); ctx.lineTo(X(v), m.t + ph); ctx.stroke(); ctx.textAlign = "center"; ctx.fillText(+v.toFixed(0) + " m", X(v), H - 10); }
+    for (let v = 0; v <= y1 + 1e-9; v += gy) { ctx.beginPath(); ctx.moveTo(m.l, Y(v)); ctx.lineTo(m.l + pw, Y(v)); ctx.stroke(); ctx.textAlign = "right"; ctx.fillText(v.toFixed(0) + " m", m.l - 6, Y(v) + 4); }
+    // bank line at 0 and the half-beam danger strip
+    ctx.fillStyle = css("--land"); ctx.fillRect(m.l, Y(B.boat_half_width_m), pw, Y(0) - Y(B.boat_half_width_m));
+    ctx.strokeStyle = css("--bank"); ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(m.l, Y(0)); ctx.lineTo(m.l + pw, Y(0)); ctx.stroke();
+    const line = (fn, dash) => {
+      for (let i = 1; i < r.pts.length; i++) {
+        const p = r.pts[i - 1], q = r.pts[i];
+        if (Math.abs(q[1] - p[1]) > 3) continue;
+        const rtk = p[3] === 4 && q[3] === 4;
+        ctx.setLineDash(rtk ? dash : [1.5, 3]); ctx.strokeStyle = rtk ? ink : muted; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.moveTo(X(q[1] < x0 ? x0 : p[1]), Y(fn(p))); ctx.lineTo(X(q[1]), Y(fn(q))); ctx.stroke();
+      }
+      ctx.setLineDash([]);
+    };
+    ctx.save(); ctx.beginPath(); ctx.rect(m.l, m.t, pw, ph); ctx.clip();
+    line((p) => p[2] - LB, []);
+    line((p) => RB - p[2], [6, 4]);
+    // closest approaches
+    [[r.min_to_left_at, r.min_to_left_m, "left"], [r.min_to_right_at, r.min_to_right_m, "right"]].forEach(([a, v, side]) => {
+      if (a == null) return;
+      ctx.fillStyle = css("--surface"); ctx.beginPath(); ctx.arc(X(a), Y(v), 6, 0, 7); ctx.fill();
+      ctx.strokeStyle = ink; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(X(a), Y(v), 4.5, 0, 7); ctx.stroke();
+      ctx.fillStyle = ink; ctx.font = `12px ${css("--font-data")}`; ctx.textAlign = X(a) > m.l + pw - 140 ? "right" : "left";
+      ctx.fillText(`closest to ${side}: ${v.toFixed(2)} m`, X(a) + (ctx.textAlign === "left" ? 9 : -9), Math.max(m.t + 12, Y(v) - 8));
+    });
+    ctx.restore();
+    ctx.fillStyle = css("--bank"); ctx.textAlign = "left"; ctx.font = `11px ${css("--font-data")}`;
+    ctx.fillText("bank", m.l + 4, Y(0) - 4);
+    ctx.strokeStyle = css("--rule"); ctx.strokeRect(m.l + 0.5, m.t + 0.5, pw, ph);
+  }
+
+  // ---------- controls ----------
+  D.tracks.forEach((t) => { const o = document.createElement("option"); o.value = t.id; o.textContent = `${t.id.slice(4, 6)}/${t.id.slice(6, 8)} ${t.id.slice(9, 11)}:${t.id.slice(11, 13)}`; $("sess").appendChild(o); });
+  const seg = (id, attr, set) => $(id).addEventListener("click", (e) => {
+    const b = e.target.closest("button"); if (!b) return;
+    $(id).querySelectorAll("button").forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
+    set(b.dataset[attr]); drawMap();
+  });
+  seg("viewSeg", "v", (v) => { view = v; });
+  seg("scaleSeg", "s", (s) => { vscale = +s; });
+  $("sess").addEventListener("change", (e) => { sess = e.target.value; drawMap(); });
+  $("showLand").addEventListener("change", (e) => { showLand = e.target.checked; drawMap(); });
+
+  function niceStep(span, target) {
+    const raw = span / target, p = Math.pow(10, Math.floor(Math.log10(raw))), n = raw / p;
+    return (n < 1.5 ? 1 : n < 3.5 ? 2 : n < 7.5 ? 5 : 10) * p;
+  }
+  function sizeCanvas(c, h) {
+    const dpr = devicePixelRatio || 1, w = c.clientWidth;
+    c.width = Math.round(w * dpr); c.height = Math.round(h * dpr); c.style.height = h + "px";
+    const ctx = c.getContext("2d"); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    return [ctx, w];
+  }
+
+  // ---------- map ----------
+  let proj = null;
+  function drawMap() {
+    const c = $("map");
+    let x0, x1;
+    if (view === "course") { x0 = -30; x1 = CL + 12; }
+    else if (view === "straight") { x0 = V0; x1 = V1; }
+    else { x0 = Infinity; x1 = -Infinity; D.tracks.forEach((t) => t.pts.forEach((p) => { x0 = Math.min(x0, p[0]); x1 = Math.max(x1, p[0]); })); x0 -= 5; x1 += 5; }
+    let y0 = LB - 2, y1 = RB + 2;
+    if (!runBy(run)) D.tracks.forEach((t) => t.pts.forEach((p) => { if (p[0] >= x0 && p[0] <= x1 && (showLand || p[3] === 0)) { y0 = Math.min(y0, p[1] - 1); y1 = Math.max(y1, p[1] + 1); } }));
+    const W = c.clientWidth || 800, m = { l: 52, r: 14, t: 12, b: 30 }, pw = W - m.l - m.r;
+    const sx = pw / (x1 - x0);
+    let sy = sx * vscale, ph = (y1 - y0) * sy;
+    const maxPh = innerWidth < 600 ? 360 : 560;
+    if (ph > maxPh) { sy = maxPh / (y1 - y0); ph = maxPh; }
+    if (ph < 140) { const pad = (140 / sy - (y1 - y0)) / 2; y0 -= pad; y1 += pad; ph = 140; }
+    const H = Math.round(ph + m.t + m.b);
+    const [ctx] = sizeCanvas(c, H);
+    const X = (a) => m.l + (a - x0) * sx, Y = (o) => m.t + (o - y0) * sy;   // down = right
+    proj = { x0, x1, y0, y1, m, sx, sy };
+    const ink = css("--ink"), muted = css("--muted"), grid = css("--grid"), bank = css("--bank");
+    ctx.clearRect(0, 0, W, H);
+    ctx.save(); ctx.beginPath(); ctx.rect(m.l, m.t, pw, ph); ctx.clip();
+    ctx.fillStyle = css("--unmapped"); ctx.fillRect(m.l, m.t, pw, ph);
+    const a0 = Math.max(x0, V0), a1 = Math.min(x1, V1);
+    if (a1 > a0) {
+      ctx.fillStyle = css("--land"); ctx.fillRect(X(a0), m.t, X(a1) - X(a0), ph);
+      ctx.fillStyle = css("--water"); ctx.fillRect(X(a0), Y(LB), X(a1) - X(a0), Y(RB) - Y(LB));
+      ctx.strokeStyle = bank; ctx.lineWidth = 3;
+      [LB, RB].forEach((o) => { ctx.beginPath(); ctx.moveTo(X(a0), Y(o)); ctx.lineTo(X(a1), Y(o)); ctx.stroke(); });
+    }
+    ctx.strokeStyle = grid; ctx.lineWidth = 1;
+    const gx = niceStep(x1 - x0, 10), gy = niceStep(y1 - y0, 6);
+    for (let v = Math.ceil(x0 / gx) * gx; v <= x1; v += gx) { ctx.beginPath(); ctx.moveTo(X(v), m.t); ctx.lineTo(X(v), m.t + ph); ctx.stroke(); }
+    for (let v = Math.ceil(y0 / gy) * gy; v <= y1; v += gy) { ctx.beginPath(); ctx.moveTo(m.l, Y(v)); ctx.lineTo(m.l + pw, Y(v)); ctx.stroke(); }
+    // racing lanes: dashed lane lines with a waypoint tick every 10 waypoints
+    const laneCol = css("--lane"), wpN = B.course_frame.waypoints || 65, wpStep = CL / (wpN - 1);
+    if (LA && Math.abs(LA.shift_m) > 0.01) {
+      ctx.setLineDash([3, 4]); ctx.strokeStyle = muted; ctx.lineWidth = 1; ctx.globalAlpha = 0.8;
+      [LN0.left, LN0.center, LN0.right].forEach((o) => { ctx.beginPath(); ctx.moveTo(X(0), Y(o)); ctx.lineTo(X(CL), Y(o)); ctx.stroke(); });
+      ctx.globalAlpha = 1;
+    }
+    ctx.setLineDash([7, 5]); ctx.strokeStyle = laneCol; ctx.lineWidth = 1.75;
+    [LN.left, LN.center, LN.right].forEach((o) => { ctx.beginPath(); ctx.moveTo(X(0), Y(o)); ctx.lineTo(X(CL), Y(o)); ctx.stroke(); });
+    ctx.setLineDash([]); ctx.lineWidth = 1.5;
+    for (let k = 10; k < wpN; k += 10) {
+      const a = (k - 1) * wpStep;
+      if (a < x0 || a > x1) continue;
+      ctx.beginPath(); ctx.moveTo(X(a), Y(LN.left) - 4); ctx.lineTo(X(a), Y(LN.right) + 4); ctx.stroke();
+    }
+    ctx.strokeStyle = ink; ctx.lineWidth = 1.5;
+    [0, CL].forEach((a) => { ctx.beginPath(); ctx.moveTo(X(a), Y(LN.left - 0.8)); ctx.lineTo(X(a), Y(LN.right + 0.8)); ctx.stroke(); });
+    // tracks: powered by mode colour; carried dashed; idle faint
+    const colM = css("--manual"), colA = css("--auto"), colC = css("--carried");
+    ctx.lineJoin = "round"; ctx.lineCap = "round";
+    const selRun = runBy(run);
+    if (selRun) {
+      // one AUTO run alone: RTK-fix solid, other fixes dotted; start and closest approaches marked
+      for (let i = 1; i < selRun.pts.length; i++) {
+        const p = selRun.pts[i - 1], q = selRun.pts[i];
+        if (Math.hypot(q[1] - p[1], q[2] - p[2]) > 3) continue;
+        const rtk = p[3] === 4 && q[3] === 4;
+        ctx.setLineDash(rtk ? [] : [1.5, 3]); ctx.strokeStyle = rtk ? colA : muted; ctx.lineWidth = rtk ? 2.5 : 2;
+        ctx.beginPath(); ctx.moveTo(X(p[1]), Y(p[2])); ctx.lineTo(X(q[1]), Y(q[2])); ctx.stroke();
+      }
+      ctx.setLineDash([]);
+      const s0 = selRun.pts[0], s1 = selRun.pts[selRun.pts.length - 1];
+      ctx.fillStyle = colA; ctx.beginPath(); ctx.arc(X(s0[1]), Y(s0[2]), 5, 0, 7); ctx.fill();
+      ctx.strokeStyle = ink; ctx.lineWidth = 2; ctx.strokeRect(X(s1[1]) - 4, Y(s1[2]) - 4, 8, 8);
+      [[selRun.min_to_left_at, selRun.min_to_left_m, LB], [selRun.min_to_right_at, selRun.min_to_right_m, RB]].forEach(([a, v, bankOff]) => {
+        if (a == null) return;
+        const p = selRun.pts.reduce((best, q) => (Math.abs(q[1] - a) < Math.abs(best[1] - a) ? q : best), selRun.pts[0]);
+        ctx.setLineDash([2, 2]); ctx.strokeStyle = ink; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(X(p[1]), Y(p[2])); ctx.lineTo(X(p[1]), Y(bankOff)); ctx.stroke(); ctx.setLineDash([]);
+        ctx.fillStyle = ink; ctx.font = `12px ${css("--font-data")}`; ctx.textAlign = "left";
+        ctx.fillText(`${v.toFixed(2)} m`, X(p[1]) + 5, (Y(p[2]) + Y(bankOff)) / 2 + 4);
+      });
+    }
+    if (!selRun) D.tracks.forEach((t) => {
+      const focus = !sess || t.id === sess;
+      const base = sess ? (focus ? 0.95 : 0.07) : 0.5;
+      for (let i = 1; i < t.pts.length; i++) {
+        const p = t.pts[i - 1], q = t.pts[i];
+        if (Math.hypot(q[0] - p[0], q[1] - p[1]) > 3) continue;
+        if (Math.max(p[0], q[0]) < x0 || Math.min(p[0], q[0]) > x1) continue;
+        const cls = q[3];
+        if (cls !== 0 && !showLand) continue;
+        if (cls === 0) { ctx.setLineDash([]); ctx.strokeStyle = q[2] ? colA : colM; ctx.globalAlpha = base; ctx.lineWidth = focus && sess ? 2 : 1.5; }
+        else if (cls === 1) { ctx.setLineDash([4, 3]); ctx.strokeStyle = colC; ctx.globalAlpha = base; ctx.lineWidth = 1.5; }
+        else { ctx.setLineDash([]); ctx.strokeStyle = muted; ctx.globalAlpha = base * 0.5; ctx.lineWidth = 1; }
+        ctx.beginPath(); ctx.moveTo(X(p[0]), Y(p[1])); ctx.lineTo(X(q[0]), Y(q[1])); ctx.stroke();
+      }
+    });
+    ctx.setLineDash([]); ctx.globalAlpha = 1;
+    // contact markers (ring; dashed when an anomaly) and bank hits (cross; faint when not used)
+    B.contacts.forEach((ct) => {
+      if (selRun || ct.along < x0 || ct.along > x1) return;
+      const x = X(ct.along), y = Y(ct.off);
+      ctx.fillStyle = css("--surface"); ctx.beginPath(); ctx.arc(x, y, 8, 0, 7); ctx.fill();
+      ctx.strokeStyle = ink; ctx.lineWidth = 2; ctx.setLineDash(ct.anomaly ? [3, 3] : []);
+      ctx.beginPath(); ctx.arc(x, y, 6, 0, 7); ctx.stroke(); ctx.setLineDash([]);
+    });
+    HITS.forEach((h) => {
+      if (h.along < x0 || h.along > x1) return;
+      const x = X(h.along), y = Y(h.off), r = 6;
+      ctx.globalAlpha = h.anomaly ? 0.4 : 1;
+      ctx.fillStyle = css("--surface"); ctx.beginPath(); ctx.arc(x, y, r + 3, 0, 7); ctx.fill();
+      ctx.strokeStyle = bank; ctx.lineWidth = 2.5;
+      ctx.beginPath(); ctx.moveTo(x - r, y - r); ctx.lineTo(x + r, y + r); ctx.moveTo(x + r, y - r); ctx.lineTo(x - r, y + r); ctx.stroke();
+      ctx.globalAlpha = 1;
+    });
+    ctx.restore();
+    ctx.font = `12px ${css("--font-data")}`;
+    if (a1 > a0) {
+      ctx.fillStyle = bank; ctx.textAlign = "left";
+      const lx = Math.max(m.l + 6, X(a0) + 6);
+      ctx.fillText(`Left bank ${sgn(LB, 2)} m`, lx, Y(LB) - 6);
+      ctx.fillText(`Right bank ${sgn(RB, 2)} m`, lx, Y(RB) + 16);
+    }
+    ctx.fillStyle = ink; ctx.textAlign = "center";
+    if (0 >= x0 && 0 <= x1) ctx.fillText("WP1", X(0), Y(LN.left - 0.8) - 4);
+    if (CL >= x0 && CL <= x1) ctx.fillText(`WP${wpN}`, X(CL), Y(LN.left - 0.8) - 4);
+    // waypoint numbers and lane names (names just past WP65, or inside the start when there is no room)
+    ctx.font = `11px ${css("--font-data")}`; ctx.fillStyle = laneCol;
+    for (let k = 10; k < wpN; k += 10) {
+      const a = (k - 1) * wpStep;
+      if (a > x0 + 2 && a < x1 - 2) ctx.fillText(`WP${k}`, X(a), Y(LN.left) - 7);
+    }
+    ctx.font = `600 12px ${css("--font-body")}`;
+    const roomRight = X(x1) - X(CL) > 90;
+    ctx.textAlign = roomRight ? "left" : "right";
+    const lx = roomRight ? X(CL) + 8 : Math.min(X(x1), X(CL)) - 8;
+    [["Left lane", LN.left], ["Center lane", LN.center], ["Right lane", LN.right]].forEach(([n, o]) => {
+      if (Y(o) > m.t + 6 && Y(o) < m.t + ph - 2) {
+        ctx.fillStyle = css("--surface"); ctx.globalAlpha = 0.8;
+        const w = ctx.measureText(n).width;
+        ctx.fillRect(roomRight ? lx - 3 : lx - w - 3, Y(o) - 9, w + 6, 14); ctx.globalAlpha = 1;
+        ctx.fillStyle = laneCol; ctx.fillText(n, lx, Y(o) + 4);
+      }
+    });
+    ctx.font = `12px ${css("--font-data")}`;
+    ctx.fillStyle = muted;
+    for (let v = Math.ceil(x0 / gx) * gx; v <= x1; v += gx) ctx.fillText(+v.toFixed(0) + " m", X(v), H - 10);
+    ctx.textAlign = "right";
+    for (let v = Math.ceil(y0 / gy) * gy; v <= y1; v += gy) ctx.fillText(sgn(v, 0), m.l - 6, Y(v) + 4);
+    ctx.textAlign = "left"; ctx.fillText("right ↓", 4, m.t + ph);
+    ctx.strokeStyle = css("--rule"); ctx.lineWidth = 1; ctx.strokeRect(m.l + 0.5, m.t + 0.5, pw, ph);
+  }
+  $("map").addEventListener("pointermove", (e) => {
+    if (!proj) return;
+    const r = $("map").getBoundingClientRect(), px = e.clientX - r.left, py = e.clientY - r.top;
+    const a = proj.x0 + (px - proj.m.l) / proj.sx, o = proj.y0 + (py - proj.m.t) / proj.sy;
+    if (a < proj.x0 || a > proj.x1 || o < proj.y0 || o > proj.y1) return;
+    let txt = `along ${a.toFixed(1)} m · ${o >= 0 ? "right" : "left"} ${Math.abs(o).toFixed(2)} m of center lane`;
+    if (a >= 0 && a <= CL) {
+      const lanes = [["left", LN.left], ["center", LN.center], ["right", LN.right]];
+      const [ln, lo] = lanes.reduce((b, l) => (Math.abs(o - l[1]) < Math.abs(o - b[1]) ? l : b));
+      const d = o - lo;
+      txt += ` · nearest ${ln} lane, ${Math.abs(d).toFixed(2)} m ${d >= 0 ? "right" : "left"} of it`;
+    }
+    if (a >= V0 && a <= V1) {
+      const dl = o - LB, dr = RB - o;
+      txt += (dl < 0 || dr < 0) ? " · on land beyond the estimated bank" : ` · ${dl.toFixed(2)} m to left bank · ${dr.toFixed(2)} m to right bank`;
+    } else txt += " · banks not modelled here (waterway bends)";
+    $("readout").textContent = txt;
+  });
+
+  // ---------- envelope chart ----------
+  function drawEnv() {
+    const c = $("env"), env = B.envelope;
+    const H = 280, [ctx, W] = sizeCanvas(c, H);
+    const m = { l: 52, r: 12, t: 12, b: 30 }, pw = W - m.l - m.r, ph = H - m.t - m.b;
+    const x0 = -5, x1 = CL + 5, y0 = LB - 1.5, y1 = RB + 1.5;
+    const X = (a) => m.l + (a - x0) / (x1 - x0) * pw, Y = (o) => m.t + (o - y0) / (y1 - y0) * ph;
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = css("--land"); ctx.fillRect(m.l, m.t, pw, ph);
+    ctx.fillStyle = css("--water"); ctx.fillRect(m.l, Y(LB), pw, Y(RB) - Y(LB));
+    ctx.strokeStyle = css("--grid"); ctx.lineWidth = 1;
+    const gx = niceStep(x1 - x0, 6), gy = niceStep(y1 - y0, 6);
+    ctx.font = `11px ${css("--font-data")}`; ctx.fillStyle = css("--muted");
+    for (let v = Math.ceil(x0 / gx) * gx; v <= x1; v += gx) { ctx.beginPath(); ctx.moveTo(X(v), m.t); ctx.lineTo(X(v), m.t + ph); ctx.stroke(); ctx.textAlign = "center"; ctx.fillText(+v.toFixed(0) + " m", X(v), H - 10); }
+    for (let v = Math.ceil(y0 / gy) * gy; v <= y1; v += gy) { ctx.beginPath(); ctx.moveTo(m.l, Y(v)); ctx.lineTo(m.l + pw, Y(v)); ctx.stroke(); ctx.textAlign = "right"; ctx.fillText(sgn(v, 0), m.l - 6, Y(v) + 4); }
+    ctx.fillStyle = css("--manual"); ctx.globalAlpha = 0.4;
+    env.forEach((e) => ctx.fillRect(X(e.along - 1), Y(e.left), Math.max(1, X(e.along + 1) - X(e.along - 1) - 1), Math.max(1.5, Y(e.right) - Y(e.left))));
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = css("--bank"); ctx.lineWidth = 3;
+    [LB, RB].forEach((o) => { ctx.beginPath(); ctx.moveTo(m.l, Y(o)); ctx.lineTo(m.l + pw, Y(o)); ctx.stroke(); });
+    if (LA && Math.abs(LA.shift_m) > 0.01) {
+      ctx.setLineDash([3, 4]); ctx.strokeStyle = css("--muted"); ctx.lineWidth = 1;
+      [LN0.left, LN0.center, LN0.right].forEach((o) => { ctx.beginPath(); ctx.moveTo(X(0), Y(o)); ctx.lineTo(X(CL), Y(o)); ctx.stroke(); });
+    }
+    ctx.setLineDash([7, 5]); ctx.strokeStyle = css("--lane"); ctx.lineWidth = 1.5;
+    [LN.left, LN.center, LN.right].forEach((o) => { ctx.beginPath(); ctx.moveTo(X(0), Y(o)); ctx.lineTo(X(CL), Y(o)); ctx.stroke(); });
+    ctx.setLineDash([]);
+    ctx.fillStyle = css("--lane"); ctx.textAlign = "right"; ctx.font = `600 11px ${css("--font-body")}`;
+    [["L", LN.left], ["C", LN.center], ["R", LN.right]].forEach(([n, o]) => ctx.fillText(n, m.l + pw - 4, Y(o) - 3));
+    ctx.fillStyle = css("--bank"); ctx.textAlign = "left"; ctx.font = `12px ${css("--font-data")}`;
+    ctx.fillText("left bank", m.l + 6, Y(LB) - 6); ctx.fillText("right bank", m.l + 6, Y(RB) + 15);
+    ctx.fillStyle = css("--muted"); ctx.fillText("right ↓", 4, m.t + ph);
+    ctx.strokeStyle = css("--rule"); ctx.strokeRect(m.l + 0.5, m.t + 0.5, pw, ph);
+  }
+
+  const redraw = () => { drawMap(); drawEnv(); drawRunChart(); };
+  let rt = null;
+  new ResizeObserver(() => { clearTimeout(rt); rt = setTimeout(redraw, 100); }).observe(document.querySelector(".page"));
+  matchMedia("(prefers-color-scheme: dark)").addEventListener("change", redraw);
+  new MutationObserver(redraw).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+  redraw();
+})();
+</script>
