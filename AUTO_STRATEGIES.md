@@ -67,9 +67,20 @@ It also uses the same hardware calibration as multipath_boat.py. At start-up it
 reads `hardware`, `rc`, `pwm`, `mode_switch`, `autonomous` and `navigation` from
 `calibration.json`, and it refuses to start without that file.
 
-- **Hardware:** the serial ports and baud rates come from `hardware`. `"auto"`
-  uses the same USB-ID detection as multipath_boat.py. The PCA9685 bus, address,
-  frequency, servo channel and ESC channel also come from `hardware`.
+- **Hardware:** boat.py talks to the hardware with multipath_boat.py's own
+  drivers, so both programs behave the same way. The serial ports, baud rates,
+  PCA9685 bus, address, frequency, servo channel and ESC channel come from
+  `hardware`.
+  - **Motor and steering:** `PCA9685Driver`, a direct I2C driver that takes
+    microseconds. It needs `smbus2` (`pip3 install smbus2`).
+  - **RC:** `ArduinoRCReader` reads the Arduino's `CH1,CH2` lines in its own thread.
+  - **GPS:** `ZEDF9PReceiver` reads the ZED-F9P in its own thread, and
+    `NGII_NtripClient` injects the RTCM corrections through the same receiver.
+    The NTRIP login is in `NTRIP_CONFIG` in multipath_boat.py, not in boat.py.
+  - **Ports:** `"auto"` uses the same USB-ID detection as multipath_boat.py. A
+    background thread opens the ports and reopens them after an unplug, so a
+    reconnect never stalls the control loop. A GPS port that stays silent for 5 s
+    is reopened.
 - **PWM:** the web page and the controllers keep boat.py's internal scale
   (`CENTER` 4500, `STOP` 4443, `max_GO`). Only the output to the PCA9685 is
   converted:

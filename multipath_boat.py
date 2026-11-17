@@ -451,6 +451,7 @@ class ZEDF9PReceiver:
         # after a no-fix GGA, which must not be mixed into the new USB sample.
         self.latest_gps_sample = None
         self.last_fix_time = 0.0
+        self.last_rx_mono = 0.0           # Last serial line of any kind (for link watchdogs)
         self.rtcm_bytes_written = 0
         self.rtcm_write_errors = 0
         self.last_rtcm_write_error = ""
@@ -655,6 +656,7 @@ class ZEDF9PReceiver:
                 raw = self.ser.readline()
                 if not raw:
                     continue
+                self.last_rx_mono = time.monotonic()
                 self.ingest_nmea_line(raw.decode("ascii", errors="ignore").strip())
             except Exception:
                 time.sleep(0.02)
