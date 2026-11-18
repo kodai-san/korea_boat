@@ -9,3 +9,5 @@
 2026-11-17T20:55:25 UTC INFO [NTRIP] Connection attempt 2: rts2.ngii.go.kr:2101/VRS-RTCM32
 2026-11-17T20:55:31 UTC INFO [DIAGNOSTICS] mode=MANUAL, fix_quality=0, {'gps_valid': 0, 'gps_age_sec': 999.0, 'ntrip_connected': 0, 'ntrip_status': 'connecting', 'ntrip_connection_attempts': 2, 'ntrip_last_response': '', 'ntrip_last_error': 'tcp_connect: timed out', 'rtcm_bytes_rx': 0, 'rtcm_rx_age_sec': '', 'ntrip_gga_sent': 0, 'rtcm_bytes_written': 0, 'rtcm_write_errors': 0, 'rtcm_last_write_error': '', 'gps_sog_mps': 0.0, 'gps_cog_deg': '', 'gps_diff_age_sec': '', 'gps_alt_m': '', 'gps_utc': '205531.40'}
 2026-11-17T20:55:33 UTC WARNING [NTRIP RECONNECT PENDING] phase=tcp_connect, timeout: timed out
+2026-11-17T20:55:38 UTC INFO [NTRIP STOP] {'connected': False, 'status': 'stopping', 'connection_attempts': 2, 'last_response': '', 'last_error': 'tcp_connect: timed out', 'rtcm_bytes_rx': 0, 'rtcm_rx_age_sec': None, 'gga_sent': 0}
+2026-11-17T20:55:38 UTC INFO [SESSION END]
